@@ -1,0 +1,31 @@
+# Cokra Core
+# Main orchestrator for the AI agent team system
+
+[package]
+name = "cokra-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Internal dependencies
+cokra-protocol = { path = "../protocol" }
+cokra-config = { path = "../config" }
+cokra-state = { path = "../state" }
+
+# External dependencies
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+clap = { workspace = true }
+sqlx = { workspace = true }
+rmcp = { workspace = true }
+ratatui = { workspace = true, optional = true }
+
+[features]
+default = []
+tui = ["ratatui"]
+mcp = ["rmcp"]

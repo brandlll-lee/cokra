@@ -1,0 +1,11 @@
+# Cokra Utils - Cancel
+# Cancellation utilities
+
+[package]
+name = "cokra-cancel"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }

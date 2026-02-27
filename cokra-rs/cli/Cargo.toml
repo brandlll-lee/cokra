@@ -1,0 +1,34 @@
+# Cokra CLI
+# Command-line interface for Cokra
+
+[package]
+name = "cokra"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "cokra"
+path = "src/main.rs"
+
+[dependencies]
+# Core
+cokra-core = { path = "../core" }
+cokra-config = { path = "../config" }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Runtime
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Terminal UI (optional)
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
+
+[features]
+default = []
+tui = ["ratatui", "crossterm", "cokra-core/tui"]

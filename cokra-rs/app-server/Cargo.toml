@@ -1,0 +1,24 @@
+# Cokra App Server
+# JSON-RPC server for IDE/desktop integrations
+
+[package]
+name = "cokra-app-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Core
+cokra-core = { path = "../core" }
+cokra-protocol = { path = "../protocol" }
+cokra-app-server-protocol = { path = "../app-server-protocol" }
+
+# Runtime
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

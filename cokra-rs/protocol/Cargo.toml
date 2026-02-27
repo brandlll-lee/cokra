@@ -1,0 +1,16 @@
+# Cokra Protocol
+# Protocol definitions and types for Cokra
+
+[package]
+name = "cokra-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Runtime
+tokio = { version = "1.49", features = ["sync"] }

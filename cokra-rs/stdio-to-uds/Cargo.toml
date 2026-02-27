@@ -1,0 +1,17 @@
+# Cokra Stdio to UDS
+# stdio to Unix domain socket bridge
+
+[package]
+name = "cokra-stdio-to-uds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Runtime
+tokio = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

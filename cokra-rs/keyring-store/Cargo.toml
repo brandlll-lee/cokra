@@ -1,0 +1,17 @@
+# Cokra Keyring Store
+# Secure credential storage using OS keyring
+
+[package]
+name = "cokra-keyring-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Keyring
+keyring = "3.6"
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

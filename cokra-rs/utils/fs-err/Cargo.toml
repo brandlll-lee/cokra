@@ -1,0 +1,12 @@
+# Cokra Utils - FS Err
+# Filesystem error utilities
+
+[package]
+name = "cokra-fs-err"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

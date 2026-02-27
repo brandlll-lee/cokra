@@ -1,0 +1,11 @@
+# Cokra Utils - Cargo Bin
+# Cargo binary utilities
+
+[package]
+name = "cokra-cargo-bin"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+which = "6.0"

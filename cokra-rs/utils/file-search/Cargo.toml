@@ -1,0 +1,13 @@
+# Cokra Utils - File Search
+# File search utilities
+
+[package]
+name = "cokra-file-search"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nucleo = "0.5"
+ignore = "0.4"
+anyhow = { workspace = true }
+tracing = { workspace = true }

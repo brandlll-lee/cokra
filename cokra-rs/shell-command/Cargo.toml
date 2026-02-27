@@ -1,0 +1,17 @@
+# Cokra Shell Command
+# Shell command parsing and safety
+
+[package]
+name = "cokra-shell-command"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Parsing
+nom = "7.1"
+
+# Utilities
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

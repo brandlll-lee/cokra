@@ -1,0 +1,12 @@
+# Cokra Utils - Network Proxy
+# Network proxy utilities
+
+[package]
+name = "cokra-network-proxy"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,20 @@
+# Cokra File Search
+# Fuzzy file searching using nucleo
+
+[package]
+name = "cokra-file-search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Fuzzy matching
+nucleo = "0.5"
+
+# Runtime
+tokio = { workspace = true }
+
+# Utilities
+anyhow = { workspace = true }
+tracing = { workspace = true }
+ignore = "0.4"

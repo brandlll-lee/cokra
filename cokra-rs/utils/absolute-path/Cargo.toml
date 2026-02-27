@@ -1,0 +1,10 @@
+# Cokra Utils - Absolute Path
+# Absolute path utilities
+
+[package]
+name = "cokra-absolute-path"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }

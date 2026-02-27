@@ -1,0 +1,24 @@
+# Cokra State
+# SQLite-based state persistence
+
+[package]
+name = "cokra-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Database
+sqlx = { workspace = true }
+
+# Runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

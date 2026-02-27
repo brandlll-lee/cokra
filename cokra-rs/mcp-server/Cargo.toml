@@ -1,0 +1,28 @@
+# Cokra MCP Server
+# Model Context Protocol server implementation
+
+[package]
+name = "cokra-mcp-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# MCP
+rmcp = { workspace = true }
+
+# Core
+cokra-protocol = { path = "../protocol" }
+cokra-config = { path = "../config" }
+
+# Runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,17 @@
+# Cokra Linux Sandbox
+# Landlock-based sandboxing for Linux
+
+[package]
+name = "cokra-linux-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Sandbox
+landlock = "0.4"
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

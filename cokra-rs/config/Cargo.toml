@@ -1,0 +1,19 @@
+# Cokra - Configuration Management
+# Layered configuration system for Cokra
+
+[package]
+name = "cokra-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Workspace dependencies
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

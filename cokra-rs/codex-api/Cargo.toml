@@ -1,0 +1,20 @@
+# Cokra Codex API
+# API bridge layer
+
+[package]
+name = "codex-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Internal
+codex-client = { path = "../codex-client" }
+
+# Runtime
+tokio = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

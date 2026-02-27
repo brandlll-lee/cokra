@@ -1,0 +1,14 @@
+# Cokra Apply Patch
+# Patch application utility
+
+[package]
+name = "cokra-apply-patch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

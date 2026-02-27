@@ -1,0 +1,12 @@
+# Cokra Utils - Git
+# Git utilities
+
+[package]
+name = "cokra-git"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+git2 = "0.19"
+anyhow = { workspace = true }
+tracing = { workspace = true }

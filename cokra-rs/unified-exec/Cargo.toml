@@ -1,0 +1,17 @@
+# Cokra Unified Execution
+# Unified process manager for long-running commands
+
+[package]
+name = "cokra-unified-exec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Runtime
+tokio = { workspace = true, features = ["process", "sync", "time"] }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

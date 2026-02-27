@@ -1,0 +1,25 @@
+# Cokra Terminal UI
+# Interactive terminal-based interface
+
+[package]
+name = "cokra-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Core
+cokra-core = { path = "../core" }
+cokra-protocol = { path = "../protocol" }
+
+# UI framework
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Utilities
+anyhow = { workspace = true }
+tracing = { workspace = true }
+unicode-segmentation = "1.12"

@@ -1,0 +1,18 @@
+# Configuration file for Rust linter Clippy
+# More strict lints for better code quality
+
+# Deny unsafe code unless explicitly needed
+unsafe_code = "forbid"
+
+# Deny common pitfalls
+expect_used = "deny"
+unwrap_used = "deny"
+redundant_clone = "deny"
+needless_collect = "deny"
+
+# Warn on cognitive complexity
+cognitive_complexity = "warn"
+
+# Warn on too many arguments
+too_many_arguments = "threshold"
+threshold = 7

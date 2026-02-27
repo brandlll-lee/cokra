@@ -1,0 +1,11 @@
+# Cokra Utils - Path
+# Path utilities
+
+[package]
+name = "cokra-path"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+tracing = { workspace = true }
