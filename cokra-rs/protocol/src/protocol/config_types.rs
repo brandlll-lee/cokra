@@ -2,6 +2,7 @@
 // Types used in protocol for configuration
 
 use serde::{Deserialize, Serialize};
+use crate::ModeKind;
 
 /// Ask for approval policy
 #[derive(Debug, Clone, Serialize, Deserialize)]

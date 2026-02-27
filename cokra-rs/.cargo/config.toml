@@ -10,10 +10,6 @@ jobs = 4
 opt-level = 0
 split-debuginfo = "unpacked"
 
-[profile.dev.package."*]
-# Optimize dependencies even in dev mode
-opt-level = 2
-
 [profile.release]
 # Maximum optimization for release builds
 opt-level = 3

@@ -1,0 +1,10 @@
+/mnt/f/CodeHub/leehub/cokra/cokra-rs/target/debug/deps/fluent_langneg-da43e0daca6f9367.d: /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/lib.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/accepted_languages.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/negotiate/mod.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/negotiate/likely_subtags.rs
+
+/mnt/f/CodeHub/leehub/cokra/cokra-rs/target/debug/deps/libfluent_langneg-da43e0daca6f9367.rlib: /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/lib.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/accepted_languages.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/negotiate/mod.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/negotiate/likely_subtags.rs
+
+/mnt/f/CodeHub/leehub/cokra/cokra-rs/target/debug/deps/libfluent_langneg-da43e0daca6f9367.rmeta: /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/lib.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/accepted_languages.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/negotiate/mod.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/negotiate/likely_subtags.rs
+
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/lib.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/accepted_languages.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/negotiate/mod.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fluent-langneg-0.13.1/src/negotiate/likely_subtags.rs:

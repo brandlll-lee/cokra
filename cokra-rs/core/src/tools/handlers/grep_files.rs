@@ -12,7 +12,7 @@ impl ToolHandler for GrepFilesHandler {
         ToolKind::Function
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
         let args: GrepFilesArgs = invocation.payload.parse_arguments()?;
 
         // TODO: Implement grep

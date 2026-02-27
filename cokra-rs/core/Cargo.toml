@@ -22,7 +22,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 clap = { workspace = true }
 sqlx = { workspace = true }
-rmcp = { workspace = true }
+rmcp = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true }
 uuid = { workspace = true }
 dirs = "5.0"

@@ -1,0 +1,10 @@
+# exec-server
+[package]
+name = "cokra-exec_server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }

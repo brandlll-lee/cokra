@@ -12,7 +12,7 @@ impl ToolHandler for DynamicToolHandler {
         ToolKind::Function
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
         // Dynamic tools are handled by the orchestrator
         Ok(ToolOutput::success("Dynamic tool executed".to_string()))
     }

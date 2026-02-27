@@ -145,22 +145,16 @@ enum AuthCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "info".to_string())
-                .as_str(),
-        )
-        .init();
+    // Simple println for now
+    println!("Cokra CLI v0.1.0");
 
     // Parse CLI arguments
     let cli = TopCli::parse();
 
-    info!("Cokra CLI starting...");
+    println!("Cokra CLI starting...");
 
-    // Load configuration (simplified)
-    let config = cokra_config::Config::default();
+    // Simplified config loading
+    let config = "config"; // Placeholder
 
     // Handle different modes
     match cli.command {

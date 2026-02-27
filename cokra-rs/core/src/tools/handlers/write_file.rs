@@ -16,7 +16,7 @@ impl ToolHandler for WriteFileHandler {
         true
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
         let args: WriteFileArgs = invocation.payload.parse_arguments()?;
 
         // TODO: Implement file writing

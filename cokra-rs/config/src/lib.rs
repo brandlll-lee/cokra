@@ -8,5 +8,5 @@ pub mod profile;
 
 pub use types::*;
 pub use loader::ConfigLoader;
-pub use layered::{Config, LayeredConfig};
+pub use layered::LayeredConfig;
 pub use profile::ConfigProfile;

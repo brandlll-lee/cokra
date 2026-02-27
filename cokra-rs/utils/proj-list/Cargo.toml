@@ -1,0 +1,6 @@
+[package]
+name = "cokra-proj-list"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

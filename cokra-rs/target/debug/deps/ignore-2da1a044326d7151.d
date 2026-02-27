@@ -1,0 +1,12 @@
+/mnt/f/CodeHub/leehub/cokra/cokra-rs/target/debug/deps/ignore-2da1a044326d7151.d: /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/lib.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/default_types.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/dir.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/gitignore.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/overrides.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/pathutil.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/types.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/walk.rs
+
+/mnt/f/CodeHub/leehub/cokra/cokra-rs/target/debug/deps/libignore-2da1a044326d7151.rmeta: /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/lib.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/default_types.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/dir.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/gitignore.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/overrides.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/pathutil.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/types.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/walk.rs
+
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/lib.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/default_types.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/dir.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/gitignore.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/overrides.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/pathutil.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/types.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ignore-0.4.25/src/walk.rs:

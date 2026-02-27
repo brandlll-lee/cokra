@@ -1,0 +1,6 @@
+[package]
+name = "cokra-runfiles"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

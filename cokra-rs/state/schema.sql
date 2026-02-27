@@ -1,19 +1,22 @@
 -- Cokra State Database Schema
--- SQLite schema for state persistence
-
 CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY,
+    name TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    metadata TEXT
+    archived INTEGER DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS turns (
-    id TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS rollouts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     thread_id TEXT NOT NULL,
+    turn_id TEXT,
+    event_type TEXT NOT NULL,
+    data BLOB,
     created_at INTEGER NOT NULL,
-    status TEXT NOT NULL,
     FOREIGN KEY (thread_id) REFERENCES threads(id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_turns_thread_id ON turns(thread_id);
+CREATE INDEX IF NOT EXISTS idx_rollouts_thread ON rollouts(thread_id);
+CREATE INDEX IF NOT EXISTS idx_threads_updated ON threads(updated_at);
+

@@ -12,7 +12,7 @@ impl ToolHandler for ListDirHandler {
         ToolKind::Function
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
         let args: ListDirArgs = invocation.payload.parse_arguments()?;
 
         // TODO: Implement directory listing

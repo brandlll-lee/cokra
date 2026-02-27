@@ -1,0 +1,11 @@
+/mnt/f/CodeHub/leehub/cokra/cokra-rs/target/debug/deps/futures_core-b2b23916ce91c0e0.d: /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/lib.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/future.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/stream.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/task/mod.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/task/poll.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/task/__internal/mod.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/task/__internal/atomic_waker.rs
+
+/mnt/f/CodeHub/leehub/cokra/cokra-rs/target/debug/deps/libfutures_core-b2b23916ce91c0e0.rmeta: /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/lib.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/future.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/stream.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/task/mod.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/task/poll.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/task/__internal/mod.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/task/__internal/atomic_waker.rs
+
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/lib.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/future.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/stream.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/task/mod.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/task/poll.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/task/__internal/mod.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/task/__internal/atomic_waker.rs:

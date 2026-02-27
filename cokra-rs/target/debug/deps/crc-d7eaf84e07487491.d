@@ -1,0 +1,12 @@
+/mnt/f/CodeHub/leehub/cokra/cokra-rs/target/debug/deps/crc-d7eaf84e07487491.d: /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/lib.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc128.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc16.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc32.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc64.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc8.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/table.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/util.rs
+
+/mnt/f/CodeHub/leehub/cokra/cokra-rs/target/debug/deps/libcrc-d7eaf84e07487491.rmeta: /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/lib.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc128.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc16.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc32.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc64.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc8.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/table.rs /home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/util.rs
+
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/lib.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc128.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc16.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc32.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc64.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/crc8.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/table.rs:
+/home/leex/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-3.4.0/src/util.rs:

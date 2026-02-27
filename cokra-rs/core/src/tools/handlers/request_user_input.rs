@@ -12,7 +12,7 @@ impl ToolHandler for RequestUserInputHandler {
         ToolKind::Function
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
         let args: RequestUserInputArgs = invocation.payload.parse_arguments()?;
 
         // TODO: Implement user input request

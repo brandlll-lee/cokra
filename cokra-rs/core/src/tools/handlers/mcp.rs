@@ -13,7 +13,7 @@ impl ToolHandler for McpHandler {
         ToolKind::Mcp
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
         // Extract MCP params
         let (server, tool, args) = match &invocation.payload {
             crate::tools::context::ToolPayload::Mcp { server, tool, raw_arguments } => {
