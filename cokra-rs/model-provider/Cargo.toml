@@ -1,0 +1,38 @@
+# Cokra Model Provider
+# Multi-model provider support for 20+ LLM providers
+
+[package]
+name = "cokra-model-provider"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Workspace dependencies
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+futures = "0.3"
+
+# Additional dependencies
+base64 = "0.22"
+url = "2.5"
+tokio-stream = "0.1"
+pin-project-lite = "0.2"
+
+[features]
+default = []
+all-providers = ["openai", "anthropic", "ollama", "openrouter"]
+openai = []
+anthropic = []
+ollama = []
+openrouter = []
+google = []
+azure = []
+groq = []
+mistral = []
