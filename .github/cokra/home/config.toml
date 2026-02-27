@@ -1,0 +1,11 @@
+# Example Cokra configuration
+# This file is used in CI/CD for testing
+
+[approval]
+policy = "auto"
+
+[sandbox]
+mode = "permissive"
+
+[personality]
+name = "pragmatic"

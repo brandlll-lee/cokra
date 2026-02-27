@@ -1,0 +1,30 @@
+# https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#package-ecosystem-
+
+version: 2
+updates:
+  - package-ecosystem: bun
+    directory: .github/actions/cokra
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directories:
+      - cokra-rs
+      - cokra-rs/*
+    schedule:
+      interval: weekly
+  - package-ecosystem: devcontainers
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: cokra-cli
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: rust-toolchain
+    directory: cokra-rs
+    schedule:
+      interval: weekly

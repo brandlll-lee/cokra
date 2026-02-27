@@ -1,0 +1,12 @@
+packages:
+  - cokra-cli
+  - cokra-rs/responses-api-proxy/npm
+  - sdk/typescript
+  - shell-tool-mcp
+
+ignoredBuiltDependencies:
+  - esbuild
+
+minimumReleaseAge: 10080
+
+blockExoticSubdeps: true

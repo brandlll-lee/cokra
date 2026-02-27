@@ -1,0 +1,13 @@
+Cokra
+Copyright 2025 Cokra Contributors
+
+This project includes code derived from [Ratatui](https://github.com/ratatui/ratatui), licensed under the MIT license.
+Copyright (c) 2016-2022 Florian Dehau
+Copyright (c) 2023-2025 The Ratatui Developers
+
+This project includes Meriyah parser assets from [meriyah](https://github.com/meriyah/meriyah), licensed under the ISC license.
+Copyright (c) 2019 and later, KFlash and others.
+
+This project is a 1:1 architectural replica of [Codex](https://github.com/openai/codex) by OpenAI.
+The original Codex project is licensed under the Apache License 2.0.
+Copyright 2025 OpenAI
