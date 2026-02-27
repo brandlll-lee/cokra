@@ -24,6 +24,8 @@ clap = { workspace = true }
 sqlx = { workspace = true }
 rmcp = { workspace = true }
 ratatui = { workspace = true, optional = true }
+uuid = { workspace = true }
+dirs = "5.0"
 
 [features]
 default = []

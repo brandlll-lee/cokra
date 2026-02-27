@@ -1,27 +1,15 @@
 // Cokra Agent Module
 // Agent system for multi-agent coordination
 
-/// Agent control structure
-pub struct AgentControl {
-    max_depth: usize,
-}
+pub mod control;
+pub mod role;
+pub mod status;
+pub mod guards;
 
-impl AgentControl {
-    /// Create a new agent controller
-    pub fn new() -> Self {
-        Self {
-            max_depth: 5,
-        }
-    }
+pub use control::AgentControl;
+pub use role::{AgentRole, AgentRoleConfig};
+pub use status::AgentStatus;
+pub use guards::{Guards, SpawnReservation};
 
-    /// Get max spawn depth
-    pub fn max_depth(&self) -> usize {
-        self.max_depth
-    }
-}
-
-impl Default for AgentControl {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Maximum agent spawn depth
+pub const MAX_THREAD_SPAWN_DEPTH: i32 = 1;
