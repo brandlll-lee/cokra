@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing to Cokra! This document provides guidelines for contributing to the project.
 
-## 📋 Table of Contents
+## Table of Contents
 
 - [Code of Conduct](#code-of-conduct)
 - [Getting Started](#getting-started)
@@ -12,11 +12,11 @@ Thank you for your interest in contributing to Cokra! This document provides gui
 - [Commit Messages](#commit-messages)
 - [Pull Requests](#pull-requests)
 
-## 🤝 Code of Conduct
+## Code of Conduct
 
 We are committed to providing a welcoming and inclusive environment. Please be respectful and constructive in all interactions.
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -46,7 +46,7 @@ We are committed to providing a welcoming and inclusive environment. Please be r
    just build
    ```
 
-## 💻 Development Workflow
+## Development Workflow
 
 ### Branch Organization
 
@@ -84,7 +84,7 @@ We are committed to providing a welcoming and inclusive environment. Please be r
 
 7. Push and create a pull request
 
-## 📐 Coding Standards
+## Coding Standards
 
 ### Rust
 
@@ -108,7 +108,7 @@ We are committed to providing a welcoming and inclusive environment. Please be r
 - Add comments for "why", not "what"
 - Update relevant documentation
 
-## 🧪 Testing
+## Testing
 
 ### Running Tests
 
@@ -130,7 +130,7 @@ bazel test //...
 - Use snapshot tests for UI/output validation
 - Test both success and failure cases
 
-## 📝 Commit Messages
+## Commit Messages
 
 We follow [Conventional Commits](https://www.conventionalcommits.org/):
 
@@ -160,7 +160,7 @@ refactor(tui): extract widget rendering logic
 docs(readme): update installation instructions
 ```
 
-## 🔄 Pull Requests
+## Pull Requests
 
 ### Before Submitting
 
@@ -198,12 +198,12 @@ How was this tested?
 3. All feedback addressed
 4. Squash and merge when approved
 
-## 📧 Getting Help
+## Getting Help
 
 - Open an issue for bugs or feature requests
 - Start a discussion for questions
 - Check existing issues and documentation
 
-## 🙏 Thank You
+## Thank You
 
 Contributions of any size are welcome and appreciated!

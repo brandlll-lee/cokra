@@ -235,4 +235,4 @@ Apache License 2.0 - See [LICENSE](../LICENSE) for details.
 
 ---
 
-**Welcome to Cokra! Happy coding! 🚀**
+**Welcome to Cokra! Happy coding!**
