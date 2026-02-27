@@ -154,7 +154,7 @@ async fn main() -> Result<()> {
     println!("Cokra CLI starting...");
 
     // Simplified config loading
-    let config = "config"; // Placeholder
+    let _config = "config"; // Placeholder
 
     // Handle different modes
     match cli.command {
@@ -267,7 +267,7 @@ async fn handle_config_command(cmd: ConfigCommands) -> anyhow::Result<()> {
 async fn handle_auth_command(cmd: AuthCommands) -> anyhow::Result<()> {
     match cmd {
         AuthCommands::Login { api_key } => {
-            if let Some(key) = api_key {
+            if let Some(_key) = api_key {
                 println!("Logging in with API key...");
             } else {
                 println!("Please provide an API key with -k option");

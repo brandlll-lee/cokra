@@ -2,6 +2,7 @@
 # AI Agent Team CLI Environment
 
 [workspace]
+resolver = "3"
 members = [
     "cli",
     "core",

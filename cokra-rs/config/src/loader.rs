@@ -131,7 +131,7 @@ impl ConfigLoader {
     }
 
     /// Merge two configurations
-    fn merge_configs(&self, base: Config, override_config: Config) -> Config {
+    fn merge_configs(&self, _base: Config, override_config: Config) -> Config {
         // Simple merge - override config takes precedence
         override_config
     }
