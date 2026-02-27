@@ -1,7 +1,4 @@
-// Cokra TUI Widgets
-// UI widget implementations
-
-/// Widget collection
-pub mod button;
-pub mod input;
-pub mod list;
+// TUI Widgets - simplified
+pub struct Button;
+pub struct Input;
+pub struct List;

@@ -1,9 +1,8 @@
-// Utils - Cancel
-// Cancellation utilities
+// Cancel utility
+pub struct CancellationToken;
 
-use tokio_util::sync::CancellationToken;
-
-/// Create a new cancellation token
-pub fn cancel_token() -> CancellationToken {
-    CancellationToken::new()
+impl CancellationToken {
+    pub fn new() -> Self { Self }
+    pub fn cancel(&self) {}
+    pub fn is_cancelled(&self) -> bool { false }
 }
