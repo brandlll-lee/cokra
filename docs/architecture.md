@@ -2,7 +2,7 @@
 
 ## Overview
 
-Cokra is a 1:1 architectural replica of [OpenAI Codex](https://github.com/openai/codex), an AI-powered agent team system for autonomous coding and collaboration.
+Cokra is an AI-powered agent team system for autonomous coding and collaboration, inspired by [OpenAI Codex](https://github.com/openai/codex).
 
 ## High-Level Architecture
 
@@ -276,4 +276,4 @@ Apache License 2.0 - See [LICENSE](../LICENSE) for details.
 
 ## Acknowledgments
 
-Cokra is a 1:1 architectural replica of [OpenAI Codex](https://github.com/openai/codex). The original project is copyrighted by OpenAI and licensed under the Apache License 2.0.
+Cokra architecture is inspired by [OpenAI Codex](https://github.com/openai/codex). The original Codex project is copyrighted by OpenAI and licensed under the Apache License 2.0.

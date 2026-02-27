@@ -2,7 +2,7 @@
 
 > **Cokra** - AI Agent Team CLI Environment
 
-Cokra is a 1:1 architectural replica of [OpenAI Codex](https://github.com/openai/codex), an AI-powered agent team system for autonomous coding and collaboration.
+Cokra is an AI-powered agent team system for autonomous coding and collaboration, inspired by [OpenAI Codex](https://github.com/openai/codex).
 
 ## Project Status
 
@@ -20,7 +20,7 @@ Cokra is an AI agent team CLI environment that enables:
 
 ## Architecture
 
-Cokra replicates the Codex architecture:
+Cokra architecture follows patterns from Codex:
 
 ```
 cokra/
@@ -88,7 +88,7 @@ Apache License 2.0 - see [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
-Cokra is a 1:1 architectural replica of [OpenAI Codex](https://github.com/openai/codex). The original Codex project is copyrighted by OpenAI and licensed under the Apache License 2.0.
+Cokra architecture is inspired by [OpenAI Codex](https://github.com/openai/codex). The original Codex project is copyrighted by OpenAI and licensed under the Apache License 2.0.
 
 This project also includes code derived from:
 - [Ratatui](https://github.com/ratatui/ratatui) - MIT License
@@ -102,4 +102,4 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 
 ---
 
-**Note**: Cokra is not affiliated with or endorsed by OpenAI. It is an independent educational project that replicates the Codex architecture for learning and customization purposes.
+**Note**: Cokra is not affiliated with or endorsed by OpenAI. It is an independent project inspired by Codex architecture.

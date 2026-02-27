@@ -5,7 +5,7 @@
 ### Features
 
 - Initial release of Cokra - AI Agent Team CLI Environment
-- 1:1 architectural replica of Codex by OpenAI
+- Architecture inspired by OpenAI Codex
 - Project skeleton with Bazel, Rust, and Node.js toolchain
 - Configuration files and build system setup
 

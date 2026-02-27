@@ -4,7 +4,7 @@ Welcome to Cokra! This guide will help you get started with the AI Agent Team CL
 
 ## What is Cokra?
 
-Cokra is a 1:1 architectural replica of [OpenAI Codex](https://github.com/openai/codex). It's an AI-powered agent team system that can:
+Cokra is an AI-powered agent team system inspired by [OpenAI Codex](https://github.com/openai/codex). It can:
 
 - **Write and modify code** - Create, edit, and refactor code across multiple files
 - **Execute commands** - Run shell commands in a secure sandbox

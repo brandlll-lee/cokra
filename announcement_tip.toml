@@ -5,7 +5,7 @@
 # target_app specify which app should display the announcement (cli, vsce, ...).
 
 [[announcements]]
-content = "Welcome to Cokra! This is a 1:1 replica of Codex - AI Agent Team CLI Environment."
+content = "Welcome to Cokra! An AI Agent Team CLI Environment, inspired by OpenAI Codex."
 from_date = "2025-02-27"
 to_date = "2026-12-31"
 target_app = "cli"
@@ -17,7 +17,7 @@ version_regex = "^0\\.0\\.0$"
 to_date = "2026-12-31"
 
 [[announcements]]
-content = "**Cokra v0.1.0**: Initial release! A 1:1 replica of Codex architecture."
+content = "**Cokra v0.1.0**: Initial release! Architecture inspired by OpenAI Codex."
 from_date = "2025-02-27"
 to_date = "2026-12-31"
 version_regex = "^0\\.(?:[0-9]|[1-8][0-9]|9[0-7])\\."
