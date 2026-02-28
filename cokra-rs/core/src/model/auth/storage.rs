@@ -224,14 +224,12 @@ mod tests {
       },
     );
 
-    tokio::runtime::Runtime::new().unwrap().block_on(async {
-      storage.save(creds.clone()).await.unwrap();
-      let loaded = storage.load("test").await.unwrap().unwrap();
-      assert_eq!(loaded.credentials.get_value(), "test-key");
+    storage.save(creds.clone()).await.unwrap();
+    let loaded = storage.load("test").await.unwrap().unwrap();
+    assert_eq!(loaded.credentials.get_value(), "test-key");
 
-      storage.delete("test").await.unwrap();
-      assert!(storage.load("test").await.unwrap().is_none());
-    });
+    storage.delete("test").await.unwrap();
+    assert!(storage.load("test").await.unwrap().is_none());
   }
 
   #[test]

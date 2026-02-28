@@ -100,3 +100,4 @@ prompt.md
 cokra-rs/target/
 cokra-rs/.target/
 cokra-rs/target-local/
+cokra-rs/.tmp/

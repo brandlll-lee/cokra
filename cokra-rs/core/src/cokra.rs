@@ -381,9 +381,11 @@ mod tests {
 
   #[tokio::test]
   async fn test_cokra_creation() {
-    let config = cokra_config::ConfigLoader::default()
+    let mut config = cokra_config::ConfigLoader::default()
       .load_with_cli_overrides(vec![])
       .expect("load config");
+    config.models.provider = "mock".to_string();
+    config.models.model = "mock/default".to_string();
     let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
       .await
       .expect("create cokra");
@@ -396,9 +398,11 @@ mod tests {
 
   #[tokio::test]
   async fn test_run_turn_with_mock_model() {
-    let config = cokra_config::ConfigLoader::default()
+    let mut config = cokra_config::ConfigLoader::default()
       .load_with_cli_overrides(vec![])
       .expect("load config");
+    config.models.provider = "mock".to_string();
+    config.models.model = "mock/default".to_string();
     let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
       .await
       .expect("create cokra");

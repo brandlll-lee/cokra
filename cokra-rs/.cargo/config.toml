@@ -5,7 +5,7 @@
 # Use parallel compilation
 jobs = 4
 incremental = false
-target-dir = "/tmp/cokra-target"
+target-dir = "/mnt/f/CodeHub/leehub/cokra/cokra-rs/target"
 
 [profile.dev]
 # Faster compilation for development
@@ -26,6 +26,6 @@ opt-level = 0
 split-debuginfo = "unpacked"
 
 [env]
-TMPDIR = { value = "/tmp/cokra-tmp", force = true }
+TMPDIR = { value = "/mnt/f/CodeHub/leehub/cokra/cokra-rs/.tmp", force = true }
 CARGO_BUILD_PIPELINING = { value = "false", force = true }
 CARGO_INCREMENTAL = { value = "0", force = true }

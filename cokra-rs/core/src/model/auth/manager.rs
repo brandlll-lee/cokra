@@ -371,17 +371,19 @@ mod tests {
   #[test]
   fn test_env_resolution() {
     let manager = AuthManager::memory().add_resolver(Box::new(EnvAuthResolver::new()));
+    let provider_id = "manager_test_provider";
+    let env_var = "MANAGER_TEST_PROVIDER_API_KEY";
 
     unsafe {
-      std::env::set_var("OPENAI_API_KEY", "test-from-env");
+      std::env::set_var(env_var, "test-from-env");
     }
 
-    let creds = manager.resolve_credentials("openai");
+    let creds = manager.resolve_credentials(provider_id);
     assert!(creds.is_some());
     assert_eq!(creds.unwrap().get_value(), "test-from-env");
 
     unsafe {
-      std::env::remove_var("OPENAI_API_KEY");
+      std::env::remove_var(env_var);
     }
   }
 }

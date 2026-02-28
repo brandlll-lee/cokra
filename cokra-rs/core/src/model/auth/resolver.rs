@@ -273,18 +273,21 @@ mod tests {
 
   #[test]
   fn test_chained_resolver() {
+    let provider_id = "chainedresolver";
+    let env_var = "CHAINEDRESOLVER_API_KEY";
+
     unsafe {
-      std::env::set_var("OPENAI_API_KEY", "from-env");
+      std::env::set_var(env_var, "from-env");
     }
 
     let resolver = ChainedAuthResolver::with_defaults();
-    let creds = resolver.resolve("openai");
+    let creds = resolver.resolve(provider_id);
 
     assert!(creds.is_some());
     assert_eq!(creds.unwrap().get_value(), "from-env");
 
     unsafe {
-      std::env::remove_var("OPENAI_API_KEY");
+      std::env::remove_var(env_var);
     }
   }
 }
