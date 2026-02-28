@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 /// Thread start request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadStartParams {
-    pub query: String,
+  pub query: String,
 }
 
 /// Thread start response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadStartResponse {
-    pub thread_id: String,
+  pub thread_id: String,
 }

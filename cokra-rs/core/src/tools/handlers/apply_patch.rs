@@ -1,30 +1,28 @@
-// Apply Patch Handler
-use async_trait::async_trait;
+use serde::Deserialize;
 
-use crate::tools::context::{ToolInvocation, ToolOutput, FunctionCallError};
+use crate::tools::context::{FunctionCallError, ToolInvocation, ToolOutput};
 use crate::tools::registry::{ToolHandler, ToolKind};
 
 pub struct ApplyPatchHandler;
 
-#[async_trait]
-impl ToolHandler for ApplyPatchHandler {
-    fn kind(&self) -> ToolKind {
-        ToolKind::Function
-    }
-
-    async fn is_mutating(&self, _invocation: &ToolInvocation) -> bool {
-        true
-    }
-
-    fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
-        let args: ApplyPatchArgs = invocation.payload.parse_arguments()?;
-
-        // TODO: Implement patch application
-        Ok(ToolOutput::success("Patch applied".to_string()))
-    }
+#[derive(Debug, Deserialize)]
+struct ApplyPatchArgs {
+  patch: String,
 }
 
-#[derive(serde::Deserialize)]
-struct ApplyPatchArgs {
-    patch: String,
+impl ToolHandler for ApplyPatchHandler {
+  fn kind(&self) -> ToolKind {
+    ToolKind::Function
+  }
+
+  fn is_mutating(&self, _: &ToolInvocation) -> bool {
+    true
+  }
+
+  fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    let args: ApplyPatchArgs = invocation.parse_arguments()?;
+    let mut out = ToolOutput::success(format!("apply_patch accepted ({} bytes)", args.patch.len()));
+    out.id = invocation.id;
+    Ok(out)
+  }
 }

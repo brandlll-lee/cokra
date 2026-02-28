@@ -1,353 +1,338 @@
-// Cokra CLI - Command Line Interface Entry Point
-
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use cokra_config::ConfigLoader;
+use cokra_core::Cokra;
+use cokra_core::model::auth::{AuthManager, AuthRequest, AuthType, Credentials};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use tracing::info;
 
-/// Cokra - AI Agent Team CLI Environment
 #[derive(Parser, Debug)]
 #[command(name = "cokra")]
 #[command(version, about, long_about = None)]
 struct TopCli {
-    #[clap(flatten)]
-    config_overrides: CliConfigOverrides,
+  #[clap(flatten)]
+  config_overrides: CliConfigOverrides,
 
-    #[clap(subcommand)]
-    command: Option<Commands>,
+  #[clap(subcommand)]
+  command: Option<Commands>,
 
-    /// Initial prompt/task to execute
-    #[arg(short = 'p', long = "prompt")]
-    prompt: Option<String>,
+  /// Initial prompt/task to execute
+  #[arg(short = 'p', long = "prompt")]
+  prompt: Option<String>,
 
-    /// Working directory
-    #[arg(short = 'd', long = "dir")]
-    dir: Option<PathBuf>,
+  /// Working directory
+  #[arg(short = 'd', long = "dir")]
+  dir: Option<PathBuf>,
 }
 
-/// CLI configuration overrides
 #[derive(Debug, clap::Args)]
 struct CliConfigOverrides {
-    /// Configuration override in key=value format
-    #[arg(short = 'c', long = "config", value_name = "KEY=VALUE")]
-    overrides: Vec<String>,
+  /// Configuration override in key=value format
+  #[arg(short = 'c', long = "config", value_name = "KEY=VALUE")]
+  overrides: Vec<String>,
 }
 
-/// Available commands
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Start interactive mode (default)
-    Interactive {
-        /// Working directory
-        #[arg(short = 'd', long = "dir")]
-        dir: Option<PathBuf>,
-    },
-
-    /// Execute a single task
-    Run {
-        /// Task description
-        task: String,
-
-        /// Working directory
-        #[arg(short = 'd', long = "dir")]
-        dir: Option<PathBuf>,
-    },
-
-    /// Manage MCP servers
-    Mcp {
-        #[command(subcommand)]
-        mcp_command: McpCommands,
-    },
-
-    /// Configuration management
-    Config {
-        #[command(subcommand)]
-        config_command: ConfigCommands,
-    },
-
-    /// Authentication
-    Auth {
-        #[command(subcommand)]
-        auth_command: AuthCommands,
-    },
-
-    /// List available models
-    Models,
+  Interactive {
+    #[arg(short = 'd', long = "dir")]
+    dir: Option<PathBuf>,
+  },
+  Run {
+    task: String,
+    #[arg(short = 'd', long = "dir")]
+    dir: Option<PathBuf>,
+  },
+  Mcp {
+    #[command(subcommand)]
+    mcp_command: McpCommands,
+  },
+  Config {
+    #[command(subcommand)]
+    config_command: ConfigCommands,
+  },
+  Auth {
+    #[command(subcommand)]
+    auth_command: AuthCommands,
+  },
+  Models,
 }
 
-/// MCP server commands
 #[derive(Debug, Subcommand)]
 enum McpCommands {
-    /// List all MCP servers
-    List,
-
-    /// Test MCP server connection
-    Test {
-        /// Server name
-        server: String,
-    },
-
-    /// Add a new MCP server
-    Add {
-        /// Server name
-        name: String,
-
-        /// Command to run
-        #[arg(trailing_var_arg = true)]
-        command: Vec<String>,
-    },
-
-    /// Remove an MCP server
-    Remove {
-        /// Server name
-        server: String,
-    },
+  List,
+  Test {
+    server: String,
+  },
+  Add {
+    name: String,
+    #[arg(trailing_var_arg = true)]
+    command: Vec<String>,
+  },
+  Remove {
+    server: String,
+  },
 }
 
-/// Configuration commands
 #[derive(Debug, Subcommand)]
 enum ConfigCommands {
-    /// Show current configuration
-    Show,
-
-    /// Edit configuration
-    Edit,
-
-    /// Validate configuration
-    Validate,
-
-    /// Set a configuration value
-    Set {
-        /// Configuration key
-        key: String,
-
-        /// Configuration value
-        value: String,
-    },
+  Show,
+  Edit,
+  Validate,
+  Set { key: String, value: String },
 }
 
-/// Authentication commands
 #[derive(Debug, Subcommand)]
 enum AuthCommands {
-    /// Login with API key
-    Login {
-        /// API key
-        #[arg(short = 'k', long = "key")]
-        api_key: Option<String>,
-    },
+  Login {
+    /// Provider id (openai/anthropic/openrouter/google/github/...)
+    #[arg(short = 'p', long = "provider")]
+    provider: Option<String>,
 
-    /// Logout
-    Logout,
+    #[arg(short = 'k', long = "key")]
+    api_key: Option<String>,
 
-    /// Show current authentication status
-    Status,
+    /// Use OAuth device flow instead of API key.
+    #[arg(long = "oauth")]
+    oauth: bool,
+
+    /// OAuth client id (required by provider-specific OAuth flow).
+    #[arg(long = "client-id")]
+    client_id: Option<String>,
+  },
+  Logout {
+    #[arg(short = 'p', long = "provider")]
+    provider: Option<String>,
+  },
+  Status {
+    #[arg(short = 'p', long = "provider")]
+    provider: Option<String>,
+  },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Simple println for now
-    println!("Cokra CLI v0.1.0");
+  let cli = TopCli::parse();
+  let overrides = parse_overrides(&cli.config_overrides.overrides)?;
 
-    // Parse CLI arguments
-    let cli = TopCli::parse();
-
-    println!("Cokra CLI starting...");
-
-    // Simplified config loading
-    let _config = "config"; // Placeholder
-
-    // Handle different modes
-    match cli.command {
-        Some(Commands::Interactive { dir }) => {
-            run_interactive(dir.or(cli.dir)).await?;
-        }
-        Some(Commands::Run { task, dir }) => {
-            run_task(task, dir.or(cli.dir)).await?;
-        }
-        Some(Commands::Mcp { mcp_command }) => {
-            handle_mcp_command(mcp_command).await?;
-        }
-        Some(Commands::Config { config_command }) => {
-            handle_config_command(config_command).await?;
-        }
-        Some(Commands::Auth { auth_command }) => {
-            handle_auth_command(auth_command).await?;
-        }
-        Some(Commands::Models) => {
-            list_models().await?;
-        }
-        None => {
-            // Default: interactive mode or run with prompt
-            if let Some(prompt) = cli.prompt {
-                run_task(prompt, cli.dir).await?;
-            } else {
-                run_interactive(cli.dir).await?;
-            }
-        }
+  match cli.command {
+    Some(Commands::Interactive { dir }) => run_interactive(dir.or(cli.dir), overrides).await,
+    Some(Commands::Run { task, dir }) => run_task(task, dir.or(cli.dir), overrides).await,
+    Some(Commands::Mcp { mcp_command }) => handle_mcp_command(mcp_command).await,
+    Some(Commands::Config { config_command }) => handle_config_command(config_command).await,
+    Some(Commands::Auth { auth_command }) => handle_auth_command(auth_command).await,
+    Some(Commands::Models) => list_models().await,
+    None => {
+      if let Some(prompt) = cli.prompt {
+        run_task(prompt, cli.dir, overrides).await
+      } else {
+        run_interactive(cli.dir, overrides).await
+      }
     }
-
-    Ok(())
+  }
 }
 
-/// Run interactive mode
-async fn run_interactive(dir: Option<PathBuf>) -> anyhow::Result<()> {
-    // Set working directory
-    if let Some(dir) = dir {
-        std::env::set_current_dir(&dir)?;
-    }
-
-    info!("Starting interactive mode");
-
-    // TODO: Run TUI
-    println!("Cokra Interactive Mode");
-    println!("Type 'exit' to quit");
-    println!();
-
-    // Simple REPL for now
-    run_repl().await
+fn parse_overrides(overrides: &[String]) -> Result<Vec<(String, String)>> {
+  overrides
+    .iter()
+    .map(|entry| {
+      let (key, value) = entry
+        .split_once('=')
+        .with_context(|| format!("invalid override '{entry}', expected key=value"))?;
+      Ok((key.to_string(), value.to_string()))
+    })
+    .collect()
 }
 
-/// Run a single task
-async fn run_task(task: String, dir: Option<PathBuf>) -> anyhow::Result<()> {
-    // Set working directory
-    if let Some(dir) = dir {
-        std::env::set_current_dir(&dir)?;
-    }
-
-    info!("Running task: {}", task);
-
-    // TODO: Create Cokra instance and execute
-    println!("Executing: {}", task);
-    println!("(Task execution coming soon)");
-
-    Ok(())
+fn set_workdir(dir: &Option<PathBuf>) -> Result<()> {
+  if let Some(dir) = dir {
+    std::env::set_current_dir(dir)
+      .with_context(|| format!("failed to set working directory to {}", dir.display()))?;
+  }
+  Ok(())
 }
 
-/// Handle MCP commands
+fn load_config(
+  dir: &Option<PathBuf>,
+  overrides: Vec<(String, String)>,
+) -> Result<cokra_config::Config> {
+  let loader = match dir {
+    Some(d) => ConfigLoader::default().with_project_dir(d.clone()),
+    None => ConfigLoader::default(),
+  };
+  loader.load_with_cli_overrides(overrides)
+}
+
+async fn run_task(
+  task: String,
+  dir: Option<PathBuf>,
+  overrides: Vec<(String, String)>,
+) -> anyhow::Result<()> {
+  set_workdir(&dir)?;
+  let config = load_config(&dir, overrides)?;
+  let cokra = Cokra::new(config).await?;
+  let result = cokra.run_turn(task).await?;
+  println!("{}", result.final_message);
+  Ok(())
+}
+
+async fn run_interactive(
+  dir: Option<PathBuf>,
+  overrides: Vec<(String, String)>,
+) -> anyhow::Result<()> {
+  set_workdir(&dir)?;
+  let config = load_config(&dir, overrides)?;
+  let cokra = Cokra::new(config).await?;
+
+  println!("Cokra Interactive Mode");
+  println!("Type 'exit' to quit");
+
+  let stdin = io::stdin();
+  let mut stdout = io::stdout();
+
+  loop {
+    print!("cokra> ");
+    stdout.flush()?;
+
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line)?;
+    let input = line.trim().to_string();
+
+    if input.is_empty() {
+      continue;
+    }
+
+    if matches!(input.as_str(), "exit" | "quit") {
+      break;
+    }
+
+    if input == "help" {
+      println!("Commands: help, exit, quit");
+      continue;
+    }
+
+    match cokra.run_turn(input).await {
+      Ok(result) => println!("{}\n", result.final_message),
+      Err(err) => eprintln!("error: {err}\n"),
+    }
+  }
+
+  Ok(())
+}
+
 async fn handle_mcp_command(cmd: McpCommands) -> anyhow::Result<()> {
-    match cmd {
-        McpCommands::List => {
-            println!("MCP Servers:");
-            println!("  (No servers configured)");
-        }
-        McpCommands::Test { server } => {
-            println!("Testing MCP server: {}", server);
-        }
-        McpCommands::Add { name, command } => {
-            println!("Adding MCP server: {} -> {:?}", name, command);
-        }
-        McpCommands::Remove { server } => {
-            println!("Removing MCP server: {}", server);
-        }
+  match cmd {
+    McpCommands::List => {
+      println!("MCP Servers:");
+      println!("  (No servers configured)");
     }
-    Ok(())
+    McpCommands::Test { server } => {
+      println!("Testing MCP server: {}", server);
+    }
+    McpCommands::Add { name, command } => {
+      println!("Adding MCP server: {} -> {:?}", name, command);
+    }
+    McpCommands::Remove { server } => {
+      println!("Removing MCP server: {}", server);
+    }
+  }
+  Ok(())
 }
 
-/// Handle config commands
 async fn handle_config_command(cmd: ConfigCommands) -> anyhow::Result<()> {
-    match cmd {
-        ConfigCommands::Show => {
-            println!("Current configuration:");
-            println!("  (Default configuration)");
-        }
-        ConfigCommands::Edit => {
-            println!("Opening config editor...");
-        }
-        ConfigCommands::Validate => {
-            println!("Configuration is valid.");
-        }
-        ConfigCommands::Set { key, value } => {
-            println!("Setting {} = {}", key, value);
-        }
+  match cmd {
+    ConfigCommands::Show => {
+      println!("Current configuration:");
+      println!("  (Use cokra config edit to customize)");
     }
-    Ok(())
+    ConfigCommands::Edit => {
+      println!("Config edit is not implemented yet.");
+    }
+    ConfigCommands::Validate => {
+      println!("Configuration is valid.");
+    }
+    ConfigCommands::Set { key, value } => {
+      println!("Setting {} = {}", key, value);
+    }
+  }
+  Ok(())
 }
 
-/// Handle auth commands
 async fn handle_auth_command(cmd: AuthCommands) -> anyhow::Result<()> {
-    match cmd {
-        AuthCommands::Login { api_key } => {
-            if let Some(_key) = api_key {
-                println!("Logging in with API key...");
-            } else {
-                println!("Please provide an API key with -k option");
-            }
+  let manager = AuthManager::new().unwrap_or_default();
+
+  match cmd {
+    AuthCommands::Login {
+      provider,
+      api_key,
+      oauth,
+      client_id,
+    } => {
+      let provider = provider.unwrap_or_else(|| "openai".to_string());
+
+      if oauth {
+        let request = if let Some(client_id) = client_id {
+          AuthRequest::new(provider.clone(), AuthType::OAuthDevice).with_client_id(client_id)
+        } else {
+          AuthRequest::new(provider.clone(), AuthType::OAuthDevice)
+        };
+
+        let pending = manager.begin_oauth(request).await?;
+        if let Credentials::DeviceCode {
+          user_code,
+          verification_url,
+          ..
+        } = pending.credentials
+        {
+          println!("OAuth login started for provider: {}", provider);
+          println!("1) Open: {}", verification_url);
+          println!("2) Enter code: {}", user_code);
+          println!("Waiting for authorization...");
+          manager.complete_oauth(&provider, "").await?;
+          println!("OAuth login completed for {}", provider);
+        } else {
+          println!("OAuth started, but provider returned unexpected state.");
         }
-        AuthCommands::Logout => {
-            println!("Logging out...");
-        }
-        AuthCommands::Status => {
-            println!("Authentication status: Not logged in");
-        }
+      } else if let Some(key) = api_key {
+        manager.save(&provider, Credentials::ApiKey { key }).await?;
+        println!("API key stored for provider: {}", provider);
+      } else {
+        println!("Please pass -k <api_key> or --oauth.");
+      }
     }
-    Ok(())
+    AuthCommands::Logout { provider } => {
+      let provider = provider.unwrap_or_else(|| "openai".to_string());
+      manager.remove(&provider).await?;
+      println!("Logged out from {}", provider);
+    }
+    AuthCommands::Status { provider } => {
+      if let Some(provider) = provider {
+        let has = manager.has_credentials(&provider).await;
+        let status = if has { "configured" } else { "not configured" };
+        println!("{}: {}", provider, status);
+      } else {
+        let providers = manager.list_providers().await?;
+        if providers.is_empty() {
+          println!("No stored credentials.");
+        } else {
+          println!("Stored credentials:");
+          for provider in providers {
+            println!("  {}", provider);
+          }
+        }
+      }
+    }
+  }
+  Ok(())
 }
 
-/// List available models
 async fn list_models() -> anyhow::Result<()> {
-    println!("Available models:");
-    println!();
-    println!("  OpenAI:");
-    println!("    gpt-4o         - GPT-4 Optimized");
-    println!("    gpt-4-turbo    - GPT-4 Turbo");
-    println!("    gpt-3.5-turbo  - GPT-3.5 Turbo");
-    println!();
-    println!("  Anthropic:");
-    println!("    claude-sonnet-4     - Claude Sonnet 4");
-    println!("    claude-3.5-sonnet   - Claude 3.5 Sonnet");
-    println!("    claude-3-opus       - Claude 3 Opus");
-    println!();
-    println!("  Local (Ollama):");
-    println!("    ollama/llama3       - Llama 3");
-    println!("    ollama/codellama    - Code Llama");
-    println!();
-    println!("  Local (LM Studio):");
-    println!("    lmstudio/*          - Any loaded model");
-    println!();
-    println!("Use: cokra -c model=<model_id> to select a model");
-
-    Ok(())
-}
-
-/// Simple REPL
-async fn run_repl() -> anyhow::Result<()> {
-    use std::io::{self, BufRead, Write};
-
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-
-    loop {
-        print!("cokra> ");
-        stdout.flush()?;
-
-        let mut line = String::new();
-        stdin.lock().read_line(&mut line)?;
-        let line = line.trim();
-
-        if line.is_empty() {
-            continue;
-        }
-
-        if line == "exit" || line == "quit" {
-            println!("Goodbye!");
-            break;
-        }
-
-        if line == "help" {
-            println!("Commands:");
-            println!("  help     - Show this help");
-            println!("  exit     - Exit Cokra");
-            println!("  quit     - Exit Cokra");
-            println!();
-            println!("Or type any message to chat with the AI.");
-            continue;
-        }
-
-        // TODO: Send to Cokra
-        println!("You said: {}", line);
-        println!("(AI responses coming soon)");
-        println!();
-    }
-
-    Ok(())
+  println!("Available models:");
+  println!("  openai/gpt-4o");
+  println!("  anthropic/claude-sonnet-4");
+  println!("  openrouter/openai/gpt-4o");
+  println!("  google/gemini-2.0-flash-exp");
+  println!("  ollama/llama3");
+  println!("  lmstudio/<loaded_model>");
+  Ok(())
 }

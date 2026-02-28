@@ -1,26 +1,24 @@
-// Request User Input Handler
-use async_trait::async_trait;
+use serde::Deserialize;
 
-use crate::tools::context::{ToolInvocation, ToolOutput, FunctionCallError};
+use crate::tools::context::{FunctionCallError, ToolInvocation, ToolOutput};
 use crate::tools::registry::{ToolHandler, ToolKind};
 
 pub struct RequestUserInputHandler;
 
-#[async_trait]
-impl ToolHandler for RequestUserInputHandler {
-    fn kind(&self) -> ToolKind {
-        ToolKind::Function
-    }
-
-    fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
-        let args: RequestUserInputArgs = invocation.payload.parse_arguments()?;
-
-        // TODO: Implement user input request
-        Ok(ToolOutput::success("User input requested".to_string()))
-    }
+#[derive(Debug, Deserialize)]
+struct RequestUserInputArgs {
+  prompt: String,
 }
 
-#[derive(serde::Deserialize)]
-struct RequestUserInputArgs {
-    prompt: String,
+impl ToolHandler for RequestUserInputHandler {
+  fn kind(&self) -> ToolKind {
+    ToolKind::Function
+  }
+
+  fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    let args: RequestUserInputArgs = invocation.parse_arguments()?;
+    let mut out = ToolOutput::success(format!("user input required: {}", args.prompt));
+    out.id = invocation.id;
+    Ok(out)
+  }
 }

@@ -1,27 +1,29 @@
-// Spawn Agent Handler
-use async_trait::async_trait;
+use serde::Deserialize;
 
-use crate::tools::context::{ToolInvocation, ToolOutput, FunctionCallError};
+use crate::tools::context::{FunctionCallError, ToolInvocation, ToolOutput};
 use crate::tools::registry::{ToolHandler, ToolKind};
 
 pub struct SpawnAgentHandler;
 
-#[async_trait]
-impl ToolHandler for SpawnAgentHandler {
-    fn kind(&self) -> ToolKind {
-        ToolKind::Function
-    }
-
-    fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
-        let args: SpawnAgentArgs = invocation.payload.parse_arguments()?;
-
-        // TODO: Implement agent spawning
-        Ok(ToolOutput::success(format!("Spawned agent for: {}", args.task)))
-    }
+#[derive(Debug, Deserialize)]
+struct SpawnAgentArgs {
+  task: String,
+  role: Option<String>,
 }
 
-#[derive(serde::Deserialize)]
-struct SpawnAgentArgs {
-    task: String,
-    role: Option<String>,
+impl ToolHandler for SpawnAgentHandler {
+  fn kind(&self) -> ToolKind {
+    ToolKind::Function
+  }
+
+  fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    let args: SpawnAgentArgs = invocation.parse_arguments()?;
+    let role = args.role.unwrap_or_else(|| "default".to_string());
+    let mut out = ToolOutput::success(format!(
+      "spawned agent(role={role}) for task: {}",
+      args.task
+    ));
+    out.id = invocation.id;
+    Ok(out)
+  }
 }

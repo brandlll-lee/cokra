@@ -1,80 +1,58 @@
-// Tool Router
-// Routes tool calls to appropriate handlers
-
 use std::sync::Arc;
 
-use crate::tools::context::{ToolInvocation, ToolOutput, ToolPayload, FunctionCallError};
-use crate::tools::registry::{ToolRegistry, ConfiguredToolSpec, ToolSpec};
+use serde_json::Value;
+use uuid::Uuid;
 
-/// Tool call representation
-#[derive(Clone, Debug)]
-pub struct ToolCall {
-    /// Tool name
-    pub tool_name: String,
+use crate::tools::context::{FunctionCallError, ToolInvocation, ToolOutput};
+use crate::tools::registry::ToolRegistry;
+use crate::tools::spec::ToolSpec;
+use crate::tools::validation::{ToolCall, ToolValidator};
 
-    /// Call ID
-    pub call_id: String,
-
-    /// Payload
-    pub payload: ToolPayload,
-}
-
-/// Source of tool call
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ToolCallSource {
-    /// Direct call
-    Direct,
-    /// From JS REPL
-    JsRepl,
-}
-
-/// Tool router
 pub struct ToolRouter {
-    registry: Arc<ToolRegistry>,
-    specs: Vec<ConfiguredToolSpec>,
+  registry: Arc<ToolRegistry>,
+  validator: Arc<ToolValidator>,
 }
 
 impl ToolRouter {
-    /// Create from config
-    pub fn from_registry(registry: ToolRegistry, specs: Vec<ConfiguredToolSpec>) -> Self {
-        Self {
-            registry: Arc::new(registry),
-            specs,
-        }
+  pub fn new(registry: Arc<ToolRegistry>, validator: Arc<ToolValidator>) -> Self {
+    Self {
+      registry,
+      validator,
+    }
+  }
+
+  pub async fn route_tool_call(
+    &self,
+    tool_name: &str,
+    arguments: Value,
+  ) -> Result<ToolOutput, FunctionCallError> {
+    let call = ToolCall {
+      tool_name: tool_name.to_string(),
+      args: arguments.clone(),
+    };
+
+    let validation = self.validator.validate_tool_call(&call)?;
+    if !validation.valid {
+      let reason = validation
+        .reason
+        .unwrap_or_else(|| format!("tool {tool_name} requires user approval"));
+      return Err(FunctionCallError::PermissionDenied(reason));
     }
 
-    /// Get tool specs
-    pub fn specs(&self) -> Vec<ToolSpec> {
-        self.specs.iter().map(|s| s.spec.clone()).collect()
-    }
+    let invocation = ToolInvocation {
+      id: Uuid::new_v4().to_string(),
+      name: tool_name.to_string(),
+      arguments: arguments.to_string(),
+    };
 
-    /// Check if tool supports parallel calls
-    pub fn tool_supports_parallel(&self, tool_name: &str) -> bool {
-        self.specs
-            .iter()
-            .find(|s| s.spec.name == tool_name)
-            .map(|s| s.supports_parallel_tool_calls)
-            .unwrap_or(false)
-    }
+    self.registry.dispatch(invocation)
+  }
 
-    /// Dispatch tool call
-    pub async fn dispatch_tool_call(
-        &self,
-        call: ToolCall,
-    ) -> Result<ToolOutput, FunctionCallError> {
-        let invocation = ToolInvocation {
-            session_id: "default".to_string(),
-            turn_id: "default".to_string(),
-            call_id: call.call_id,
-            tool_name: call.tool_name.clone(),
-            payload: call.payload,
-        };
+  pub fn list_available_tools(&self) -> Vec<ToolSpec> {
+    self.registry.list_specs()
+  }
 
-        self.registry.dispatch(invocation).await
-    }
-
-    /// Get registry reference
-    pub fn registry(&self) -> Arc<ToolRegistry> {
-        self.registry.clone()
-    }
+  pub fn registry(&self) -> Arc<ToolRegistry> {
+    self.registry.clone()
+  }
 }

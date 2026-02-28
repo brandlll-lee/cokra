@@ -5,14 +5,14 @@
 pub struct McpConnectionManager;
 
 impl McpConnectionManager {
-    /// Create a new MCP manager
-    pub fn new() -> Self {
-        Self
-    }
+  /// Create a new MCP manager
+  pub fn new() -> Self {
+    Self
+  }
 }
 
 impl Default for McpConnectionManager {
-    fn default() -> Self {
-        Self::new()
-    }
+  fn default() -> Self {
+    Self::new()
+  }
 }

@@ -1,19 +1,24 @@
-// Dynamic Tool Handler
-use async_trait::async_trait;
+use serde::Deserialize;
 
-use crate::tools::context::{ToolInvocation, ToolOutput, FunctionCallError};
+use crate::tools::context::{FunctionCallError, ToolInvocation, ToolOutput};
 use crate::tools::registry::{ToolHandler, ToolKind};
 
 pub struct DynamicToolHandler;
 
-#[async_trait]
-impl ToolHandler for DynamicToolHandler {
-    fn kind(&self) -> ToolKind {
-        ToolKind::Function
-    }
+#[derive(Debug, Deserialize)]
+struct SearchArgs {
+  query: String,
+}
 
-    fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
-        // Dynamic tools are handled by the orchestrator
-        Ok(ToolOutput::success("Dynamic tool executed".to_string()))
-    }
+impl ToolHandler for DynamicToolHandler {
+  fn kind(&self) -> ToolKind {
+    ToolKind::Function
+  }
+
+  fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    let args: SearchArgs = invocation.parse_arguments()?;
+    let mut out = ToolOutput::success(format!("search query accepted: {}", args.query));
+    out.id = invocation.id;
+    Ok(out)
+  }
 }

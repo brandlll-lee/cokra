@@ -95,3 +95,8 @@ __pycache__/
 prompt.md
 *_prompt.md
 *_instructions.md
+
+# Rust build artifacts (cokra-rs workspace)
+cokra-rs/target/
+cokra-rs/.target/
+cokra-rs/target-local/
