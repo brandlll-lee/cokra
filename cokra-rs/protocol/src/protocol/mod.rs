@@ -7,10 +7,12 @@ use uuid::Uuid;
 
 pub mod config_types;
 pub mod items;
+pub mod models;
 pub mod user_input;
 
 pub use config_types::*;
 pub use items::*;
+pub use models::*;
 pub use user_input::*;
 
 // ============================================================================

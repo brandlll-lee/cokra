@@ -8,9 +8,11 @@ use std::sync::Arc;
 use futures::Stream;
 use tokio::sync::RwLock;
 
+use cokra_protocol::ResponseEvent;
+
 use super::error::{ModelError, Result};
 use super::registry::ProviderRegistryRef;
-use super::types::{ChatRequest, ChatResponse, Chunk, ProviderConfig};
+use super::types::{ChatRequest, ChatResponse, Chunk};
 
 /// Model client
 ///
@@ -77,6 +79,17 @@ impl ModelClient {
     let mut request = self.enrich_request(request).await?;
     request.model = get_model_name(&request.model).to_string();
     provider.chat_completion_stream(request).await
+  }
+
+  /// Send a Responses-API compatible SSE request.
+  pub async fn responses_stream(
+    &self,
+    request: ChatRequest,
+  ) -> Result<Pin<Box<dyn Stream<Item = Result<ResponseEvent>> + Send>>> {
+    let provider = self.select_provider(&request.model).await?;
+    let mut request = self.enrich_request(request).await?;
+    request.model = get_model_name(&request.model).to_string();
+    provider.responses_stream(request).await
   }
 
   /// Select the appropriate provider for a model

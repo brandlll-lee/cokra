@@ -3,15 +3,21 @@
 //! This module defines the [ModelProvider] trait that all LLM providers must implement.
 
 use async_trait::async_trait;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::pin::Pin;
 
-use super::error::{ModelError, Result};
-use super::types::{
-  ChatRequest, ChatResponse, Chunk, ListModelsResponse, ModelInfo, ProviderConfig,
+use cokra_protocol::{
+  ContentDeltaEvent as ResponseContentDeltaEvent, FunctionCall as ResponseFunctionCall,
+  FunctionCallEvent as ResponseFunctionCallEvent, ResponseEvent,
 };
+
+use super::error::{ModelError, Result};
+use super::types::{ChatRequest, ChatResponse, Chunk, ListModelsResponse, ProviderConfig};
+
+pub type ResponseEventStream = Pin<Box<dyn Stream<Item = Result<ResponseEvent>> + Send>>;
 
 /// Model Provider trait
 ///
@@ -44,6 +50,12 @@ pub trait ModelProvider: Send + Sync {
     request: ChatRequest,
   ) -> Result<Pin<Box<dyn Stream<Item = Result<Chunk>> + Send>>>;
 
+  /// Creates a Responses-API compatible event stream.
+  async fn responses_stream(&self, request: ChatRequest) -> Result<ResponseEventStream> {
+    let chunk_stream = self.chat_completion_stream(request).await?;
+    Ok(chunk_stream_to_response_events(chunk_stream))
+  }
+
   /// Lists available models for this provider
   async fn list_models(&self) -> Result<ListModelsResponse>;
 
@@ -55,6 +67,112 @@ pub trait ModelProvider: Send + Sync {
 
   /// Returns the configuration for this provider
   fn config(&self) -> &ProviderConfig;
+}
+
+#[derive(Debug, Clone, Default)]
+struct FunctionCallBuffer {
+  id: String,
+  name: String,
+  arguments: String,
+}
+
+/// Convert provider chunk stream into codex-style response events.
+pub fn chunk_stream_to_response_events(
+  mut chunk_stream: Pin<Box<dyn Stream<Item = Result<Chunk>> + Send>>,
+) -> ResponseEventStream {
+  Box::pin(async_stream::stream! {
+    let mut text_index: usize = 0;
+    let mut function_calls: BTreeMap<String, FunctionCallBuffer> = BTreeMap::new();
+    let mut active_call_id: Option<String> = None;
+    let mut emitted_end_turn = false;
+
+    while let Some(chunk) = chunk_stream.next().await {
+      let chunk = match chunk {
+        Ok(chunk) => chunk,
+        Err(err) => {
+          yield Err(err);
+          return;
+        }
+      };
+
+      match chunk {
+        Chunk::Content { delta } => {
+          if delta.text.is_empty() {
+            continue;
+          }
+          let text = delta.text;
+          yield Ok(ResponseEvent::ContentDelta(ResponseContentDeltaEvent {
+            text,
+            index: text_index,
+          }));
+          text_index += 1;
+        }
+        Chunk::ToolCall { delta } => {
+          let call_id = delta
+            .id
+            .clone()
+            .or_else(|| active_call_id.clone())
+            .unwrap_or_else(|| format!("tool_call_{}", function_calls.len() + 1));
+
+          active_call_id = Some(call_id.clone());
+
+          let entry = function_calls
+            .entry(call_id.clone())
+            .or_insert_with(|| FunctionCallBuffer {
+              id: call_id.clone(),
+              ..Default::default()
+            });
+
+          if let Some(name) = delta.name {
+            entry.name = name;
+          }
+          if let Some(arguments) = delta.arguments {
+            entry.arguments.push_str(&arguments);
+          }
+        }
+        Chunk::MessageStop => {
+          for call in function_calls.values() {
+            if call.name.is_empty() {
+              continue;
+            }
+            yield Ok(ResponseEvent::FunctionCall(ResponseFunctionCallEvent {
+              id: call.id.clone(),
+              call_type: "function".to_string(),
+              function: ResponseFunctionCall {
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+              },
+            }));
+          }
+          function_calls.clear();
+          active_call_id = None;
+          emitted_end_turn = true;
+          yield Ok(ResponseEvent::EndTurn);
+        }
+        Chunk::MessageStart { .. } | Chunk::MessageDelta { .. } | Chunk::Unknown => {}
+      }
+    }
+
+    if !function_calls.is_empty() {
+      for call in function_calls.values() {
+        if call.name.is_empty() {
+          continue;
+        }
+        yield Ok(ResponseEvent::FunctionCall(ResponseFunctionCallEvent {
+          id: call.id.clone(),
+          call_type: "function".to_string(),
+          function: ResponseFunctionCall {
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+          },
+        }));
+      }
+    }
+
+    if !emitted_end_turn {
+      yield Ok(ResponseEvent::EndTurn);
+    }
+  })
 }
 
 /// Information about a provider
@@ -210,4 +328,83 @@ pub fn build_headers(
   }
 
   headers
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use futures::StreamExt;
+
+  #[tokio::test]
+  async fn chunk_stream_converts_text_delta_and_end_turn() {
+    let source = futures::stream::iter(vec![
+      Ok(Chunk::Content {
+        delta: super::super::types::ContentDelta {
+          text: "Hello".to_string(),
+        },
+      }),
+      Ok(Chunk::Content {
+        delta: super::super::types::ContentDelta {
+          text: " World".to_string(),
+        },
+      }),
+      Ok(Chunk::MessageStop),
+    ]);
+
+    let mut stream = chunk_stream_to_response_events(Box::pin(source));
+    let mut seen = Vec::new();
+    while let Some(event) = stream.next().await {
+      seen.push(event.expect("response event"));
+    }
+
+    assert_eq!(
+      seen,
+      vec![
+        ResponseEvent::ContentDelta(ResponseContentDeltaEvent {
+          text: "Hello".to_string(),
+          index: 0,
+        }),
+        ResponseEvent::ContentDelta(ResponseContentDeltaEvent {
+          text: " World".to_string(),
+          index: 1,
+        }),
+        ResponseEvent::EndTurn,
+      ]
+    );
+  }
+
+  #[tokio::test]
+  async fn chunk_stream_converts_tool_call_before_end_turn() {
+    let source = futures::stream::iter(vec![
+      Ok(Chunk::ToolCall {
+        delta: super::super::types::ToolCallDelta {
+          id: Some("call_1".to_string()),
+          name: Some("read_file".to_string()),
+          arguments: Some("{\"file_path\":\"a.txt\"}".to_string()),
+        },
+      }),
+      Ok(Chunk::MessageStop),
+    ]);
+
+    let mut stream = chunk_stream_to_response_events(Box::pin(source));
+    let mut seen = Vec::new();
+    while let Some(event) = stream.next().await {
+      seen.push(event.expect("response event"));
+    }
+
+    assert_eq!(
+      seen,
+      vec![
+        ResponseEvent::FunctionCall(ResponseFunctionCallEvent {
+          id: "call_1".to_string(),
+          call_type: "function".to_string(),
+          function: ResponseFunctionCall {
+            name: "read_file".to_string(),
+            arguments: "{\"file_path\":\"a.txt\"}".to_string(),
+          },
+        }),
+        ResponseEvent::EndTurn,
+      ]
+    );
+  }
 }

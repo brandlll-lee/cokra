@@ -650,8 +650,9 @@ mod tests {
   use super::Cokra;
   use crate::model::provider::ModelProvider;
   use crate::model::{
-    ChatRequest, ChatResponse, Choice, ChoiceMessage, Chunk, ListModelsResponse, Message,
-    ModelClient, ModelInfo, ProviderConfig, ProviderRegistry, ToolCall, ToolCallFunction, Usage,
+    ChatRequest, ChatResponse, Choice, ChoiceMessage, Chunk, ContentDelta, ListModelsResponse,
+    Message, ModelClient, ModelInfo, ProviderConfig, ProviderRegistry, ToolCall,
+    ToolCallDelta, ToolCallFunction, Usage,
   };
   use cokra_config::ApprovalMode;
   use cokra_protocol::{EventMsg, Op, UserInput};
@@ -712,7 +713,14 @@ mod tests {
       &self,
       _request: ChatRequest,
     ) -> crate::model::Result<Pin<Box<dyn Stream<Item = crate::model::Result<Chunk>> + Send>>> {
-      Ok(Box::pin(futures::stream::empty()))
+      Ok(Box::pin(futures::stream::iter(vec![
+        Ok(Chunk::Content {
+          delta: ContentDelta {
+            text: "mock reply".to_string(),
+          },
+        }),
+        Ok(Chunk::MessageStop),
+      ])))
     }
 
     async fn list_models(&self) -> crate::model::Result<ListModelsResponse> {
@@ -863,9 +871,47 @@ mod tests {
 
     async fn chat_completion_stream(
       &self,
-      _request: ChatRequest,
+      request: ChatRequest,
     ) -> crate::model::Result<Pin<Box<dyn Stream<Item = crate::model::Result<Chunk>> + Send>>> {
-      Ok(Box::pin(futures::stream::empty()))
+      let mut calls = self
+        .calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      *calls += 1;
+
+      if *calls == 1 {
+        let arguments = serde_json::json!({ "file_path": self.file_path }).to_string();
+        return Ok(Box::pin(futures::stream::iter(vec![
+          Ok(Chunk::ToolCall {
+            delta: ToolCallDelta {
+              id: Some("call_read_1".to_string()),
+              name: Some("read_file".to_string()),
+              arguments: Some(arguments),
+            },
+          }),
+          Ok(Chunk::MessageStop),
+        ])));
+      }
+
+      let saw_tool_output = request.messages.iter().any(|message| {
+        matches!(message, Message::Tool { tool_call_id, content }
+          if tool_call_id == "call_read_1" && content.contains("hello from tool loop"))
+      });
+
+      if !saw_tool_output {
+        return Err(crate::model::ModelError::InvalidRequest(
+          "follow-up request missing tool output".to_string(),
+        ));
+      }
+
+      Ok(Box::pin(futures::stream::iter(vec![
+        Ok(Chunk::Content {
+          delta: ContentDelta {
+            text: "tool loop complete".to_string(),
+          },
+        }),
+        Ok(Chunk::MessageStop),
+      ])))
     }
 
     async fn list_models(&self) -> crate::model::Result<ListModelsResponse> {

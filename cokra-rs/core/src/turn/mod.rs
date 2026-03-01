@@ -5,6 +5,7 @@
 pub mod context;
 pub mod executor;
 pub mod regular_task;
+pub mod sse_executor;
 pub mod task;
 
 pub use context::TurnContext;
