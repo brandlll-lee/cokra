@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use cokra_config::ConfigLoader;
 use cokra_core::Cokra;
 use cokra_core::model::auth::{AuthManager, AuthRequest, AuthType, Credentials};
+use cokra_protocol::{EventMsg, Op, UserInput};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
@@ -42,6 +43,14 @@ enum Commands {
     task: String,
     #[arg(short = 'd', long = "dir")]
     dir: Option<PathBuf>,
+  },
+  Exec {
+    task: String,
+    #[arg(short = 'd', long = "dir")]
+    dir: Option<PathBuf>,
+    /// Print events as JSON Lines instead of human-readable text
+    #[arg(long = "jsonl")]
+    jsonl: bool,
   },
   Mcp {
     #[command(subcommand)]
@@ -118,6 +127,9 @@ async fn main() -> Result<()> {
   match cli.command {
     Some(Commands::Interactive { dir }) => run_interactive(dir.or(cli.dir), overrides).await,
     Some(Commands::Run { task, dir }) => run_task(task, dir.or(cli.dir), overrides).await,
+    Some(Commands::Exec { task, dir, jsonl }) => {
+      run_exec(task, dir.or(cli.dir), overrides, jsonl).await
+    }
     Some(Commands::Mcp { mcp_command }) => handle_mcp_command(mcp_command).await,
     Some(Commands::Config { config_command }) => handle_config_command(config_command).await,
     Some(Commands::Auth { auth_command }) => handle_auth_command(auth_command).await,
@@ -218,6 +230,88 @@ async fn run_interactive(
   }
 
   Ok(())
+}
+
+async fn run_exec(
+  task: String,
+  dir: Option<PathBuf>,
+  overrides: Vec<(String, String)>,
+  jsonl: bool,
+) -> anyhow::Result<()> {
+  set_workdir(&dir)?;
+  let config = load_config(&dir, overrides)?;
+  let cokra = Cokra::new(config).await?;
+
+  let _submission_id = cokra
+    .submit(Op::UserInput {
+      items: vec![UserInput::Text {
+        text: task,
+        text_elements: Vec::new(),
+      }],
+      final_output_json_schema: None,
+    })
+    .await?;
+
+  loop {
+    let event = cokra.next_event().await?;
+    if jsonl {
+      println!("{}", serde_json::to_string(&event)?);
+    } else {
+      print_human_event(&event.msg);
+    }
+
+    if matches!(
+      event.msg,
+      EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) | EventMsg::Error(_)
+    ) {
+      break;
+    }
+  }
+
+  Ok(())
+}
+
+fn print_human_event(event: &EventMsg) {
+  match event {
+    EventMsg::SessionConfigured(e) => {
+      println!(
+        "[session] thread={} model={} approval={} sandbox={}",
+        e.thread_id, e.model, e.approval_policy, e.sandbox_mode
+      );
+    }
+    EventMsg::TurnStarted(e) => {
+      println!("[turn:start] turn={} model={}", e.turn_id, e.model);
+    }
+    EventMsg::ItemStarted(e) => {
+      println!("[item:start] id={} type={}", e.item_id, e.item_type);
+    }
+    EventMsg::AgentMessageDelta(e) | EventMsg::AgentMessageContentDelta(e) => {
+      print!("{}", e.delta);
+      let _ = io::stdout().flush();
+    }
+    EventMsg::ItemCompleted(e) => {
+      if !e.result.trim().is_empty() {
+        println!("\n[item:done] {}", e.result);
+      } else {
+        println!("\n[item:done]");
+      }
+    }
+    EventMsg::TurnComplete(e) => {
+      println!("[turn:done] status={:?}", e.status);
+    }
+    EventMsg::TurnAborted(e) => {
+      println!("[turn:aborted] {}", e.reason);
+    }
+    EventMsg::Error(e) => {
+      println!("[error] {}", e.user_facing_message);
+    }
+    EventMsg::Warning(e) => {
+      println!("[warning] {}", e.message);
+    }
+    _ => {
+      println!("[event] {:?}", event);
+    }
+  }
 }
 
 async fn handle_mcp_command(cmd: McpCommands) -> anyhow::Result<()> {

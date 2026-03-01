@@ -32,6 +32,7 @@ pub enum EventMsg {
   AgentMessage(AgentMessageEvent),
   UserMessage(UserMessageEvent),
   AgentMessageDelta(AgentMessageDeltaEvent),
+  AgentMessageContentDelta(AgentMessageContentDeltaEvent),
 
   // ========== CONFIGURATION EVENTS ==========
   SessionConfigured(SessionConfiguredEvent),
@@ -68,6 +69,14 @@ pub enum EventMsg {
 /// All operations that can be submitted to Cokra
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Op {
+  /// Configure session runtime defaults before processing turns.
+  ConfigureSession {
+    cwd: PathBuf,
+    approval_policy: AskForApproval,
+    sandbox_policy: SandboxPolicy,
+    model: String,
+  },
+
   /// Interrupt current operation
   Interrupt,
 
@@ -128,6 +137,20 @@ pub enum Op {
 
   /// List available models
   ListModels,
+}
+
+/// A submitted operation with a caller-provided unique identifier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Submission {
+  pub id: String,
+  pub op: Op,
+}
+
+/// A single event emitted from core runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Event {
+  pub id: String,
+  pub msg: EventMsg,
 }
 
 // ============================================================================
@@ -278,6 +301,9 @@ pub struct AgentMessageDeltaEvent {
   pub delta: String,
 }
 
+/// Alias event used by codex-style stream consumers.
+pub type AgentMessageContentDeltaEvent = AgentMessageDeltaEvent;
+
 /// User message event
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserMessageEvent {
@@ -427,11 +453,21 @@ impl ThreadId {
   pub fn generate() -> String {
     Uuid::new_v4().to_string()
   }
+
+  pub fn as_uuid(&self) -> Uuid {
+    self.uuid
+  }
 }
 
 impl Default for ThreadId {
   fn default() -> Self {
     Self::new()
+  }
+}
+
+impl std::fmt::Display for ThreadId {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "{}", self.uuid)
   }
 }
 

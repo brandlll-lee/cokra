@@ -7,20 +7,25 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum JsonSchema {
   String {
+    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
   },
   Number {
+    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
   },
   Boolean {
+    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
   },
   Array {
     items: Box<JsonSchema>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
   },
   Object {
     properties: BTreeMap<String, JsonSchema>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     required: Option<Vec<String>>,
   },
 }
@@ -311,4 +316,21 @@ fn view_image_tool() -> ToolSpec {
     ToolHandlerType::Function,
     default_permissions(),
   )
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn object_schema_omits_null_required_field() {
+    let schema = JsonSchema::Object {
+      properties: BTreeMap::new(),
+      required: None,
+    };
+    let value = schema.to_value();
+
+    assert_eq!(value["type"], "object");
+    assert!(value.get("required").is_none());
+  }
 }

@@ -6,6 +6,7 @@ pub mod config;
 pub mod mcp;
 pub mod model;
 pub mod session;
+pub mod thread_manager;
 pub mod tools;
 pub mod turn;
 

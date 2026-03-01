@@ -3,12 +3,12 @@
 //! Individual implementations for each supported LLM provider
 
 use reqwest::Client;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::error::{ModelError, Result};
 use super::registry::ProviderRegistry;
 use super::streaming::{OpenAIUsageParser, StreamingConfig, StreamingProcessor, UsageParser};
-use super::types::{ChatRequest, ChatResponse, Chunk, ProviderConfig};
+use super::types::{ChatRequest, ChatResponse, Chunk, Message, ProviderConfig};
 
 pub mod anthropic;
 pub mod github;
@@ -174,9 +174,15 @@ pub fn create_client(timeout: Option<u64>) -> Client {
 
 /// Build OpenAI-compatible request body
 pub fn build_openai_request(request: ChatRequest, model: &str) -> serde_json::Value {
+  let messages: Vec<Value> = request
+    .messages
+    .iter()
+    .map(openai_compatible_message)
+    .collect();
+
   json!({
       "model": model,
-      "messages": request.messages,
+      "messages": messages,
       "temperature": request.temperature,
       "max_tokens": request.max_tokens,
       "stream": request.stream,
@@ -186,6 +192,37 @@ pub fn build_openai_request(request: ChatRequest, model: &str) -> serde_json::Va
       "frequency_penalty": request.frequency_penalty,
       "top_p": request.top_p,
   })
+}
+
+fn openai_compatible_message(message: &Message) -> Value {
+  match message {
+    Message::System(content) => json!({
+      "role": "system",
+      "content": content,
+    }),
+    Message::User(content) => json!({
+      "role": "user",
+      "content": content,
+    }),
+    Message::Assistant { content, tool_calls } => {
+      let mut out = json!({
+        "role": "assistant",
+        "content": content,
+      });
+      if let Some(calls) = tool_calls {
+        out["tool_calls"] = json!(calls);
+      }
+      out
+    }
+    Message::Tool {
+      tool_call_id,
+      content,
+    } => json!({
+      "role": "tool",
+      "tool_call_id": tool_call_id,
+      "content": content,
+    }),
+  }
 }
 
 /// Parse OpenAI-compatible response
@@ -260,4 +297,66 @@ pub fn create_response_stream_with_usage_parser(
           }
       }
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::build_openai_request;
+  use crate::model::types::{ChatRequest, Message};
+  use serde_json::json;
+
+  #[test]
+  fn build_openai_request_uses_lowercase_roles() {
+    let request = ChatRequest {
+      model: "openrouter/openai/gpt-5.1-codex-mini".to_string(),
+      messages: vec![
+        Message::System("sys".to_string()),
+        Message::User("hi".to_string()),
+        Message::Assistant {
+          content: Some("ok".to_string()),
+          tool_calls: None,
+        },
+        Message::Tool {
+          tool_call_id: "call_1".to_string(),
+          content: "tool out".to_string(),
+        },
+      ],
+      stream: false,
+      ..Default::default()
+    };
+
+    let payload = build_openai_request(request, "openrouter/openai/gpt-5.1-codex-mini");
+    let messages = payload["messages"]
+      .as_array()
+      .expect("messages should be an array");
+
+    let roles: Vec<&str> = messages
+      .iter()
+      .map(|m| m["role"].as_str().unwrap_or(""))
+      .collect();
+    assert_eq!(roles, vec!["system", "user", "assistant", "tool"]);
+  }
+
+  #[test]
+  fn build_openai_request_keeps_tool_fields() {
+    let request = ChatRequest {
+      model: "openrouter/openai/gpt-5.1-codex-mini".to_string(),
+      messages: vec![Message::Tool {
+        tool_call_id: "call_1".to_string(),
+        content: "done".to_string(),
+      }],
+      stream: false,
+      ..Default::default()
+    };
+
+    let payload = build_openai_request(request, "openrouter/openai/gpt-5.1-codex-mini");
+    assert_eq!(
+      payload["messages"][0],
+      json!({
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": "done"
+      })
+    );
+  }
 }
