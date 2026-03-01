@@ -14,8 +14,10 @@ use crate::model::{
   ToolCallFunction, Usage,
 };
 use crate::session::Session;
-use crate::tools::context::{ToolInvocation, ToolOutput};
+use crate::tools::context::ToolOutput;
+use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::registry::ToolRegistry;
+use crate::tools::router::{ToolCall, ToolRouter, ToolRunContext};
 
 use super::executor::{TurnConfig, TurnError, TurnResult};
 
@@ -23,6 +25,7 @@ use super::executor::{TurnConfig, TurnError, TurnResult};
 pub struct SseTurnExecutor {
   model_client: Arc<ModelClient>,
   tool_registry: Arc<ToolRegistry>,
+  tool_runtime: ToolCallRuntime,
   session: Arc<Session>,
   tx_event: mpsc::Sender<EventMsg>,
   config: TurnConfig,
@@ -32,6 +35,7 @@ impl SseTurnExecutor {
   pub fn new(
     model_client: Arc<ModelClient>,
     tool_registry: Arc<ToolRegistry>,
+    tool_router: Arc<ToolRouter>,
     session: Arc<Session>,
     tx_event: mpsc::Sender<EventMsg>,
     config: TurnConfig,
@@ -39,6 +43,7 @@ impl SseTurnExecutor {
     Self {
       model_client,
       tool_registry,
+      tool_runtime: ToolCallRuntime::new(tool_router),
       session,
       tx_event,
       config,
@@ -154,7 +159,7 @@ impl SseTurnExecutor {
       }
 
       for call in function_calls {
-        let output = self.execute_tool_call(&call).await?;
+        let output = self.execute_tool_call(&call, &thread_id, &turn_id).await?;
         let output_call_id = if output.id.is_empty() {
           call.id
         } else {
@@ -195,20 +200,36 @@ impl SseTurnExecutor {
     }
   }
 
-  async fn execute_tool_call(&self, call: &FunctionCallEvent) -> Result<ToolOutput, TurnError> {
-    let handler = self
-      .tool_registry
-      .get_handler(&call.function.name)
-      .ok_or_else(|| TurnError::ToolNotFound(call.function.name.clone()))?;
+  async fn execute_tool_call(
+    &self,
+    call: &FunctionCallEvent,
+    thread_id: &str,
+    turn_id: &str,
+  ) -> Result<ToolOutput, TurnError> {
+    let args = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+      .map_err(|err| TurnError::ToolError(format!("invalid tool arguments: {err}")))?;
 
-    let invocation = ToolInvocation {
-      id: call.id.clone(),
-      name: call.function.name.clone(),
-      arguments: call.function.arguments.clone(),
+    let tool_call = ToolCall {
+      tool_name: call.function.name.clone(),
+      call_id: call.id.clone(),
+      args,
     };
+    let mut run_ctx = ToolRunContext::new(
+      Arc::clone(&self.session),
+      thread_id.to_string(),
+      turn_id.to_string(),
+      self.config.cwd.clone(),
+      self.config.approval_policy.clone(),
+      self.config.sandbox_policy.clone(),
+    );
+    run_ctx.has_managed_network_requirements = self.config.has_managed_network_requirements;
+    run_ctx.auto_approve_on_request = self.config.auto_approve_on_request;
+    run_ctx.tx_event = Some(self.tx_event.clone());
 
-    let mut output = handler
-      .handle(invocation)
+    let mut output = self
+      .tool_runtime
+      .handle_tool_call(tool_call, run_ctx)
+      .await
       .map_err(|err| TurnError::ToolError(err.to_string()))?;
 
     if output.id.is_empty() {
@@ -238,6 +259,9 @@ mod tests {
   use reqwest::Client;
   use tokio::sync::{Mutex, mpsc};
 
+  use cokra_config::{
+    ApprovalMode, ApprovalPolicy, PatchApproval, SandboxConfig, SandboxMode, ShellApproval,
+  };
   use cokra_protocol::{ContentDeltaEvent, FunctionCall, ResponseErrorEvent};
 
   use super::SseTurnExecutor;
@@ -249,6 +273,8 @@ mod tests {
   use crate::session::Session;
   use crate::tools::context::{FunctionCallError, ToolInvocation, ToolOutput};
   use crate::tools::registry::{ToolHandler, ToolKind, ToolRegistry};
+  use crate::tools::router::ToolRouter;
+  use crate::tools::validation::ToolValidator;
   use crate::turn::{TurnConfig, TurnError};
   use cokra_protocol::{EventMsg, FunctionCallEvent, ResponseEvent};
 
@@ -425,7 +451,25 @@ mod tests {
       max_tokens: None,
       system_prompt: None,
       enable_tools: true,
+      ..TurnConfig::default()
     }
+  }
+
+  fn build_router(registry: Arc<ToolRegistry>) -> Arc<ToolRouter> {
+    Arc::new(ToolRouter::new(
+      registry,
+      Arc::new(ToolValidator::new(
+        SandboxConfig {
+          mode: SandboxMode::Permissive,
+          network_access: false,
+        },
+        ApprovalPolicy {
+          policy: ApprovalMode::Auto,
+          shell: ShellApproval::OnFailure,
+          patch: PatchApproval::OnRequest,
+        },
+      )),
+    ))
   }
 
   fn collect_events(mut rx_event: mpsc::Receiver<EventMsg>) -> Vec<EventMsg> {
@@ -446,12 +490,14 @@ mod tests {
 
     let model_client = build_client(provider).await;
     let tool_registry = Arc::new(ToolRegistry::new());
+    let tool_router = build_router(tool_registry.clone());
     let session = Arc::new(Session::new());
     let (tx_event, rx_event) = mpsc::channel(64);
 
     let executor = SseTurnExecutor::new(
       model_client,
       tool_registry,
+      tool_router,
       session,
       tx_event,
       test_config(),
@@ -500,6 +546,7 @@ mod tests {
     let mut registry = ToolRegistry::new();
     registry.register_handler("read_file", Arc::new(ReadFileLikeHandler));
     let tool_registry = Arc::new(registry);
+    let tool_router = build_router(tool_registry.clone());
 
     let session = Arc::new(Session::new());
     let (tx_event, rx_event) = mpsc::channel(64);
@@ -507,6 +554,7 @@ mod tests {
     let executor = SseTurnExecutor::new(
       model_client,
       tool_registry,
+      tool_router,
       session,
       tx_event,
       test_config(),
@@ -549,12 +597,14 @@ mod tests {
 
     let model_client = build_client(provider).await;
     let tool_registry = Arc::new(ToolRegistry::new());
+    let tool_router = build_router(tool_registry.clone());
     let session = Arc::new(Session::new());
     let (tx_event, rx_event) = mpsc::channel(64);
 
     let executor = SseTurnExecutor::new(
       model_client,
       tool_registry,
+      tool_router,
       session,
       tx_event,
       test_config(),
@@ -591,12 +641,14 @@ mod tests {
     let provider = MockResponsesProvider::new(vec![vec![MockStep::Error("boom")]]);
     let model_client = build_client(provider).await;
     let tool_registry = Arc::new(ToolRegistry::new());
+    let tool_router = build_router(tool_registry.clone());
     let session = Arc::new(Session::new());
     let (tx_event, _rx_event) = mpsc::channel(64);
 
     let executor = SseTurnExecutor::new(
       model_client,
       tool_registry,
+      tool_router,
       session,
       tx_event,
       test_config(),

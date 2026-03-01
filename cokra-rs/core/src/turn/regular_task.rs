@@ -2,12 +2,16 @@
 //!
 //! Standard conversation flow task
 
+use crate::tools::router::ToolRouter;
+use crate::tools::validation::ToolValidator;
 use crate::turn::{
   CancellationToken, SessionTask, TaskKind, TaskMetadata, TurnConfig, TurnContext, TurnError,
   TurnExecutor, UserInput,
 };
 use async_trait::async_trait;
+use cokra_config::{SandboxConfig, SandboxMode};
 use cokra_protocol::AgentMessageEvent;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Regular conversation task
@@ -82,13 +86,25 @@ impl SessionTask for RegularTask {
         max_tokens: cx.max_tokens,
         system_prompt: None,
         enable_tools: cx.enable_tools,
+        ..TurnConfig::default()
       };
 
       let (tx_event, _rx_event) = mpsc::channel(256);
+      let router = Arc::new(ToolRouter::new(
+        cx.tool_registry.clone(),
+        Arc::new(ToolValidator::new(
+          SandboxConfig {
+            mode: SandboxMode::Permissive,
+            network_access: true,
+          },
+          cx.approval_policy.clone(),
+        )),
+      ));
 
       TurnExecutor::new(
         cx.model_client.clone(),
         cx.tool_registry.clone(),
+        router,
         cx.session.clone(),
         tx_event,
         config,

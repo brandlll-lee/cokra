@@ -24,7 +24,7 @@ use crate::tools::handlers::spawn_agent::{
   clear_spawn_agent_runtime, configure_spawn_agent_runtime,
 };
 use crate::tools::registry::ToolRegistry;
-use crate::tools::router::ToolRouter;
+use crate::tools::router::{ToolRouter, ToolRunContext};
 use crate::turn::TurnConfig;
 
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 64;
@@ -64,11 +64,14 @@ pub struct Cokra {
   pub(crate) agent_status: watch::Receiver<AgentStatus>,
   pub(crate) session: Arc<Session>,
 
+  #[allow(dead_code)]
   pub(crate) model_client: Arc<ModelClient>,
+  #[allow(dead_code)]
   pub(crate) tool_context: Arc<ToolContext>,
   pub(crate) config: Arc<Config>,
   pub(crate) turn_state: Arc<RwLock<TurnState>>,
   pub(crate) event_bus: Arc<broadcast::Sender<EventMsg>>,
+  #[allow(dead_code)]
   pub(crate) tool_registry: Arc<ToolRegistry>,
   pub(crate) tool_router: Arc<ToolRouter>,
   pub(crate) agent_control: Arc<AgentControl>,
@@ -137,6 +140,7 @@ impl Cokra {
       Uuid::new_v4().to_string(),
       model_client.clone(),
       tool_registry.clone(),
+      tool_router.clone(),
       session.clone(),
       turn_config,
       tx_raw_event,
@@ -312,9 +316,25 @@ impl Cokra {
     let args = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
       .map_err(|e| FunctionCallError::InvalidArguments(format!("invalid tool args: {e}")))?;
 
+    let thread_id = self
+      .session
+      .thread_id()
+      .cloned()
+      .unwrap_or_default()
+      .to_string();
+    let mut run_ctx = ToolRunContext::new(
+      Arc::clone(&self.session),
+      thread_id,
+      Uuid::new_v4().to_string(),
+      std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+      map_approval_policy(&self.config),
+      map_sandbox_policy(&self.config),
+    );
+    run_ctx.has_managed_network_requirements = self.config.sandbox.network_access;
+
     self
       .tool_router
-      .route_tool_call(&tool_call.function.name, args)
+      .route_tool_call(&tool_call.function.name, args, run_ctx)
       .await
   }
 
@@ -377,6 +397,11 @@ fn build_turn_config(config: &Config) -> TurnConfig {
 
   TurnConfig {
     model: resolved_model,
+    approval_policy: map_approval_policy(config),
+    sandbox_policy: map_sandbox_policy(config),
+    cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    has_managed_network_requirements: config.sandbox.network_access,
+    auto_approve_on_request: true,
     ..TurnConfig::default()
   }
 }
@@ -651,8 +676,8 @@ mod tests {
   use crate::model::provider::ModelProvider;
   use crate::model::{
     ChatRequest, ChatResponse, Choice, ChoiceMessage, Chunk, ContentDelta, ListModelsResponse,
-    Message, ModelClient, ModelInfo, ProviderConfig, ProviderRegistry, ToolCall,
-    ToolCallDelta, ToolCallFunction, Usage,
+    Message, ModelClient, ModelInfo, ProviderConfig, ProviderRegistry, ToolCall, ToolCallDelta,
+    ToolCallFunction, Usage,
   };
   use cokra_config::ApprovalMode;
   use cokra_protocol::{EventMsg, Op, UserInput};
@@ -1015,12 +1040,20 @@ mod tests {
     let mut saw_item_started = false;
     let mut saw_item_completed = false;
     let mut saw_complete = false;
+    let mut configured_thread_id = None;
+    let mut started_thread_id = None;
 
     for _ in 0..20 {
       let evt = cokra.next_event().await.expect("next event");
       match evt.msg {
-        EventMsg::SessionConfigured(_) => saw_configured = true,
-        EventMsg::TurnStarted(_) => saw_started = true,
+        EventMsg::SessionConfigured(ev) => {
+          configured_thread_id = Some(ev.thread_id);
+          saw_configured = true;
+        }
+        EventMsg::TurnStarted(ev) => {
+          started_thread_id = Some(ev.thread_id);
+          saw_started = true;
+        }
         EventMsg::ItemStarted(_) => saw_item_started = true,
         EventMsg::ItemCompleted(_) => saw_item_completed = true,
         EventMsg::TurnComplete(_) => {
@@ -1036,6 +1069,7 @@ mod tests {
     assert!(saw_item_started);
     assert!(saw_item_completed);
     assert!(saw_complete);
+    assert_eq!(configured_thread_id, started_thread_id);
   }
 
   #[tokio::test]

@@ -1,7 +1,12 @@
 pub mod context;
+pub mod events;
 pub mod handlers;
+pub mod network_approval;
+pub mod orchestrator;
+pub mod parallel;
 pub mod registry;
 pub mod router;
+pub mod sandboxing;
 pub mod spec;
 pub mod validation;
 

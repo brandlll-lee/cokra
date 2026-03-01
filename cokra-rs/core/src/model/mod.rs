@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 /// Default providers to register
 pub fn register_default_providers(
-  registry: &ProviderRegistry,
+  _registry: &ProviderRegistry,
 ) -> impl std::future::Future<Output = Result<()>> + '_ {
   async move {
     // Providers will be registered with their specific implementations

@@ -8,6 +8,7 @@ use crate::model::ModelClient;
 use crate::session::Session;
 use crate::thread_manager::ThreadManagerState;
 use crate::tools::registry::ToolRegistry;
+use crate::tools::router::ToolRouter;
 use crate::turn::{TurnConfig, TurnExecutor, TurnResult, UserInput};
 
 use super::guards::{Guards, exceeds_thread_spawn_depth_limit};
@@ -25,6 +26,7 @@ pub struct AgentControl {
   status: Arc<RwLock<AgentStatus>>,
   model_client: Arc<ModelClient>,
   tool_registry: Arc<ToolRegistry>,
+  tool_router: Arc<ToolRouter>,
   session: Arc<Session>,
   turn_config: Arc<RwLock<TurnConfig>>,
   tx_event: mpsc::Sender<EventMsg>,
@@ -41,6 +43,7 @@ impl AgentControl {
     id: String,
     model_client: Arc<ModelClient>,
     tool_registry: Arc<ToolRegistry>,
+    tool_router: Arc<ToolRouter>,
     session: Arc<Session>,
     turn_config: TurnConfig,
     tx_event: mpsc::Sender<EventMsg>,
@@ -54,6 +57,7 @@ impl AgentControl {
       status: Arc::new(RwLock::new(AgentStatus::PendingInit)),
       model_client,
       tool_registry,
+      tool_router,
       session,
       turn_config: Arc::new(RwLock::new(turn_config)),
       tx_event,
@@ -87,6 +91,7 @@ impl AgentControl {
     let executor = TurnExecutor::new(
       self.model_client.clone(),
       self.tool_registry.clone(),
+      self.tool_router.clone(),
       self.session.clone(),
       self.tx_event.clone(),
       turn_config,

@@ -101,3 +101,7 @@ cokra-rs/target/
 cokra-rs/.target/
 cokra-rs/target-local/
 cokra-rs/.tmp/
+
+# Rust/Cargo temp workdirs at repo root
+.cargo-tmp/
+.tmp/

@@ -64,6 +64,13 @@ impl ToolRegistry {
     handler.handle(invocation)
   }
 
+  pub fn is_mutating(&self, invocation: &ToolInvocation) -> Result<bool, FunctionCallError> {
+    let handler = self
+      .get_handler(&invocation.name)
+      .ok_or_else(|| FunctionCallError::ToolNotFound(invocation.name.clone()))?;
+    Ok(handler.is_mutating(invocation))
+  }
+
   pub fn model_tools(&self) -> Vec<crate::model::Tool> {
     self
       .list_specs()

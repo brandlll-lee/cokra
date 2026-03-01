@@ -91,7 +91,7 @@ impl ProviderRegistry {
     } else {
       // Try to return the first available provider
       let providers = self.providers.read().await;
-      if let Some((id, provider)) = providers.iter().next() {
+      if let Some((_id, provider)) = providers.iter().next() {
         Ok(provider.clone())
       } else {
         Err(ModelError::NoDefaultProvider)
@@ -114,8 +114,6 @@ impl ProviderRegistry {
   pub async fn list_providers(&self) -> Vec<ProviderInfo> {
     let providers = self.providers.read().await;
     let configs = self.configs.read().await;
-    let default_id = self.default_provider.read().await.clone();
-
     providers
       .iter()
       .map(|(id, provider)| {

@@ -3,7 +3,7 @@
 //! Support for running local models via Ollama
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use reqwest::Client;
 use serde::Deserialize;
 use std::pin::Pin;
@@ -211,6 +211,7 @@ impl ModelProvider for OllamaProvider {
 
     #[derive(Deserialize)]
     struct OllamaResponse {
+      #[allow(dead_code)]
       model: String,
       message: OllamaResponseMessage,
       done: bool,
@@ -222,6 +223,7 @@ impl ModelProvider for OllamaProvider {
 
     #[derive(Deserialize)]
     struct OllamaResponseMessage {
+      #[allow(dead_code)]
       role: String,
       content: String,
     }

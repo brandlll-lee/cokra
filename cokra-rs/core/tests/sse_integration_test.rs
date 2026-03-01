@@ -1,11 +1,15 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use futures::Stream;
 use reqwest::Client;
 use tokio::sync::{Mutex, mpsc};
 
+use cokra_config::{
+  ApprovalMode, ApprovalPolicy, PatchApproval, SandboxConfig, SandboxMode, ShellApproval,
+};
 use cokra_core::model::{
   ChatRequest, ChatResponse, Chunk, ListModelsResponse, Message, ModelClient, ModelError,
   ModelInfo, ModelProvider, ProviderConfig, ProviderRegistry,
@@ -13,9 +17,13 @@ use cokra_core::model::{
 use cokra_core::session::Session;
 use cokra_core::tools::context::{FunctionCallError, ToolInvocation, ToolOutput};
 use cokra_core::tools::registry::{ToolHandler, ToolKind, ToolRegistry};
+use cokra_core::tools::router::ToolRouter;
+use cokra_core::tools::validation::ToolValidator;
 use cokra_core::turn::{TurnConfig, TurnExecutor, UserInput};
 
-use cokra_protocol::{ContentDeltaEvent, EventMsg, FunctionCall, FunctionCallEvent, ResponseEvent};
+use cokra_protocol::{
+  AskForApproval, ContentDeltaEvent, EventMsg, FunctionCall, FunctionCallEvent, ResponseEvent,
+};
 
 #[derive(Debug)]
 enum MockStep {
@@ -34,10 +42,18 @@ struct MockResponsesProvider {
   config: ProviderConfig,
   scripts: Arc<Mutex<Vec<Vec<MockStep>>>>,
   calls: Arc<Mutex<u32>>,
+  expected_tool_output: Option<(String, String)>,
 }
 
 impl MockResponsesProvider {
   fn new(scripts: Vec<Vec<MockStep>>) -> Self {
+    Self::new_with_expectation(scripts, Some(("read_1", "hello from tool")))
+  }
+
+  fn new_with_expectation(
+    scripts: Vec<Vec<MockStep>>,
+    expected_tool_output: Option<(&str, &str)>,
+  ) -> Self {
     Self {
       client: Client::new(),
       config: ProviderConfig {
@@ -46,6 +62,8 @@ impl MockResponsesProvider {
       },
       scripts: Arc::new(Mutex::new(scripts)),
       calls: Arc::new(Mutex::new(0)),
+      expected_tool_output: expected_tool_output
+        .map(|(id, content)| (id.to_string(), content.to_string())),
     }
   }
 }
@@ -87,10 +105,15 @@ impl ModelProvider for MockResponsesProvider {
     *calls += 1;
 
     if *calls == 2 {
+      let expected = self.expected_tool_output.clone();
       let saw_tool_output = request.messages.iter().any(|msg| {
-        matches!(msg, Message::Tool { tool_call_id, content } if tool_call_id == "read_1" && content.contains("hello from tool"))
+        if let Some((expected_id, expected_content)) = expected.as_ref() {
+          matches!(msg, Message::Tool { tool_call_id, content } if tool_call_id == expected_id && content.contains(expected_content))
+        } else {
+          false
+        }
       });
-      if !saw_tool_output {
+      if expected.is_some() && !saw_tool_output {
         return Err(ModelError::InvalidRequest(
           "missing function_call_output simulation".to_string(),
         ));
@@ -169,6 +192,32 @@ impl ToolHandler for ReadFileLikeHandler {
   }
 }
 
+#[derive(Debug)]
+struct FlakyWriteHandler {
+  calls: Arc<AtomicUsize>,
+}
+
+impl ToolHandler for FlakyWriteHandler {
+  fn kind(&self) -> ToolKind {
+    ToolKind::Function
+  }
+
+  fn is_mutating(&self, _invocation: &ToolInvocation) -> bool {
+    true
+  }
+
+  fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    if invocation.name != "write_file" {
+      return Err(FunctionCallError::ToolNotFound(invocation.name));
+    }
+    let n = self.calls.fetch_add(1, Ordering::SeqCst);
+    if n == 0 {
+      return Err(FunctionCallError::Execution("sandbox denied".to_string()));
+    }
+    Ok(ToolOutput::success("write ok"))
+  }
+}
+
 async fn build_client(provider: MockResponsesProvider) -> Arc<ModelClient> {
   let registry = Arc::new(ProviderRegistry::new());
   registry.register(provider).await;
@@ -191,7 +240,25 @@ fn test_config() -> TurnConfig {
     max_tokens: None,
     system_prompt: None,
     enable_tools: true,
+    ..TurnConfig::default()
   }
+}
+
+fn build_router(registry: Arc<ToolRegistry>) -> Arc<ToolRouter> {
+  Arc::new(ToolRouter::new(
+    registry,
+    Arc::new(ToolValidator::new(
+      SandboxConfig {
+        mode: SandboxMode::Permissive,
+        network_access: false,
+      },
+      ApprovalPolicy {
+        policy: ApprovalMode::Auto,
+        shell: ShellApproval::OnFailure,
+        patch: PatchApproval::OnRequest,
+      },
+    )),
+  ))
 }
 
 #[tokio::test]
@@ -218,6 +285,7 @@ async fn sse_turn_with_read_file_tool() {
   let mut registry = ToolRegistry::new();
   registry.register_handler("read_file", Arc::new(ReadFileLikeHandler));
   let tool_registry = Arc::new(registry);
+  let tool_router = build_router(tool_registry.clone());
 
   let session = Arc::new(Session::new());
   let (tx_event, mut rx_event) = mpsc::channel(128);
@@ -225,6 +293,7 @@ async fn sse_turn_with_read_file_tool() {
   let executor = TurnExecutor::new(
     model_client,
     tool_registry,
+    tool_router,
     session,
     tx_event,
     test_config(),
@@ -268,4 +337,131 @@ async fn sse_turn_with_read_file_tool() {
       "turn_complete",
     ]
   );
+}
+
+#[tokio::test]
+async fn sse_turn_retries_after_sandbox_denied_when_policy_allows() {
+  let provider = MockResponsesProvider::new_with_expectation(
+    vec![
+      vec![
+        MockStep::Delta("Trying write. "),
+        MockStep::Call {
+          id: "write_1",
+          name: "write_file",
+          arguments: r#"{"file_path":"demo.txt","content":"hello"}"#,
+        },
+        MockStep::End,
+      ],
+      vec![MockStep::Delta("write complete"), MockStep::End],
+    ],
+    Some(("write_1", "write ok")),
+  );
+
+  let model_client = build_client(provider).await;
+  let mut registry = ToolRegistry::new();
+  let write_calls = Arc::new(AtomicUsize::new(0));
+  registry.register_handler(
+    "write_file",
+    Arc::new(FlakyWriteHandler {
+      calls: Arc::clone(&write_calls),
+    }),
+  );
+  let tool_registry = Arc::new(registry);
+  let tool_router = build_router(tool_registry.clone());
+
+  let session = Arc::new(Session::new());
+  let (tx_event, mut rx_event) = mpsc::channel(128);
+
+  let mut config = test_config();
+  config.approval_policy = AskForApproval::UnlessTrusted;
+
+  let executor = TurnExecutor::new(
+    model_client,
+    tool_registry,
+    tool_router,
+    session,
+    tx_event,
+    config,
+  );
+  let result = executor
+    .run_turn(UserInput {
+      content: "write demo".to_string(),
+      attachments: Vec::new(),
+    })
+    .await
+    .expect("run turn");
+
+  assert!(result.success);
+  assert!(result.content.contains("write complete"));
+  assert_eq!(write_calls.load(Ordering::SeqCst), 2);
+
+  let mut saw_approval = false;
+  while let Ok(event) = rx_event.try_recv() {
+    if matches!(event, EventMsg::ExecApprovalRequest(_)) {
+      saw_approval = true;
+    }
+  }
+  assert!(saw_approval, "expected approval event for write_file");
+}
+
+#[tokio::test]
+async fn sse_turn_supports_deferred_network_approval_path() {
+  let provider = MockResponsesProvider::new_with_expectation(
+    vec![
+      vec![
+        MockStep::Delta("Checking network path. "),
+        MockStep::Call {
+          id: "read_2",
+          name: "read_file",
+          arguments: r#"{"file_path":"demo.txt","__network_approval_mode":"deferred"}"#,
+        },
+        MockStep::End,
+      ],
+      vec![MockStep::Delta("deferred done"), MockStep::End],
+    ],
+    Some(("read_2", "hello from tool")),
+  );
+
+  let model_client = build_client(provider).await;
+  let mut registry = ToolRegistry::new();
+  registry.register_handler("read_file", Arc::new(ReadFileLikeHandler));
+  let tool_registry = Arc::new(registry);
+  let tool_router = build_router(tool_registry.clone());
+
+  let session = Arc::new(Session::new());
+  let (tx_event, mut rx_event) = mpsc::channel(128);
+
+  let mut config = test_config();
+  config.has_managed_network_requirements = true;
+
+  let executor = TurnExecutor::new(
+    model_client,
+    tool_registry,
+    tool_router,
+    session,
+    tx_event,
+    config,
+  );
+  let result = executor
+    .run_turn(UserInput {
+      content: "read demo deferred".to_string(),
+      attachments: Vec::new(),
+    })
+    .await
+    .expect("run turn");
+
+  assert!(result.success);
+  assert!(result.content.contains("deferred done"));
+
+  let mut begin_count = 0usize;
+  let mut end_count = 0usize;
+  while let Ok(event) = rx_event.try_recv() {
+    match event {
+      EventMsg::ExecCommandBegin(_) => begin_count += 1,
+      EventMsg::ExecCommandEnd(_) => end_count += 1,
+      _ => {}
+    }
+  }
+  assert!(begin_count >= 1);
+  assert!(end_count >= 1);
 }

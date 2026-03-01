@@ -3,7 +3,7 @@
 //! Support for GitHub Copilot models (uses OAuth or token-based auth)
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
@@ -49,7 +49,7 @@ impl GitHubCopilotProvider {
   /// Check if we should use the Responses API for this model
   fn should_use_responses_api(&self, model: &str) -> bool {
     // Use Responses API for o1 models
-    model.starts_with("o1-") || model.contains("o1")
+    self.use_responses_api && (model.starts_with("o1-") || model.contains("o1"))
   }
 
   /// Build authorization header
@@ -101,6 +101,7 @@ struct CopilotMessage {
 struct CopilotResponse {
   id: String,
   choices: Vec<CopilotChoice>,
+  #[allow(dead_code)]
   model: String,
   usage: CopilotUsage,
 }

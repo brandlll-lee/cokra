@@ -2,6 +2,7 @@
 //!
 //! Executes a turn (one user interaction cycle) in a Cokra session.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -10,8 +11,10 @@ use uuid::Uuid;
 use crate::model::{Message as ModelMessage, ModelClient};
 use crate::session::Session;
 use crate::tools::registry::ToolRegistry;
+use crate::tools::router::ToolRouter;
 use cokra_protocol::{
-  CompletionStatus, ErrorEvent, EventMsg, ModeKind, TurnCompleteEvent, TurnStartedEvent,
+  AskForApproval, CompletionStatus, ErrorEvent, EventMsg, ModeKind, ReadOnlyAccess, SandboxPolicy,
+  TurnCompleteEvent, TurnStartedEvent,
 };
 
 use super::sse_executor::SseTurnExecutor;
@@ -53,6 +56,11 @@ pub struct TurnConfig {
   pub max_tokens: Option<u32>,
   pub system_prompt: Option<String>,
   pub enable_tools: bool,
+  pub approval_policy: AskForApproval,
+  pub sandbox_policy: SandboxPolicy,
+  pub cwd: PathBuf,
+  pub has_managed_network_requirements: bool,
+  pub auto_approve_on_request: bool,
 }
 
 impl Default for TurnConfig {
@@ -63,6 +71,13 @@ impl Default for TurnConfig {
       max_tokens: Some(4096),
       system_prompt: None,
       enable_tools: true,
+      approval_policy: AskForApproval::OnRequest,
+      sandbox_policy: SandboxPolicy::ReadOnly {
+        access: ReadOnlyAccess::FullAccess,
+      },
+      cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+      has_managed_network_requirements: false,
+      auto_approve_on_request: true,
     }
   }
 }
@@ -71,6 +86,7 @@ impl Default for TurnConfig {
 pub struct TurnExecutor {
   model_client: Arc<ModelClient>,
   tool_registry: Arc<ToolRegistry>,
+  tool_router: Arc<ToolRouter>,
   session: Arc<Session>,
   tx_event: mpsc::Sender<Event>,
   config: TurnConfig,
@@ -80,6 +96,7 @@ impl TurnExecutor {
   pub fn new(
     model_client: Arc<ModelClient>,
     tool_registry: Arc<ToolRegistry>,
+    tool_router: Arc<ToolRouter>,
     session: Arc<Session>,
     tx_event: mpsc::Sender<Event>,
     config: TurnConfig,
@@ -87,6 +104,7 @@ impl TurnExecutor {
     Self {
       model_client,
       tool_registry,
+      tool_router,
       session,
       tx_event,
       config,
@@ -96,8 +114,10 @@ impl TurnExecutor {
   pub async fn run_turn(&self, input: UserInput) -> Result<TurnResult, TurnError> {
     let thread_id = self
       .session
-      .id()
-      .unwrap_or_else(|| Uuid::new_v4().to_string());
+      .thread_id()
+      .cloned()
+      .unwrap_or_default()
+      .to_string();
     let turn_id = Uuid::new_v4().to_string();
 
     self
@@ -114,6 +134,7 @@ impl TurnExecutor {
     let sse_executor = SseTurnExecutor::new(
       self.model_client.clone(),
       self.tool_registry.clone(),
+      self.tool_router.clone(),
       self.session.clone(),
       self.tx_event.clone(),
       self.config.clone(),
@@ -215,6 +236,11 @@ mod tests {
   };
   use crate::session::Session;
   use crate::tools::registry::ToolRegistry;
+  use crate::tools::router::ToolRouter;
+  use crate::tools::validation::ToolValidator;
+  use cokra_config::{
+    ApprovalMode, ApprovalPolicy, PatchApproval, SandboxConfig, SandboxMode, ShellApproval,
+  };
 
   #[derive(Debug)]
   struct OrderedProvider {
@@ -323,7 +349,25 @@ mod tests {
       max_tokens: None,
       system_prompt: None,
       enable_tools: false,
+      ..TurnConfig::default()
     }
+  }
+
+  fn build_router(registry: Arc<ToolRegistry>) -> Arc<ToolRouter> {
+    Arc::new(ToolRouter::new(
+      registry,
+      Arc::new(ToolValidator::new(
+        SandboxConfig {
+          mode: SandboxMode::Permissive,
+          network_access: false,
+        },
+        ApprovalPolicy {
+          policy: ApprovalMode::Auto,
+          shell: ShellApproval::OnFailure,
+          patch: PatchApproval::OnRequest,
+        },
+      )),
+    ))
   }
 
   #[tokio::test]
@@ -342,12 +386,15 @@ mod tests {
 
     let model_client = build_client(provider).await;
     let tool_registry = Arc::new(ToolRegistry::new());
+    let tool_router = build_router(tool_registry.clone());
     let session = Arc::new(Session::new());
+    let expected_thread_id = session.thread_id().cloned().unwrap_or_default().to_string();
     let (tx_event, mut rx_event) = mpsc::channel(64);
 
     let executor = TurnExecutor::new(
       model_client,
       tool_registry,
+      tool_router,
       session,
       tx_event,
       test_config(),
@@ -363,9 +410,13 @@ mod tests {
     assert_eq!(result.content, "Hello world");
 
     let mut labels = Vec::new();
+    let mut turn_started_thread_id = None;
     while let Ok(event) = rx_event.try_recv() {
       match event {
-        EventMsg::TurnStarted(_) => labels.push("turn_started"),
+        EventMsg::TurnStarted(ev) => {
+          turn_started_thread_id = Some(ev.thread_id.clone());
+          labels.push("turn_started");
+        }
         EventMsg::ItemStarted(_) => labels.push("item_started"),
         EventMsg::AgentMessageContentDelta(_) => labels.push("delta"),
         EventMsg::ItemCompleted(_) => labels.push("item_completed"),
@@ -384,6 +435,10 @@ mod tests {
         "item_completed",
         "turn_complete",
       ]
+    );
+    assert_eq!(
+      turn_started_thread_id.as_deref(),
+      Some(expected_thread_id.as_str())
     );
   }
 }

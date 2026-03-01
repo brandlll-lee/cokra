@@ -246,13 +246,13 @@ impl<P: ModelProvider + Default> ProviderBuilder<P> {
 
 impl<P: ModelProvider> ProviderBuilder<P> {
   /// Set the API key
-  pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+  pub fn with_api_key(self, _api_key: impl Into<String>) -> Self {
     // This would need to be implemented by each provider
     self
   }
 
   /// Set the base URL
-  pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+  pub fn with_base_url(self, _base_url: impl Into<String>) -> Self {
     self
   }
 

@@ -11,7 +11,6 @@ use super::super::error::{ModelError, Result};
 use super::super::provider::ModelProvider;
 use super::super::types::{ChatRequest, ChatResponse, Chunk, ListModelsResponse, ProviderConfig};
 use super::create_client;
-use super::openai::OpenAIProvider;
 
 /// LM Studio provider (OpenAI-compatible local models)
 pub struct LMStudioProvider {

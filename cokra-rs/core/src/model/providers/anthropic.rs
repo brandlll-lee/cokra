@@ -3,7 +3,7 @@
 //! Supports Claude models including Claude 3.5 Sonnet, Claude 3 Opus, etc.
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
@@ -192,6 +192,7 @@ struct AnthropicTool {
 #[derive(Debug, Deserialize)]
 struct AnthropicResponse {
   id: String,
+  #[allow(dead_code)]
   role: String,
   content: Vec<AnthropicContent>,
   stop_reason: Option<String>,

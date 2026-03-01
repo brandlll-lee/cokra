@@ -204,7 +204,10 @@ fn openai_compatible_message(message: &Message) -> Value {
       "role": "user",
       "content": content,
     }),
-    Message::Assistant { content, tool_calls } => {
+    Message::Assistant {
+      content,
+      tool_calls,
+    } => {
       let mut out = json!({
         "role": "assistant",
         "content": content,

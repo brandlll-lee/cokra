@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use cokra_config::{ApprovalMode, ApprovalPolicy, SandboxConfig};
+use cokra_config::{ApprovalPolicy, SandboxConfig};
 
 use crate::tools::context::FunctionCallError;
 
@@ -30,6 +30,7 @@ pub enum ValidationError {
 
 pub struct ToolValidator {
   sandbox_config: SandboxConfig,
+  #[allow(dead_code)]
   approval_policy: ApprovalPolicy,
 }
 
@@ -55,20 +56,10 @@ impl ToolValidator {
       self.validate_shell_command(cmd)?;
     }
 
-    match self
-      .approval_policy
-      .check_tool_use(&call.tool_name, &call.args)
-    {
-      ApprovalResult::Approved => Ok(ValidationResult {
-        valid: true,
-        reason: None,
-      }),
-      ApprovalResult::Denied(reason) => Err(ValidationError::PermissionDenied(reason)),
-      ApprovalResult::RequiresUserInput(prompt) => Ok(ValidationResult {
-        valid: false,
-        reason: Some(prompt),
-      }),
-    }
+    Ok(ValidationResult {
+      valid: true,
+      reason: None,
+    })
   }
 
   pub fn validate_shell_command(&self, cmd: &str) -> Result<ValidationResult, ValidationError> {
@@ -84,27 +75,6 @@ impl ToolValidator {
 
   pub fn sandbox_config(&self) -> &SandboxConfig {
     &self.sandbox_config
-  }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApprovalResult {
-  Approved,
-  Denied(String),
-  RequiresUserInput(String),
-}
-
-pub trait ApprovalPolicyExt {
-  fn check_tool_use(&self, tool: &str, args: &Value) -> ApprovalResult;
-}
-
-impl ApprovalPolicyExt for ApprovalPolicy {
-  fn check_tool_use(&self, tool: &str, _args: &Value) -> ApprovalResult {
-    match self.policy {
-      ApprovalMode::Auto => ApprovalResult::Approved,
-      ApprovalMode::Ask => ApprovalResult::RequiresUserInput(format!("Execute {tool}?")),
-      ApprovalMode::Never => ApprovalResult::Denied("Tool use disabled".to_string()),
-    }
   }
 }
 
@@ -137,7 +107,7 @@ impl From<ValidationError> for FunctionCallError {
 
 #[cfg(test)]
 mod tests {
-  use super::{ApprovalPolicyExt, ToolCall, ToolValidator};
+  use super::{ToolCall, ToolValidator};
   use cokra_config::{
     ApprovalMode, ApprovalPolicy, PatchApproval, SandboxConfig, SandboxMode, ShellApproval,
   };
@@ -169,19 +139,21 @@ mod tests {
   }
 
   #[test]
-  fn approval_policy_modes_work() {
-    let args = serde_json::json!({});
-    assert!(matches!(
-      policy(ApprovalMode::Auto).check_tool_use("read_file", &args),
-      super::ApprovalResult::Approved
-    ));
-    assert!(matches!(
-      policy(ApprovalMode::Ask).check_tool_use("read_file", &args),
-      super::ApprovalResult::RequiresUserInput(_)
-    ));
-    assert!(matches!(
-      policy(ApprovalMode::Never).check_tool_use("read_file", &args),
-      super::ApprovalResult::Denied(_)
-    ));
+  fn approval_config_does_not_block_static_validation() {
+    let validator = ToolValidator::new(
+      SandboxConfig {
+        mode: SandboxMode::Permissive,
+        network_access: false,
+      },
+      policy(ApprovalMode::Never),
+    );
+
+    let call = ToolCall {
+      tool_name: "read_file".to_string(),
+      args: serde_json::json!({ "file_path": "demo.txt" }),
+    };
+
+    let result = validator.validate_tool_call(&call).expect("validation");
+    assert!(result.valid);
   }
 }

@@ -18,6 +18,7 @@ pub use task::{CancellationToken, SessionTask, TaskKind, TaskMetadata};
 use crate::model::ModelClient;
 use crate::session::Session;
 use crate::tools::registry::ToolRegistry;
+use crate::tools::router::ToolRouter;
 use cokra_protocol::EventMsg as Event;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -26,9 +27,17 @@ use tokio::sync::mpsc;
 pub fn new_executor(
   model_client: Arc<ModelClient>,
   tool_registry: Arc<ToolRegistry>,
+  tool_router: Arc<ToolRouter>,
   session: Arc<Session>,
   tx_event: mpsc::Sender<Event>,
   config: TurnConfig,
 ) -> TurnExecutor {
-  TurnExecutor::new(model_client, tool_registry, session, tx_event, config)
+  TurnExecutor::new(
+    model_client,
+    tool_registry,
+    tool_router,
+    session,
+    tx_event,
+    config,
+  )
 }

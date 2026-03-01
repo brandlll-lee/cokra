@@ -3,7 +3,7 @@
 //! Supports all OpenAI models including GPT-4, GPT-3.5, and O-series
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use reqwest::Client;
 use serde::Deserialize;
 use std::pin::Pin;
@@ -21,7 +21,6 @@ pub struct OpenAIProvider {
   config: ProviderConfig,
   api_key: String,
   base_url: String,
-  organization: Option<String>,
 }
 
 impl OpenAIProvider {
@@ -31,8 +30,6 @@ impl OpenAIProvider {
       .base_url
       .clone()
       .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-    let organization = config.organization.clone();
-
     let client = create_client(config.timeout);
 
     Self {
@@ -40,7 +37,6 @@ impl OpenAIProvider {
       config,
       api_key,
       base_url,
-      organization,
     }
   }
 
