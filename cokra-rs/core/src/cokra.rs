@@ -389,11 +389,7 @@ fn build_turn_config(config: &Config) -> TurnConfig {
   let provider = config.models.provider.trim();
   let model = config.models.model.trim();
 
-  let resolved_model = if model.contains('/') || provider.is_empty() {
-    model.to_string()
-  } else {
-    format!("{provider}/{model}")
-  };
+  let resolved_model = resolve_model_id(provider, model);
 
   TurnConfig {
     model: resolved_model,
@@ -404,6 +400,19 @@ fn build_turn_config(config: &Config) -> TurnConfig {
     auto_approve_on_request: true,
     ..TurnConfig::default()
   }
+}
+
+fn resolve_model_id(provider: &str, model: &str) -> String {
+  if provider.is_empty() || model.is_empty() {
+    return model.to_string();
+  }
+
+  let provider_prefix = format!("{provider}/");
+  if model.starts_with(&provider_prefix) {
+    return model.to_string();
+  }
+
+  format!("{provider}/{model}")
 }
 
 fn map_approval_policy(config: &Config) -> AskForApproval {
@@ -552,6 +561,25 @@ async fn submission_loop(
         )
         .await;
       }
+      Op::ExecApproval {
+        id,
+        turn_id,
+        decision,
+      } => {
+        let notified = session.notify_exec_approval(&id, decision).await;
+        if !notified {
+          emit_event(
+            &tx_event,
+            &event_bus,
+            EventMsg::Warning(cokra_protocol::WarningEvent {
+              thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
+              turn_id: turn_id.unwrap_or_else(|| sub.id.clone()),
+              message: format!("no pending approval found for id: {id}"),
+            }),
+          )
+          .await;
+        }
+      }
       Op::Interrupt => {
         emit_event(
           &tx_event,
@@ -626,13 +654,33 @@ async fn run_turn_with_interrupt(
             }),
           ).await;
         }
+        session.clear_pending_approvals_for_turn(turn_id).await;
         break;
       }
       maybe_sub = rx_sub.recv() => {
         let Some(next_sub) = maybe_sub else {
+          session.clear_pending_approvals_for_turn(turn_id).await;
           break;
         };
         match next_sub.op {
+          Op::ExecApproval {
+            id,
+            turn_id: op_turn_id,
+            decision,
+          } => {
+            let notified = session.notify_exec_approval(&id, decision).await;
+            if !notified {
+              emit_event(
+                tx_event,
+                event_bus,
+                EventMsg::Warning(cokra_protocol::WarningEvent {
+                  thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
+                  turn_id: op_turn_id.unwrap_or_else(|| turn_id.to_string()),
+                  message: format!("no pending approval found for id: {id}"),
+                }),
+              ).await;
+            }
+          }
           Op::Interrupt => {
             emit_event(
               tx_event,
@@ -643,10 +691,12 @@ async fn run_turn_with_interrupt(
                 reason: "interrupted".to_string(),
               }),
             ).await;
+            session.clear_pending_approvals_for_turn(turn_id).await;
             break;
           }
           Op::Shutdown => {
             emit_event(tx_event, event_bus, EventMsg::ShutdownComplete).await;
+            session.clear_pending_approvals_for_turn(turn_id).await;
             break;
           }
           _ => queue.push_back(next_sub),
@@ -666,13 +716,15 @@ impl CokraSpawnOk {
 mod tests {
   use std::pin::Pin;
   use std::sync::{Arc, Mutex};
+  use std::time::Duration;
 
   use async_trait::async_trait;
   use futures::Stream;
   use reqwest::Client;
+  use tokio::time::timeout;
   use uuid::Uuid;
 
-  use super::Cokra;
+  use super::{Cokra, resolve_model_id};
   use crate::model::provider::ModelProvider;
   use crate::model::{
     ChatRequest, ChatResponse, Choice, ChoiceMessage, Chunk, ContentDelta, ListModelsResponse,
@@ -680,7 +732,7 @@ mod tests {
     ToolCallFunction, Usage,
   };
   use cokra_config::ApprovalMode;
-  use cokra_protocol::{EventMsg, Op, UserInput};
+  use cokra_protocol::{CompletionStatus, EventMsg, Op, ReviewDecision, UserInput};
 
   #[derive(Debug)]
   struct MockProvider {
@@ -780,6 +832,129 @@ mod tests {
       .set_default("mock")
       .await
       .expect("set mock default");
+    Arc::new(
+      ModelClient::new(registry)
+        .await
+        .expect("build model client"),
+    )
+  }
+
+  #[derive(Debug)]
+  struct MockOpenRouterProvider {
+    client: Client,
+    config: ProviderConfig,
+  }
+
+  impl MockOpenRouterProvider {
+    fn new() -> Self {
+      Self {
+        client: Client::new(),
+        config: ProviderConfig {
+          provider_id: "openrouter".to_string(),
+          ..Default::default()
+        },
+      }
+    }
+  }
+
+  #[async_trait]
+  impl ModelProvider for MockOpenRouterProvider {
+    fn provider_id(&self) -> &'static str {
+      "openrouter"
+    }
+
+    fn provider_name(&self) -> &'static str {
+      "Mock OpenRouter Provider"
+    }
+
+    fn default_models(&self) -> Vec<&'static str> {
+      vec!["openai/gpt-4o-mini"]
+    }
+
+    async fn chat_completion(&self, request: ChatRequest) -> crate::model::Result<ChatResponse> {
+      if request.model != "openai/gpt-4o-mini" {
+        return Err(crate::model::ModelError::InvalidRequest(format!(
+          "expected nested model id, got {}",
+          request.model
+        )));
+      }
+
+      Ok(ChatResponse {
+        id: "mock-openrouter-response".to_string(),
+        object_type: "chat.completion".to_string(),
+        created: 0,
+        model: "openai/gpt-4o-mini".to_string(),
+        choices: vec![Choice {
+          index: 0,
+          message: ChoiceMessage {
+            role: "assistant".to_string(),
+            content: Some("openrouter nested model ok".to_string()),
+            tool_calls: None,
+          },
+          finish_reason: Some("stop".to_string()),
+        }],
+        usage: Usage {
+          input_tokens: 1,
+          output_tokens: 1,
+          total_tokens: 2,
+        },
+        extra: Default::default(),
+      })
+    }
+
+    async fn chat_completion_stream(
+      &self,
+      request: ChatRequest,
+    ) -> crate::model::Result<Pin<Box<dyn Stream<Item = crate::model::Result<Chunk>> + Send>>> {
+      if request.model != "openai/gpt-4o-mini" {
+        return Err(crate::model::ModelError::InvalidRequest(format!(
+          "expected nested model id, got {}",
+          request.model
+        )));
+      }
+
+      Ok(Box::pin(futures::stream::iter(vec![
+        Ok(Chunk::Content {
+          delta: ContentDelta {
+            text: "openrouter nested model ok".to_string(),
+          },
+        }),
+        Ok(Chunk::MessageStop),
+      ])))
+    }
+
+    async fn list_models(&self) -> crate::model::Result<ListModelsResponse> {
+      Ok(ListModelsResponse {
+        object_type: "list".to_string(),
+        data: vec![ModelInfo {
+          id: "openai/gpt-4o-mini".to_string(),
+          object_type: "model".to_string(),
+          created: 0,
+          owned_by: Some("openrouter".to_string()),
+        }],
+      })
+    }
+
+    async fn validate_auth(&self) -> crate::model::Result<()> {
+      Ok(())
+    }
+
+    fn client(&self) -> &Client {
+      &self.client
+    }
+
+    fn config(&self) -> &ProviderConfig {
+      &self.config
+    }
+  }
+
+  async fn build_openrouter_mock_client() -> Arc<ModelClient> {
+    let registry = Arc::new(ProviderRegistry::new());
+    registry.register(MockOpenRouterProvider::new()).await;
+    registry
+      .set_default("openrouter")
+      .await
+      .expect("set openrouter default");
     Arc::new(
       ModelClient::new(registry)
         .await
@@ -980,6 +1155,204 @@ mod tests {
     )
   }
 
+  #[derive(Debug)]
+  struct MockApprovalLoopProvider {
+    client: Client,
+    config: ProviderConfig,
+    file_path: String,
+    calls: Arc<Mutex<u32>>,
+  }
+
+  impl MockApprovalLoopProvider {
+    fn new(file_path: String) -> Self {
+      Self {
+        client: Client::new(),
+        config: ProviderConfig {
+          provider_id: "mockapproval".to_string(),
+          ..Default::default()
+        },
+        file_path,
+        calls: Arc::new(Mutex::new(0)),
+      }
+    }
+  }
+
+  #[async_trait]
+  impl ModelProvider for MockApprovalLoopProvider {
+    fn provider_id(&self) -> &'static str {
+      "mockapproval"
+    }
+
+    fn provider_name(&self) -> &'static str {
+      "Mock Approval Loop Provider"
+    }
+
+    async fn chat_completion(&self, request: ChatRequest) -> crate::model::Result<ChatResponse> {
+      let mut calls = self
+        .calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      *calls += 1;
+
+      if *calls == 1 {
+        return Ok(ChatResponse {
+          id: "mock-approval-1".to_string(),
+          object_type: "chat.completion".to_string(),
+          created: 0,
+          model: "mockapproval/default".to_string(),
+          choices: vec![Choice {
+            index: 0,
+            message: ChoiceMessage {
+              role: "assistant".to_string(),
+              content: None,
+              tool_calls: Some(vec![ToolCall {
+                id: "call_write_1".to_string(),
+                call_type: "function".to_string(),
+                function: ToolCallFunction {
+                  name: "write_file".to_string(),
+                  arguments: serde_json::json!({
+                    "file_path": self.file_path,
+                    "content": "approved"
+                  })
+                  .to_string(),
+                },
+              }]),
+            },
+            finish_reason: Some("tool_calls".to_string()),
+          }],
+          usage: Usage {
+            input_tokens: 2,
+            output_tokens: 4,
+            total_tokens: 6,
+          },
+          extra: Default::default(),
+        });
+      }
+
+      let saw_tool_output = request.messages.iter().any(|message| {
+        matches!(message, Message::Tool { tool_call_id, content }
+          if tool_call_id == "call_write_1" && content.contains("wrote"))
+      });
+
+      if !saw_tool_output {
+        return Err(crate::model::ModelError::InvalidRequest(
+          "follow-up request missing write_file output".to_string(),
+        ));
+      }
+
+      Ok(ChatResponse {
+        id: "mock-approval-2".to_string(),
+        object_type: "chat.completion".to_string(),
+        created: 0,
+        model: "mockapproval/default".to_string(),
+        choices: vec![Choice {
+          index: 0,
+          message: ChoiceMessage {
+            role: "assistant".to_string(),
+            content: Some("approval loop complete".to_string()),
+            tool_calls: None,
+          },
+          finish_reason: Some("stop".to_string()),
+        }],
+        usage: Usage {
+          input_tokens: 2,
+          output_tokens: 2,
+          total_tokens: 4,
+        },
+        extra: Default::default(),
+      })
+    }
+
+    async fn chat_completion_stream(
+      &self,
+      request: ChatRequest,
+    ) -> crate::model::Result<Pin<Box<dyn Stream<Item = crate::model::Result<Chunk>> + Send>>> {
+      let mut calls = self
+        .calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      *calls += 1;
+
+      if *calls == 1 {
+        let arguments = serde_json::json!({
+          "file_path": self.file_path,
+          "content": "approved"
+        })
+        .to_string();
+        return Ok(Box::pin(futures::stream::iter(vec![
+          Ok(Chunk::ToolCall {
+            delta: ToolCallDelta {
+              id: Some("call_write_1".to_string()),
+              name: Some("write_file".to_string()),
+              arguments: Some(arguments),
+            },
+          }),
+          Ok(Chunk::MessageStop),
+        ])));
+      }
+
+      let saw_tool_output = request.messages.iter().any(|message| {
+        matches!(message, Message::Tool { tool_call_id, content }
+          if tool_call_id == "call_write_1" && content.contains("wrote"))
+      });
+
+      if !saw_tool_output {
+        return Err(crate::model::ModelError::InvalidRequest(
+          "follow-up request missing write_file output".to_string(),
+        ));
+      }
+
+      Ok(Box::pin(futures::stream::iter(vec![
+        Ok(Chunk::Content {
+          delta: ContentDelta {
+            text: "approval loop complete".to_string(),
+          },
+        }),
+        Ok(Chunk::MessageStop),
+      ])))
+    }
+
+    async fn list_models(&self) -> crate::model::Result<ListModelsResponse> {
+      Ok(ListModelsResponse {
+        object_type: "list".to_string(),
+        data: vec![ModelInfo {
+          id: "mockapproval/default".to_string(),
+          object_type: "model".to_string(),
+          created: 0,
+          owned_by: Some("mockapproval".to_string()),
+        }],
+      })
+    }
+
+    async fn validate_auth(&self) -> crate::model::Result<()> {
+      Ok(())
+    }
+
+    fn client(&self) -> &Client {
+      &self.client
+    }
+
+    fn config(&self) -> &ProviderConfig {
+      &self.config
+    }
+  }
+
+  async fn build_approval_client(file_path: String) -> Arc<ModelClient> {
+    let registry = Arc::new(ProviderRegistry::new());
+    registry
+      .register(MockApprovalLoopProvider::new(file_path))
+      .await;
+    registry
+      .set_default("mockapproval")
+      .await
+      .expect("set mockapproval default");
+    Arc::new(
+      ModelClient::new(registry)
+        .await
+        .expect("build model client"),
+    )
+  }
+
   #[tokio::test]
   async fn test_cokra_creation() {
     let mut config = cokra_config::ConfigLoader::default()
@@ -1072,6 +1445,50 @@ mod tests {
     assert_eq!(configured_thread_id, started_thread_id);
   }
 
+  #[test]
+  fn test_resolve_model_id_for_provider_scoped_models() {
+    assert_eq!(
+      resolve_model_id("openrouter", "openai/gpt-4o-mini"),
+      "openrouter/openai/gpt-4o-mini".to_string()
+    );
+    assert_eq!(
+      resolve_model_id("openrouter", "openrouter/openai/gpt-4o-mini"),
+      "openrouter/openai/gpt-4o-mini".to_string()
+    );
+    assert_eq!(
+      resolve_model_id("openai", "gpt-4o-mini"),
+      "openai/gpt-4o-mini".to_string()
+    );
+    assert_eq!(
+      resolve_model_id("", "openrouter/openai/gpt-4o-mini"),
+      "openrouter/openai/gpt-4o-mini".to_string()
+    );
+  }
+
+  #[tokio::test]
+  async fn test_openrouter_nested_model_id_routes_to_openrouter_provider() {
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "openrouter".to_string();
+    config.models.model = "openai/gpt-4o-mini".to_string();
+
+    let cokra = Cokra::new_with_model_client(config, build_openrouter_mock_client().await)
+      .await
+      .expect("create cokra");
+
+    let result = cokra
+      .run_turn("check openrouter model routing".to_string())
+      .await
+      .expect("run turn");
+
+    assert_eq!(
+      result.final_message,
+      "openrouter nested model ok".to_string()
+    );
+    assert!(result.success);
+  }
+
   #[tokio::test]
   async fn test_run_turn_tool_call_loop() {
     let tmp_path = std::env::temp_dir().join(format!("cokra-tool-loop-{}.txt", Uuid::new_v4()));
@@ -1140,5 +1557,91 @@ mod tests {
       .await;
 
     assert!(second.is_err());
+  }
+
+  #[tokio::test]
+  async fn test_exec_approval_round_trip_unblocks_turn() {
+    let tmp_path = std::env::temp_dir().join(format!("cokra-approval-{}.txt", Uuid::new_v4()));
+
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "mockapproval".to_string();
+    config.models.model = "mockapproval/default".to_string();
+    config.approval.policy = ApprovalMode::Ask;
+
+    let cokra = Cokra::new_with_model_client(
+      config,
+      build_approval_client(tmp_path.display().to_string()).await,
+    )
+    .await
+    .expect("create cokra");
+
+    let mut turn_config = cokra.agent_control.turn_config().await;
+    turn_config.auto_approve_on_request = false;
+    cokra.agent_control.set_turn_config(turn_config).await;
+
+    let _ = cokra
+      .submit(Op::UserInput {
+        items: vec![UserInput::Text {
+          text: "write with approval".to_string(),
+          text_elements: Vec::new(),
+        }],
+        final_output_json_schema: None,
+      })
+      .await
+      .expect("submit user input");
+
+    let mut approval_id = None;
+    let mut approval_turn_id = None;
+    for _ in 0..40 {
+      let evt = timeout(Duration::from_secs(2), cokra.next_event())
+        .await
+        .expect("next_event timeout")
+        .expect("next_event");
+      match evt.msg {
+        EventMsg::ExecApprovalRequest(ev) => {
+          approval_id = Some(ev.id);
+          approval_turn_id = Some(ev.turn_id);
+          break;
+        }
+        EventMsg::Error(err) => panic!("unexpected error: {}", err.user_facing_message),
+        _ => {}
+      }
+    }
+
+    let approval_id = approval_id.expect("expected exec approval request");
+    let approval_turn_id = approval_turn_id.expect("expected approval turn id");
+
+    let _ = cokra
+      .submit(Op::ExecApproval {
+        id: approval_id,
+        turn_id: Some(approval_turn_id),
+        decision: ReviewDecision::Approved,
+      })
+      .await
+      .expect("submit approval response");
+
+    let mut saw_complete = false;
+    for _ in 0..40 {
+      let evt = timeout(Duration::from_secs(2), cokra.next_event())
+        .await
+        .expect("next_event timeout")
+        .expect("next_event");
+      match evt.msg {
+        EventMsg::TurnComplete(done) => {
+          assert!(matches!(done.status, CompletionStatus::Success));
+          saw_complete = true;
+          break;
+        }
+        EventMsg::Error(err) => panic!("unexpected error: {}", err.user_facing_message),
+        _ => {}
+      }
+    }
+
+    assert!(saw_complete, "expected turn completion after approval");
+    let written = std::fs::read_to_string(&tmp_path).expect("read written file");
+    assert_eq!(written, "approved".to_string());
+    let _ = std::fs::remove_file(tmp_path);
   }
 }

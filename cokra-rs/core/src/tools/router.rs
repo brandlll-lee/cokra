@@ -19,9 +19,7 @@ use crate::tools::sandboxing::{
 use crate::tools::spec::ToolSpec;
 use crate::tools::validation::{ToolCall as ValidationToolCall, ToolValidator};
 use crate::tools::{network_approval::NetworkApprovalMode, orchestrator::OrchestratorRunResult};
-use cokra_protocol::{
-  AskForApproval, EventMsg, ExecApprovalRequestEvent, ReviewDecision, SandboxPolicy,
-};
+use cokra_protocol::{AskForApproval, EventMsg, ReviewDecision, SandboxPolicy};
 
 use crate::tools::context::{FunctionCallError, ToolInvocation, ToolOutput};
 
@@ -263,31 +261,31 @@ impl Approvable<ToolCall> for RegistryToolRuntime {
   }
 
   async fn start_approval_async(&mut self, req: &ToolCall, ctx: ApprovalCtx<'_>) -> ReviewDecision {
-    ctx
-      .session
-      .emit_event(EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
-        thread_id: ctx.turn.thread_id.clone(),
-        turn_id: ctx.turn.turn_id.clone(),
-        id: ctx.call_id.to_string(),
-        command: req.tool_name.clone(),
-        cwd: ctx.turn.cwd.clone(),
-      }));
-    if let Some(tx_event) = &ctx.turn.tx_event {
-      let _ = tx_event
-        .send(EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
-          thread_id: ctx.turn.thread_id.clone(),
-          turn_id: ctx.turn.turn_id.clone(),
-          id: ctx.call_id.to_string(),
-          command: req.tool_name.clone(),
-          cwd: ctx.turn.cwd.clone(),
-        }))
-        .await;
-    }
-
     if self.auto_approve_on_request {
+      ctx
+        .session
+        .emit_exec_approval_request(
+          ctx.turn.thread_id.clone(),
+          ctx.turn.turn_id.clone(),
+          ctx.call_id.to_string(),
+          req.tool_name.clone(),
+          ctx.turn.cwd.clone(),
+          ctx.turn.tx_event.clone(),
+        )
+        .await;
       ReviewDecision::Approved
     } else {
-      ReviewDecision::Denied
+      ctx
+        .session
+        .request_exec_approval(
+          ctx.turn.thread_id.clone(),
+          ctx.turn.turn_id.clone(),
+          ctx.call_id.to_string(),
+          req.tool_name.clone(),
+          ctx.turn.cwd.clone(),
+          ctx.turn.tx_event.clone(),
+        )
+        .await
     }
   }
 }

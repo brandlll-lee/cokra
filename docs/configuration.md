@@ -107,11 +107,19 @@ Configure which AI model to use.
 # Model provider: "openai", "ollama", "lmstudio"
 provider = "openai"
 
-# Model name
+# Model name (can include "/" segments)
 model = "gpt-5.2-codex"
 
 # Base URL (for custom endpoints)
 base_url = "https://api.openai.com/v1"
+
+# OpenRouter example (recommended)
+# provider selects the outer route provider
+provider = "openrouter"
+# model can include nested path segments
+model = "openai/gpt-4o-mini"
+# compatible full form
+# model = "openrouter/openai/gpt-4o-mini"
 
 # Ollama-specific configuration
 [models.ollama]
@@ -121,6 +129,8 @@ base_url = "http://localhost:11434"
 [models.lmstudio]
 base_url = "http://localhost:1234/v1"
 ```
+
+`models.model` supports multi-segment IDs. A `/` inside `model` does not automatically change the outer `models.provider`.
 
 ### MCP Servers
 

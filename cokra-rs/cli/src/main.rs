@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use cokra_config::ConfigLoader;
 use cokra_core::Cokra;
 use cokra_core::model::auth::{AuthManager, AuthRequest, AuthType, Credentials};
+use cokra_core::model::init_model_layer;
 use cokra_protocol::{EventMsg, Op, UserInput};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -133,7 +134,7 @@ async fn main() -> Result<()> {
     Some(Commands::Mcp { mcp_command }) => handle_mcp_command(mcp_command).await,
     Some(Commands::Config { config_command }) => handle_config_command(config_command).await,
     Some(Commands::Auth { auth_command }) => handle_auth_command(auth_command).await,
-    Some(Commands::Models) => list_models().await,
+    Some(Commands::Models) => list_models(cli.dir, overrides).await,
     None => {
       if let Some(prompt) = cli.prompt {
         run_task(prompt, cli.dir, overrides).await
@@ -420,13 +421,40 @@ async fn handle_auth_command(cmd: AuthCommands) -> anyhow::Result<()> {
   Ok(())
 }
 
-async fn list_models() -> anyhow::Result<()> {
+async fn list_models(dir: Option<PathBuf>, overrides: Vec<(String, String)>) -> anyhow::Result<()> {
+  set_workdir(&dir)?;
+  let config = load_config(&dir, overrides)?;
+  let model_client = init_model_layer(&config).await?;
+  let mut providers = model_client.registry().list_providers().await;
+  providers.sort_by(|a, b| a.id.cmp(&b.id));
+
   println!("Available models:");
-  println!("  openai/gpt-4o");
-  println!("  anthropic/claude-sonnet-4");
-  println!("  openrouter/openai/gpt-4o");
-  println!("  google/gemini-2.0-flash-exp");
-  println!("  ollama/llama3");
-  println!("  lmstudio/<loaded_model>");
+
+  let mut entries = Vec::new();
+  for provider in providers {
+    let mut models = provider.models;
+    models.sort();
+    for model in models {
+      let provider_prefix = format!("{}/", provider.id);
+      if model.starts_with(&provider_prefix) {
+        entries.push(model);
+      } else {
+        entries.push(format!("{}/{}", provider.id, model));
+      }
+    }
+  }
+
+  entries.sort();
+  entries.dedup();
+
+  if entries.is_empty() {
+    println!("  (No models available)");
+    return Ok(());
+  }
+
+  for entry in entries {
+    println!("  {}", entry);
+  }
+
   Ok(())
 }
