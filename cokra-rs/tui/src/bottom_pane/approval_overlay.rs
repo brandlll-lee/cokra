@@ -89,7 +89,7 @@ impl ApprovalOverlay {
       }
     };
 
-    let content = vec![
+    let content = [
       format!("Tool: {}", self.request.tool_name),
       format!("Command: {}", self.request.command),
       String::new(),

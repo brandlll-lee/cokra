@@ -1,27 +1,49 @@
+use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
+
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
-
 use ratatui::buffer::Buffer;
-use ratatui::layout::Constraint;
-use ratatui::layout::Layout;
 use ratatui::layout::Rect;
-use ratatui::widgets::Block;
-use ratatui::widgets::Borders;
-use ratatui::widgets::Paragraph;
-use ratatui::widgets::Widget;
+use ratatui::text::Line;
 
-pub(crate) mod approval_overlay;
-pub(crate) mod chat_composer;
-pub(crate) mod footer;
-pub(crate) mod textarea;
-
+use crate::app_event_sender::AppEventSender;
+use crate::render::renderable::FlexRenderable;
+use crate::render::renderable::Renderable;
+use crate::render::renderable::RenderableItem;
+use crate::status_indicator_widget::StatusIndicatorWidget;
+use crate::tui::FrameRequester;
 use approval_overlay::ApprovalChoice;
 use approval_overlay::ApprovalOverlay;
 use chat_composer::ChatComposer;
 use chat_composer::ComposerAction;
 use chat_composer::ComposerSubmission;
-use footer::FooterMode;
-use footer::FooterProps;
+
+pub(crate) mod approval_overlay;
+pub(crate) mod chat_composer;
+pub(crate) mod chat_composer_history;
+pub(crate) mod command_popup;
+pub(crate) mod footer;
+pub(crate) mod paste_burst;
+pub(crate) mod popup_consts;
+pub(crate) mod prompt_args;
+pub(crate) mod scroll_state;
+pub(crate) mod selection_popup_common;
+pub(crate) mod slash_commands;
+pub(crate) mod textarea;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MentionBinding {
+  pub(crate) mention: String,
+  pub(crate) path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalImageAttachment {
+  pub(crate) placeholder: String,
+  pub(crate) path: PathBuf,
+}
 
 #[derive(Debug)]
 pub(crate) enum BottomPaneAction {
@@ -32,30 +54,118 @@ pub(crate) enum BottomPaneAction {
   ApprovalDecision(ApprovalChoice),
 }
 
-#[derive(Debug)]
 pub(crate) struct BottomPane {
   composer: ChatComposer,
   approval_overlay: Option<ApprovalOverlay>,
+  /// Inline status indicator shown above the composer while a task is running.
+  status: Option<StatusIndicatorWidget>,
+  app_event_tx: AppEventSender,
+  frame_requester: FrameRequester,
+  animations_enabled: bool,
 }
 
 impl BottomPane {
-  pub(crate) fn new() -> Self {
+  pub(crate) fn new(
+    app_event_tx: AppEventSender,
+    frame_requester: FrameRequester,
+    animations_enabled: bool,
+  ) -> Self {
     Self {
       composer: ChatComposer::new(),
       approval_overlay: None,
+      status: None,
+      app_event_tx,
+      frame_requester,
+      animations_enabled,
     }
   }
 
+  // 1:1 codex: create/destroy StatusIndicator on task start/stop.
   pub(crate) fn set_task_running(&mut self, running: bool) {
     self.composer.set_task_running(running);
+    if running {
+      if self.status.is_none() {
+        self.status = Some(StatusIndicatorWidget::new(
+          self.app_event_tx.clone(),
+          self.frame_requester.clone(),
+          self.animations_enabled,
+        ));
+      }
+      if let Some(status) = self.status.as_mut() {
+        status.resume_timer();
+        status.update_header("Working".to_string());
+      }
+    } else {
+      if let Some(status) = self.status.as_mut() {
+        status.pause_timer();
+        status.update_details(None);
+        status.update_inline_message(None);
+      }
+      self.status = None;
+    }
+  }
+
+  pub(crate) fn status_widget(&self) -> Option<&StatusIndicatorWidget> {
+    self.status.as_ref()
+  }
+
+  pub(crate) fn status_widget_mut(&mut self) -> Option<&mut StatusIndicatorWidget> {
+    self.status.as_mut()
+  }
+
+  pub(crate) fn ensure_status_indicator(&mut self) {
+    if self.status.is_none() {
+      self.status = Some(StatusIndicatorWidget::new(
+        self.app_event_tx.clone(),
+        self.frame_requester.clone(),
+        self.animations_enabled,
+      ));
+    }
+  }
+
+  pub(crate) fn set_context_window(&mut self, percent: Option<i64>, used_tokens: Option<i64>) {
+    self.composer.set_context_window(percent, used_tokens);
+  }
+
+  pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
+    self.composer.set_status_line(status_line);
+  }
+
+  pub(crate) fn set_status_line_enabled(&mut self, enabled: bool) {
+    self.composer.set_status_line_enabled(enabled);
+  }
+
+  pub(crate) fn next_footer_transition_in(&self) -> Option<Duration> {
+    self.composer.next_footer_transition_in()
+  }
+
+  pub(crate) fn flush_burst_if_due(&mut self) {
+    self.composer.flush_burst_if_due(Instant::now());
+  }
+
+  /// Returns true if any paste-burst transient state is active (buffering or holding first char).
+  pub(crate) fn is_in_paste_burst(&self) -> bool {
+    self.composer.is_in_paste_burst()
+  }
+
+  /// Flush any due paste burst and return true if something was flushed (caller should redraw).
+  pub(crate) fn flush_paste_burst_if_due(&mut self) -> bool {
+    self.composer.flush_burst_if_due(Instant::now())
   }
 
   pub(crate) fn open_approval(&mut self, overlay: ApprovalOverlay) {
     self.approval_overlay = Some(overlay);
   }
 
-  pub(crate) fn desired_height(&self, _width: u16) -> u16 {
-    4
+  pub(crate) fn desired_height(&self, width: u16) -> u16 {
+    self.as_renderable().desired_height(width)
+  }
+
+  pub(crate) fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+    if self.approval_overlay.is_some() {
+      return None;
+    }
+    self.as_renderable().cursor_pos(area)
   }
 
   pub(crate) fn handle_key(&mut self, key: KeyEvent) -> BottomPaneAction {
@@ -93,34 +203,37 @@ impl BottomPane {
     self.composer.handle_paste(text);
   }
 
-  pub(crate) fn render(&self, area: Rect, buf: &mut Buffer, task_running: bool) {
-    if area.height == 0 {
+  // 1:1 codex: compose status (flex=0) + composer (flex=0) using FlexRenderable.
+  fn as_renderable(&self) -> RenderableItem<'_> {
+    let mut flex = FlexRenderable::new();
+    if let Some(status) = &self.status {
+      flex.push(0, RenderableItem::Borrowed(status as &dyn Renderable));
+    }
+    flex.push(0, RenderableItem::Borrowed(&self.composer as &dyn Renderable));
+    RenderableItem::Owned(Box::new(flex))
+  }
+
+  pub(crate) fn render(&self, area: Rect, buf: &mut Buffer, _task_running: bool) {
+    if area.is_empty() {
       return;
     }
-
-    let chunks = Layout::vertical([Constraint::Min(2), Constraint::Length(1)]).split(area);
-
-    let input = self
-      .composer
-      .render_lines(chunks[0].width.saturating_sub(2), true);
-    let input_block = Block::default().title("Input").borders(Borders::ALL);
-    Paragraph::new(input)
-      .block(input_block)
-      .render(chunks[0], buf);
-
-    let footer_props = FooterProps {
-      mode: if task_running {
-        FooterMode::TaskRunning
-      } else {
-        FooterMode::Default
-      },
-      is_task_running: task_running,
-      ..FooterProps::default()
-    };
-    footer::render_footer_from_props(&footer_props, chunks[1], buf);
-
+    self.as_renderable().render(area, buf);
     if let Some(overlay) = &self.approval_overlay {
       overlay.render(area, buf);
     }
+  }
+}
+
+impl Renderable for BottomPane {
+  fn render(&self, area: Rect, buf: &mut Buffer) {
+    self.render(area, buf, false);
+  }
+
+  fn desired_height(&self, width: u16) -> u16 {
+    self.desired_height(width)
+  }
+
+  fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+    self.cursor_pos(area)
   }
 }

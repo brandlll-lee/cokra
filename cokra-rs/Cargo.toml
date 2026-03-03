@@ -100,6 +100,9 @@ chrono = { version = "0.4", features = ["serde"] }
 regex = "1.12"
 ignore = "0.4"
 itertools = "0.14"
+derive_more = { version = "2", features = ["is_variant"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+libc = "0.2"
 
 # Testing
 insta = "1.46"

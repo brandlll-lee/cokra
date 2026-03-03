@@ -109,11 +109,7 @@ pub fn build_specs() -> Vec<ToolSpec> {
 fn obj(properties: BTreeMap<String, JsonSchema>, required: &[&str]) -> JsonSchema {
   JsonSchema::Object {
     properties,
-    required: if required.is_empty() {
-      None
-    } else {
-      Some(required.iter().map(|s| s.to_string()).collect())
-    },
+    required: Some(required.iter().map(|s| s.to_string()).collect()),
   }
 }
 
@@ -253,7 +249,7 @@ fn mcp_tool() -> ToolSpec {
     "arguments".to_string(),
     JsonSchema::Object {
       properties: BTreeMap::new(),
-      required: None,
+      required: Some(Vec::new()),
     },
   );
   ToolSpec::new(
@@ -324,14 +320,14 @@ mod tests {
   use super::*;
 
   #[test]
-  fn object_schema_omits_null_required_field() {
+  fn object_schema_always_serializes_required_as_array() {
     let schema = JsonSchema::Object {
       properties: BTreeMap::new(),
-      required: None,
+      required: Some(Vec::new()),
     };
     let value = schema.to_value();
 
     assert_eq!(value["type"], "object");
-    assert!(value.get("required").is_none());
+    assert_eq!(value["required"], serde_json::json!([]));
   }
 }

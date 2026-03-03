@@ -8,14 +8,9 @@ use crate::shimmer::shimmer_spans;
 pub(crate) mod model;
 pub(crate) mod render;
 
-pub(crate) use model::CommandOutput;
 pub(crate) use model::ExecCall;
 pub(crate) use model::ExecCell;
-pub(crate) use render::OutputLines;
-pub(crate) use render::OutputLinesParams;
-pub(crate) use render::TOOL_CALL_MAX_LINES;
 pub(crate) use render::new_active_exec_command;
-pub(crate) use render::output_lines;
 
 pub(crate) fn spinner(start_time: Option<Instant>, animations_enabled: bool) -> Span<'static> {
   if !animations_enabled {

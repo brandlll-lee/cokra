@@ -1,12 +1,12 @@
 // Cokra TUI
 // Terminal UI implementation
 
-use std::time::Duration;
-
 use anyhow::Result;
 use cokra_core::Cokra;
 
 pub mod app;
+pub mod custom_terminal;
+pub mod insert_history;
 pub mod widgets;
 
 pub(crate) mod app_event;
@@ -23,29 +23,39 @@ pub(crate) mod markdown_stream;
 pub(crate) mod multi_agents;
 pub(crate) mod render;
 pub(crate) mod shimmer;
+pub(crate) mod slash_command;
 pub(crate) mod status_indicator_widget;
 pub(crate) mod streaming;
 pub(crate) mod style;
 pub(crate) mod terminal_palette;
 pub(crate) mod text_formatting;
 pub(crate) mod tui;
+pub(crate) mod ui_consts;
 pub(crate) mod wrapping;
 
 pub use app::App;
 pub use app::AppExitInfo;
 pub use app::ExitReason;
+pub use app_event::UiMode;
 
 /// Run the full-screen TUI application.
-pub async fn run_main(cokra: Cokra) -> Result<AppExitInfo> {
-  tui::set_modes()?;
-  let mut terminal = tui::init_terminal()?;
+pub async fn run_main(cokra: Cokra, ui_mode: UiMode) -> Result<AppExitInfo> {
+  let terminal = tui::init()?;
+  let mut tui = tui::Tui::new(terminal);
 
-  let (draw_tx, frame_requester) = app::make_frame_requester();
-  let mut events = tui::TuiEventStream::new(draw_tx.subscribe(), Duration::from_millis(32));
-  let mut app = App::new(cokra, frame_requester);
+  if ui_mode == UiMode::AltScreen {
+    tui.enter_alt_screen()?;
+  }
 
-  let result = app.run(&mut terminal, &mut events).await;
-  let restore_result = tui::restore_modes();
+  let frame_requester = tui.frame_requester();
+  let mut app = App::new(cokra, frame_requester, ui_mode);
+
+  let result = app.run(&mut tui).await;
+
+  if ui_mode == UiMode::AltScreen {
+    let _ = tui.leave_alt_screen();
+  }
+  let restore_result = tui::restore();
 
   match (result, restore_result) {
     (Ok(exit_info), Ok(())) => Ok(exit_info),

@@ -30,6 +30,11 @@ pub enum EventMsg {
   TurnComplete(TurnCompleteEvent),
   TurnAborted(TurnAbortedEvent),
 
+  // ========== MODEL & CONTEXT ==========
+  ModelReroute(ModelRerouteEvent),
+  ContextCompacted(ContextCompactedEvent),
+  ThreadRolledBack(ThreadRolledBackEvent),
+
   // ========== CONTENT EVENTS ==========
   TokenCount(TokenCountEvent),
   AgentMessage(AgentMessageEvent),
@@ -37,32 +42,99 @@ pub enum EventMsg {
   AgentMessageDelta(AgentMessageDeltaEvent),
   AgentMessageContentDelta(AgentMessageContentDeltaEvent),
 
+  // ========== AGENT REASONING ==========
+  AgentReasoning(AgentReasoningEvent),
+  AgentReasoningDelta(AgentReasoningDeltaEvent),
+  AgentReasoningRawContent(AgentReasoningRawContentEvent),
+  AgentReasoningRawContentDelta(AgentReasoningRawContentDeltaEvent),
+  AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent),
+
   // ========== CONFIGURATION EVENTS ==========
   SessionConfigured(SessionConfiguredEvent),
   ThreadNameUpdated(ThreadNameUpdatedEvent),
 
+  // ========== MCP EVENTS ==========
+  McpStartupUpdate(McpStartupUpdateEvent),
+  McpStartupComplete(McpStartupCompleteEvent),
+  McpToolCallBegin(McpToolCallBeginEvent),
+  McpToolCallEnd(McpToolCallEndEvent),
+
+  // ========== WEB SEARCH EVENTS ==========
+  WebSearchBegin(WebSearchBeginEvent),
+  WebSearchEnd(WebSearchEndEvent),
+
   // ========== EXECUTION EVENTS ==========
   ExecCommandBegin(ExecCommandBeginEvent),
   ExecCommandOutputDelta(ExecCommandOutputDeltaEvent),
+  TerminalInteraction(TerminalInteractionEvent),
   ExecCommandEnd(ExecCommandEndEvent),
+
+  // ========== IMAGE EVENTS ==========
+  ViewImageToolCall(ViewImageToolCallEvent),
 
   // ========== APPROVAL EVENTS ==========
   ExecApprovalRequest(ExecApprovalRequestEvent),
   RequestUserInput(RequestUserInputEvent),
+  DynamicToolCallRequest(DynamicToolCallRequestEvent),
+  ElicitationRequest(ElicitationRequestEvent),
+  ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent),
 
-  // ========== NOTIFICATION EVENTS ==========
+  // ========== NOTICE & BACKGROUND EVENTS ==========
+  DeprecationNotice(DeprecationNoticeEvent),
+  BackgroundEvent(BackgroundEventEvent),
+
+  // ========== UNDO EVENTS ==========
+  UndoStarted(UndoStartedEvent),
+  UndoCompleted(UndoCompletedEvent),
+
+  // ========== STREAM & PATCH EVENTS ==========
   StreamError(StreamErrorEvent),
+  PatchApplyBegin(PatchApplyBeginEvent),
+  PatchApplyEnd(PatchApplyEndEvent),
+  TurnDiff(TurnDiffEvent),
+
+  // ========== QUERY/RESPONSE EVENTS ==========
+  GetHistoryEntryResponse(GetHistoryEntryResponseEvent),
+  McpListToolsResponse(McpListToolsResponseEvent),
+  ListCustomPromptsResponse(ListCustomPromptsResponseEvent),
+  ListSkillsResponse(ListSkillsResponseEvent),
+  ListRemoteSkillsResponse(ListRemoteSkillsResponseEvent),
+  RemoteSkillDownloaded(RemoteSkillDownloadedEvent),
+
+  // ========== SKILLS ==========
+  SkillsUpdateAvailable,
+
+  // ========== PLAN ==========
+  PlanUpdate(UpdatePlanArgs),
+
+  // ========== SHUTDOWN ==========
   ShutdownComplete,
+
+  // ========== REVIEW MODE ==========
+  EnteredReviewMode(ReviewRequestEvent),
+  ExitedReviewMode(ExitedReviewModeEvent),
+
+  // ========== RAW / ITEM-BASED PROTOCOL ==========
+  RawResponseItem(RawResponseItemEvent),
+  ItemStarted(ItemStartedEvent),
+  ItemCompleted(ItemCompletedEvent),
+
+  // ========== ITEM-BASED DELTAS ==========
+  PlanDelta(PlanDeltaEvent),
+  ReasoningContentDelta(ReasoningContentDeltaEvent),
+  ReasoningRawContentDelta(ReasoningRawContentDeltaEvent),
 
   // ========== COLLABORATION EVENTS ==========
   CollabAgentSpawnBegin(CollabAgentSpawnBeginEvent),
   CollabAgentSpawnEnd(CollabAgentSpawnEndEvent),
   CollabAgentInteractionBegin(CollabAgentInteractionBeginEvent),
   CollabAgentInteractionEnd(CollabAgentInteractionEndEvent),
-
-  // ========== NEW ITEM-BASED PROTOCOL ==========
-  ItemStarted(ItemStartedEvent),
-  ItemCompleted(ItemCompletedEvent),
+  CollabWaitingBegin(CollabWaitingBeginEvent),
+  CollabWaitingEnd(CollabWaitingEndEvent),
+  CollabCloseBegin(CollabCloseBeginEvent),
+  CollabCloseEnd(CollabCloseEndEvent),
+  CollabResumeBegin(CollabResumeBeginEvent),
+  CollabResumeEnd(CollabResumeEndEvent),
 }
 
 // ============================================================================
@@ -516,4 +588,695 @@ pub enum MessagePhase {
 pub enum WebSearchAction {
   Search,
   Open,
+}
+
+// ============================================================================
+// NEW EVENT TYPES — Ported from codex protocol for 1:1 TUI parity
+// ============================================================================
+
+// ---------- Model & Context ----------
+
+/// Model reroute event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRerouteEvent {
+  pub from_model: String,
+  pub to_model: String,
+  pub reason: ModelRerouteReason,
+}
+
+/// Reason a model was rerouted
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ModelRerouteReason {
+  HighRiskCyberActivity,
+}
+
+/// Context compacted event (no payload)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextCompactedEvent;
+
+/// Thread rolled back event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadRolledBackEvent {
+  pub num_turns: u32,
+}
+
+// ---------- Agent Reasoning ----------
+
+/// Agent reasoning event (final, complete)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentReasoningEvent {
+  pub text: String,
+}
+
+/// Agent reasoning delta event (streaming)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentReasoningDeltaEvent {
+  pub delta: String,
+}
+
+/// Agent reasoning raw content event (final, complete)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentReasoningRawContentEvent {
+  pub text: String,
+}
+
+/// Agent reasoning raw content delta event (streaming)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentReasoningRawContentDeltaEvent {
+  pub delta: String,
+}
+
+/// Agent reasoning section break event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentReasoningSectionBreakEvent {
+  #[serde(default)]
+  pub item_id: String,
+  #[serde(default)]
+  pub summary_index: i64,
+}
+
+// ---------- MCP Events ----------
+
+/// MCP server startup status update
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpStartupUpdateEvent {
+  pub server: String,
+  pub status: McpStartupStatus,
+}
+
+/// MCP startup status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum McpStartupStatus {
+  Starting,
+  Ready,
+  Failed { error: String },
+  Cancelled,
+}
+
+/// MCP startup complete event
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpStartupCompleteEvent {
+  pub ready: Vec<String>,
+  pub failed: Vec<McpStartupFailure>,
+  pub cancelled: Vec<String>,
+}
+
+/// MCP startup failure info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpStartupFailure {
+  pub server: String,
+  pub error: String,
+}
+
+/// MCP tool call begin event
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpToolCallBeginEvent {
+  pub call_id: String,
+  pub invocation: McpInvocation,
+}
+
+/// MCP tool call end event
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpToolCallEndEvent {
+  pub call_id: String,
+  pub invocation: McpInvocation,
+  pub duration_ms: u64,
+  pub result: McpToolCallResult,
+}
+
+/// MCP tool invocation details
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpInvocation {
+  pub server: String,
+  pub tool: String,
+  pub arguments: Option<serde_json::Value>,
+}
+
+/// MCP tool call result
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum McpToolCallResult {
+  Ok { content: Vec<McpContentBlock> },
+  Err(String),
+}
+
+/// MCP content block
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum McpContentBlock {
+  Text { text: String },
+  Image { data: String, mime_type: String },
+  Resource { uri: String, text: Option<String> },
+}
+
+/// MCP auth status
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum McpAuthStatus {
+  Unsupported,
+  NotLoggedIn,
+  BearerToken,
+  OAuth,
+}
+
+/// MCP tool metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpTool {
+  pub name: String,
+  pub description: Option<String>,
+}
+
+/// MCP resource metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpResource {
+  pub uri: String,
+  pub name: Option<String>,
+  pub description: Option<String>,
+}
+
+/// MCP resource template metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpResourceTemplate {
+  pub uri_template: String,
+  pub name: Option<String>,
+  pub description: Option<String>,
+}
+
+/// MCP list tools response event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpListToolsResponseEvent {
+  pub tools: std::collections::HashMap<String, Vec<McpTool>>,
+  pub resources: std::collections::HashMap<String, Vec<McpResource>>,
+  pub resource_templates: std::collections::HashMap<String, Vec<McpResourceTemplate>>,
+  pub auth_statuses: std::collections::HashMap<String, McpAuthStatus>,
+}
+
+// ---------- Web Search Events ----------
+
+/// Web search begin event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSearchBeginEvent {
+  pub call_id: String,
+}
+
+/// Web search end event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSearchEndEvent {
+  pub call_id: String,
+  pub query: String,
+  pub action: WebSearchAction,
+}
+
+// ---------- Terminal Interaction ----------
+
+/// Terminal interaction event (unified exec stdin)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalInteractionEvent {
+  pub call_id: String,
+  pub process_id: String,
+  pub stdin: String,
+}
+
+// ---------- Image Events ----------
+
+/// View image tool call event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewImageToolCallEvent {
+  pub call_id: String,
+  pub path: PathBuf,
+}
+
+// ---------- Additional Approval Events ----------
+
+/// Dynamic tool call request event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DynamicToolCallRequestEvent {
+  pub call_id: String,
+  pub turn_id: String,
+  pub tool: String,
+  pub arguments: serde_json::Value,
+}
+
+/// Elicitation request event (MCP server prompting user)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElicitationRequestEvent {
+  pub server_name: String,
+  pub id: String,
+  pub message: String,
+}
+
+/// Apply patch approval request event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyPatchApprovalRequestEvent {
+  pub call_id: String,
+  #[serde(default)]
+  pub turn_id: String,
+  pub changes: std::collections::HashMap<PathBuf, FileChange>,
+  pub reason: Option<String>,
+  pub grant_root: Option<PathBuf>,
+}
+
+/// File change descriptor for patches
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum FileChange {
+  Add {
+    content: String,
+  },
+  Delete {
+    content: String,
+  },
+  Update {
+    unified_diff: String,
+    move_path: Option<PathBuf>,
+  },
+}
+
+// ---------- Notice & Background Events ----------
+
+/// Deprecation notice event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeprecationNoticeEvent {
+  pub summary: String,
+  pub details: Option<String>,
+}
+
+/// Background event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackgroundEventEvent {
+  pub message: String,
+}
+
+// ---------- Undo Events ----------
+
+/// Undo started event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoStartedEvent {
+  pub message: Option<String>,
+}
+
+/// Undo completed event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoCompletedEvent {
+  pub success: bool,
+  pub message: Option<String>,
+}
+
+// ---------- Patch Events ----------
+
+/// Patch apply begin event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatchApplyBeginEvent {
+  pub call_id: String,
+  #[serde(default)]
+  pub turn_id: String,
+  pub auto_approved: bool,
+  pub changes: std::collections::HashMap<PathBuf, FileChange>,
+}
+
+/// Patch apply end event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatchApplyEndEvent {
+  pub call_id: String,
+  #[serde(default)]
+  pub turn_id: String,
+  pub stdout: String,
+  pub stderr: String,
+  pub success: bool,
+  #[serde(default)]
+  pub changes: std::collections::HashMap<PathBuf, FileChange>,
+  pub status: PatchApplyStatus,
+}
+
+/// Patch apply status
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PatchApplyStatus {
+  Completed,
+  Failed,
+  Declined,
+}
+
+/// Turn diff event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnDiffEvent {
+  pub unified_diff: String,
+}
+
+// ---------- Query/Response Events ----------
+
+/// History entry for replay
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryEntry {
+  pub events: Vec<EventMsg>,
+}
+
+/// Get history entry response event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetHistoryEntryResponseEvent {
+  pub offset: usize,
+  pub log_id: u64,
+  pub entry: Option<HistoryEntry>,
+}
+
+/// Custom prompt metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomPrompt {
+  pub id: String,
+  pub name: String,
+  pub description: Option<String>,
+}
+
+/// List custom prompts response event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListCustomPromptsResponseEvent {
+  pub custom_prompts: Vec<CustomPrompt>,
+}
+
+/// Skill metadata for listing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillMetadata {
+  pub name: String,
+  pub description: Option<String>,
+  pub path: PathBuf,
+  pub enabled: bool,
+}
+
+/// Skill error info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillErrorInfo {
+  pub path: PathBuf,
+  pub error: String,
+}
+
+/// Skills list entry (per cwd)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsListEntry {
+  pub cwd: PathBuf,
+  pub skills: Vec<SkillMetadata>,
+  pub errors: Vec<SkillErrorInfo>,
+}
+
+/// List skills response event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListSkillsResponseEvent {
+  pub skills: Vec<SkillsListEntry>,
+}
+
+/// Remote skill summary
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteSkillSummary {
+  pub id: String,
+  pub name: String,
+  pub description: String,
+}
+
+/// List remote skills response event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListRemoteSkillsResponseEvent {
+  pub skills: Vec<RemoteSkillSummary>,
+}
+
+/// Remote skill downloaded event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteSkillDownloadedEvent {
+  pub id: String,
+  pub name: String,
+  pub path: PathBuf,
+}
+
+// ---------- Plan Events ----------
+
+/// Plan step status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StepStatus {
+  Pending,
+  InProgress,
+  Completed,
+}
+
+/// Plan item argument
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanItemArg {
+  pub step: String,
+  pub status: StepStatus,
+}
+
+/// Update plan arguments
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdatePlanArgs {
+  #[serde(default)]
+  pub explanation: Option<String>,
+  pub plan: Vec<PlanItemArg>,
+}
+
+// ---------- Review Mode Events ----------
+
+/// Review target specification
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ReviewTarget {
+  UncommittedChanges,
+  BaseBranch { branch: String },
+  Commit { sha: String, title: Option<String> },
+  Custom { instructions: String },
+}
+
+/// Review request event (entering review mode)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewRequestEvent {
+  pub target: ReviewTarget,
+  pub user_facing_hint: Option<String>,
+}
+
+/// Review finding
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewFinding {
+  pub title: String,
+  pub body: String,
+  pub confidence_score: f32,
+  pub priority: i32,
+  pub code_location: ReviewCodeLocation,
+}
+
+/// Review code location
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewCodeLocation {
+  pub absolute_file_path: PathBuf,
+  pub line_range: ReviewLineRange,
+}
+
+/// Review line range
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewLineRange {
+  pub start: u32,
+  pub end: u32,
+}
+
+/// Review output event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewOutputEvent {
+  pub findings: Vec<ReviewFinding>,
+  pub overall_correctness: String,
+  pub overall_explanation: String,
+  pub overall_confidence_score: f32,
+}
+
+/// Exited review mode event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExitedReviewModeEvent {
+  pub review_output: Option<ReviewOutputEvent>,
+}
+
+// ---------- Raw / Item-Based Delta Events ----------
+
+/// Raw response item event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawResponseItemEvent {
+  pub item: serde_json::Value,
+}
+
+/// Plan delta event (item-based streaming)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanDeltaEvent {
+  pub thread_id: String,
+  pub turn_id: String,
+  pub item_id: String,
+  pub delta: String,
+}
+
+/// Reasoning content delta event (item-based streaming)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReasoningContentDeltaEvent {
+  pub thread_id: String,
+  pub turn_id: String,
+  pub item_id: String,
+  pub delta: String,
+  #[serde(default)]
+  pub summary_index: i64,
+}
+
+/// Reasoning raw content delta event (item-based streaming)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReasoningRawContentDeltaEvent {
+  pub thread_id: String,
+  pub turn_id: String,
+  pub item_id: String,
+  pub delta: String,
+  #[serde(default)]
+  pub content_index: i64,
+}
+
+// ---------- Additional Collaboration Events ----------
+
+/// Collab waiting begin event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabWaitingBeginEvent {
+  pub sender_thread_id: String,
+  pub receiver_thread_ids: Vec<String>,
+  pub call_id: String,
+}
+
+/// Collab waiting end event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabWaitingEndEvent {
+  pub sender_thread_id: String,
+  pub call_id: String,
+  pub statuses: std::collections::HashMap<String, AgentStatus>,
+}
+
+/// Collab close begin event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabCloseBeginEvent {
+  pub call_id: String,
+  pub sender_thread_id: String,
+  pub receiver_thread_id: String,
+}
+
+/// Collab close end event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabCloseEndEvent {
+  pub call_id: String,
+  pub sender_thread_id: String,
+  pub receiver_thread_id: String,
+  pub status: AgentStatus,
+}
+
+/// Collab resume begin event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabResumeBeginEvent {
+  pub call_id: String,
+  pub sender_thread_id: String,
+  pub receiver_thread_id: String,
+}
+
+/// Collab resume end event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabResumeEndEvent {
+  pub call_id: String,
+  pub sender_thread_id: String,
+  pub receiver_thread_id: String,
+  pub status: AgentStatus,
+}
+
+// ---------- Error Info ----------
+
+/// Detailed error classification
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CokraErrorInfo {
+  ContextWindowExceeded,
+  UsageLimitExceeded,
+  ServerOverloaded,
+  HttpConnectionFailed { http_status_code: Option<u16> },
+  ResponseStreamConnectionFailed { http_status_code: Option<u16> },
+  InternalServerError,
+  Unauthorized,
+  BadRequest,
+  SandboxError,
+  ResponseStreamDisconnected { http_status_code: Option<u16> },
+  ResponseTooManyFailedAttempts { http_status_code: Option<u16> },
+  ThreadRollbackFailed,
+  Other,
+}
+
+/// Rate limit error classification
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RateLimitErrorClassification {
+  ServerOverloaded,
+  UsageLimit,
+  Generic,
+}
+
+// ---------- Rate Limit Types ----------
+
+/// Token usage info (cumulative + per-turn)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenUsageInfo {
+  pub total_token_usage: TokenUsage,
+  pub last_token_usage: TokenUsage,
+  pub model_context_window: Option<i64>,
+}
+
+/// Rate limit snapshot
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RateLimitSnapshot {
+  pub limit_id: Option<String>,
+  pub limit_name: Option<String>,
+  pub primary: Option<RateLimitWindow>,
+  pub secondary: Option<RateLimitWindow>,
+  pub credits: Option<CreditsSnapshot>,
+  pub plan_type: Option<String>,
+}
+
+/// Rate limit window info
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RateLimitWindow {
+  pub used_percent: f64,
+  pub window_minutes: Option<i64>,
+  pub resets_at: Option<i64>,
+}
+
+/// Credits snapshot
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreditsSnapshot {
+  pub has_credits: bool,
+  pub unlimited: bool,
+  pub balance: Option<String>,
+}
+
+// ---------- Exec Command Source ----------
+
+/// Source of an exec command
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum ExecCommandSource {
+  #[default]
+  Agent,
+  UserShell,
+  UnifiedExecStartup,
+  UnifiedExecInteraction,
+}
+
+/// Exec command status
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExecCommandStatus {
+  Completed,
+  Failed,
+  Declined,
+}
+
+/// Turn abort reason
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum TurnAbortReason {
+  Interrupted,
+  Replaced,
+  ReviewEnded,
+}
+
+/// Elicitation action
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ElicitationAction {
+  Accept,
+  Decline,
+  Cancel,
+}
+
+/// Review delivery mode
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReviewDelivery {
+  Inline,
+  Detached,
 }

@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Agent status enum
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AgentStatus {
   /// Waiting for initialization
   PendingInit,
@@ -22,7 +22,7 @@ pub enum AgentStatus {
 }
 
 /// Token usage tracking
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenUsage {
   pub input_tokens: i64,
   pub cached_input_tokens: i64,

@@ -12,6 +12,7 @@ use cokra_core::model::init_model_layer;
 use cokra_protocol::EventMsg;
 use cokra_protocol::Op;
 use cokra_protocol::UserInput;
+use cokra_tui::UiMode;
 use cokra_tui::run_main as run_tui_main;
 use std::io::Write;
 use std::io::{self};
@@ -34,6 +35,25 @@ struct TopCli {
   /// Working directory
   #[arg(short = 'd', long = "dir")]
   dir: Option<PathBuf>,
+
+  /// TUI mode: inline or alt-screen
+  #[arg(long = "ui-mode", value_enum)]
+  ui_mode: Option<CliUiMode>,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum CliUiMode {
+  Inline,
+  AltScreen,
+}
+
+impl From<CliUiMode> for UiMode {
+  fn from(value: CliUiMode) -> Self {
+    match value {
+      CliUiMode::Inline => UiMode::Inline,
+      CliUiMode::AltScreen => UiMode::AltScreen,
+    }
+  }
 }
 
 #[derive(Debug, clap::Args)]
@@ -133,9 +153,12 @@ enum AuthCommands {
 async fn main() -> Result<()> {
   let cli = TopCli::parse();
   let overrides = parse_overrides(&cli.config_overrides.overrides)?;
+  let ui_mode = cli.ui_mode;
 
   match cli.command {
-    Some(Commands::Interactive { dir }) => run_interactive(dir.or(cli.dir), overrides).await,
+    Some(Commands::Interactive { dir }) => {
+      run_interactive(dir.or(cli.dir), overrides, ui_mode).await
+    }
     Some(Commands::Run { task, dir }) => run_task(task, dir.or(cli.dir), overrides).await,
     Some(Commands::Exec { task, dir, jsonl }) => {
       run_exec(task, dir.or(cli.dir), overrides, jsonl).await
@@ -148,7 +171,7 @@ async fn main() -> Result<()> {
       if let Some(prompt) = cli.prompt {
         run_task(prompt, cli.dir, overrides).await
       } else {
-        run_interactive(cli.dir, overrides).await
+        run_interactive(cli.dir, overrides, ui_mode).await
       }
     }
   }
@@ -185,6 +208,31 @@ fn load_config(
   loader.load_with_cli_overrides(overrides)
 }
 
+fn resolve_ui_mode(cli_ui_mode: Option<CliUiMode>) -> UiMode {
+  if let Some(mode) = cli_ui_mode {
+    return mode.into();
+  }
+
+  if let Ok(env_mode) = std::env::var("COKRA_TUI_MODE")
+    && let Some(mode) = parse_ui_mode_from_str(&env_mode)
+  {
+    return mode;
+  }
+
+  UiMode::Inline
+}
+
+fn parse_ui_mode_from_str(raw: &str) -> Option<UiMode> {
+  let normalized = raw.trim().to_ascii_lowercase();
+  if normalized == "inline" {
+    return Some(UiMode::Inline);
+  }
+  if normalized == "alt-screen" || normalized == "altscreen" || normalized == "alt" {
+    return Some(UiMode::AltScreen);
+  }
+  None
+}
+
 async fn run_task(
   task: String,
   dir: Option<PathBuf>,
@@ -201,11 +249,13 @@ async fn run_task(
 async fn run_interactive(
   dir: Option<PathBuf>,
   overrides: Vec<(String, String)>,
+  cli_ui_mode: Option<CliUiMode>,
 ) -> anyhow::Result<()> {
   set_workdir(&dir)?;
   let config = load_config(&dir, overrides)?;
+  let ui_mode = resolve_ui_mode(cli_ui_mode);
   let cokra = Cokra::new(config).await?;
-  let _ = run_tui_main(cokra).await?;
+  let _ = run_tui_main(cokra, ui_mode).await?;
   Ok(())
 }
 
@@ -433,4 +483,32 @@ async fn list_models(dir: Option<PathBuf>, overrides: Vec<(String, String)>) -> 
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::parse_ui_mode_from_str;
+  use cokra_tui::UiMode;
+
+  #[test]
+  fn parse_ui_mode_from_str_supports_inline_alias() {
+    assert_eq!(parse_ui_mode_from_str("inline"), Some(UiMode::Inline));
+    assert_eq!(parse_ui_mode_from_str(" INLINE "), Some(UiMode::Inline));
+  }
+
+  #[test]
+  fn parse_ui_mode_from_str_supports_alt_aliases() {
+    assert_eq!(parse_ui_mode_from_str("alt"), Some(UiMode::AltScreen));
+    assert_eq!(
+      parse_ui_mode_from_str("alt-screen"),
+      Some(UiMode::AltScreen)
+    );
+    assert_eq!(parse_ui_mode_from_str("altscreen"), Some(UiMode::AltScreen));
+  }
+
+  #[test]
+  fn parse_ui_mode_from_str_rejects_unknown_values() {
+    assert_eq!(parse_ui_mode_from_str(""), None);
+    assert_eq!(parse_ui_mode_from_str("auto"), None);
+  }
 }
