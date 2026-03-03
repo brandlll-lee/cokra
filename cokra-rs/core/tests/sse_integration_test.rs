@@ -1,29 +1,50 @@
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use futures::Stream;
 use reqwest::Client;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
-use cokra_config::{
-  ApprovalMode, ApprovalPolicy, PatchApproval, SandboxConfig, SandboxMode, ShellApproval,
-};
-use cokra_core::model::{
-  ChatRequest, ChatResponse, Chunk, ListModelsResponse, Message, ModelClient, ModelError,
-  ModelInfo, ModelProvider, ProviderConfig, ProviderRegistry,
-};
+use cokra_config::ApprovalMode;
+use cokra_config::ApprovalPolicy;
+use cokra_config::PatchApproval;
+use cokra_config::SandboxConfig;
+use cokra_config::SandboxMode;
+use cokra_config::ShellApproval;
+use cokra_core::model::ChatRequest;
+use cokra_core::model::ChatResponse;
+use cokra_core::model::Chunk;
+use cokra_core::model::ListModelsResponse;
+use cokra_core::model::Message;
+use cokra_core::model::ModelClient;
+use cokra_core::model::ModelError;
+use cokra_core::model::ModelInfo;
+use cokra_core::model::ModelProvider;
+use cokra_core::model::ProviderConfig;
+use cokra_core::model::ProviderRegistry;
 use cokra_core::session::Session;
-use cokra_core::tools::context::{FunctionCallError, ToolInvocation, ToolOutput};
-use cokra_core::tools::registry::{ToolHandler, ToolKind, ToolRegistry};
+use cokra_core::tools::context::FunctionCallError;
+use cokra_core::tools::context::ToolInvocation;
+use cokra_core::tools::context::ToolOutput;
+use cokra_core::tools::registry::ToolHandler;
+use cokra_core::tools::registry::ToolKind;
+use cokra_core::tools::registry::ToolRegistry;
 use cokra_core::tools::router::ToolRouter;
 use cokra_core::tools::validation::ToolValidator;
-use cokra_core::turn::{TurnConfig, TurnExecutor, UserInput};
+use cokra_core::turn::TurnConfig;
+use cokra_core::turn::TurnExecutor;
+use cokra_core::turn::UserInput;
 
-use cokra_protocol::{
-  AskForApproval, ContentDeltaEvent, EventMsg, FunctionCall, FunctionCallEvent, ResponseEvent,
-};
+use cokra_protocol::AskForApproval;
+use cokra_protocol::ContentDeltaEvent;
+use cokra_protocol::EventMsg;
+use cokra_protocol::FunctionCall;
+use cokra_protocol::FunctionCallEvent;
+use cokra_protocol::ResponseEvent;
 
 #[derive(Debug)]
 enum MockStep {

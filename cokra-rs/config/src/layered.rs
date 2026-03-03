@@ -1,7 +1,8 @@
 // Layered Configuration
 // Support for layered configuration with precedence
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
 /// Layered configuration wrapper
 #[derive(Debug, Clone, Serialize, Deserialize)]

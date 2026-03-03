@@ -1,10 +1,14 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::tools::context::{FunctionCallError, ToolInvocation, ToolOutput};
-use crate::tools::registry::{ToolHandler, ToolKind};
+use crate::tools::context::FunctionCallError;
+use crate::tools::context::ToolInvocation;
+use crate::tools::context::ToolOutput;
+use crate::tools::registry::ToolHandler;
+use crate::tools::registry::ToolKind;
 
 pub struct GrepFilesHandler;
 

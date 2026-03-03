@@ -1,11 +1,20 @@
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use anyhow::Context;
+use anyhow::Result;
+use clap::Parser;
+use clap::Subcommand;
 use cokra_config::ConfigLoader;
 use cokra_core::Cokra;
-use cokra_core::model::auth::{AuthManager, AuthRequest, AuthType, Credentials};
+use cokra_core::model::auth::AuthManager;
+use cokra_core::model::auth::AuthRequest;
+use cokra_core::model::auth::AuthType;
+use cokra_core::model::auth::Credentials;
 use cokra_core::model::init_model_layer;
-use cokra_protocol::{EventMsg, Op, UserInput};
-use std::io::{self, BufRead, Write};
+use cokra_protocol::EventMsg;
+use cokra_protocol::Op;
+use cokra_protocol::UserInput;
+use cokra_tui::run_main as run_tui_main;
+use std::io::Write;
+use std::io::{self};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -196,40 +205,7 @@ async fn run_interactive(
   set_workdir(&dir)?;
   let config = load_config(&dir, overrides)?;
   let cokra = Cokra::new(config).await?;
-
-  println!("Cokra Interactive Mode");
-  println!("Type 'exit' to quit");
-
-  let stdin = io::stdin();
-  let mut stdout = io::stdout();
-
-  loop {
-    print!("cokra> ");
-    stdout.flush()?;
-
-    let mut line = String::new();
-    stdin.lock().read_line(&mut line)?;
-    let input = line.trim().to_string();
-
-    if input.is_empty() {
-      continue;
-    }
-
-    if matches!(input.as_str(), "exit" | "quit") {
-      break;
-    }
-
-    if input == "help" {
-      println!("Commands: help, exit, quit");
-      continue;
-    }
-
-    match cokra.run_turn(input).await {
-      Ok(result) => println!("{}\n", result.final_message),
-      Err(err) => eprintln!("error: {err}\n"),
-    }
-  }
-
+  let _ = run_tui_main(cokra).await?;
   Ok(())
 }
 

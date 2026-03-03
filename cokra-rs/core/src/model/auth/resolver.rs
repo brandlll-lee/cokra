@@ -2,7 +2,8 @@
 //!
 //! Resolvers handle different ways of obtaining credentials
 
-use super::{Credentials, Result};
+use super::Credentials;
+use super::Result;
 
 /// Trait for resolving credentials from various sources
 pub trait AuthResolver: Send + Sync {

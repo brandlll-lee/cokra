@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 
 use cokra_protocol::ReviewDecision;
 

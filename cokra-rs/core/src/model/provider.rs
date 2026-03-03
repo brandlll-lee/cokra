@@ -3,19 +3,26 @@
 //! This module defines the [ModelProvider] trait that all LLM providers must implement.
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::Stream;
+use futures::StreamExt;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::pin::Pin;
 
-use cokra_protocol::{
-  ContentDeltaEvent as ResponseContentDeltaEvent, FunctionCall as ResponseFunctionCall,
-  FunctionCallEvent as ResponseFunctionCallEvent, ResponseEvent,
-};
+use cokra_protocol::ContentDeltaEvent as ResponseContentDeltaEvent;
+use cokra_protocol::FunctionCall as ResponseFunctionCall;
+use cokra_protocol::FunctionCallEvent as ResponseFunctionCallEvent;
+use cokra_protocol::ResponseEvent;
 
-use super::error::{ModelError, Result};
-use super::types::{ChatRequest, ChatResponse, Chunk, ListModelsResponse, ProviderConfig};
+use super::error::ModelError;
+use super::error::Result;
+use super::types::ChatRequest;
+use super::types::ChatResponse;
+use super::types::Chunk;
+use super::types::ListModelsResponse;
+use super::types::ProviderConfig;
 
 pub type ResponseEventStream = Pin<Box<dyn Stream<Item = Result<ResponseEvent>> + Send>>;
 
@@ -308,7 +315,10 @@ pub fn build_headers(
   api_key: &str,
   extra: &std::collections::HashMap<String, String>,
 ) -> reqwest::header::HeaderMap {
-  use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
+  use reqwest::header::AUTHORIZATION;
+  use reqwest::header::HeaderMap;
+  use reqwest::header::HeaderName;
+  use reqwest::header::HeaderValue;
 
   let mut headers = HeaderMap::new();
 

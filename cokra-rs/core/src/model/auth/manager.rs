@@ -2,12 +2,20 @@
 //!
 //! Centralized authentication management for all model providers
 
+use super::AuthError;
+use super::AuthRequest;
 use super::AuthType;
-use super::oauth::{DeviceCodeResponse, OAuthConfig, OAuthManager};
-use super::resolver::{AuthResolver, EnvAuthResolver};
-use super::storage::{CredentialStorage, FileCredentialStorage, MemoryCredentialStorage};
-use super::{AuthError, Result};
-use super::{AuthRequest, Credentials, StoredCredentials};
+use super::Credentials;
+use super::Result;
+use super::StoredCredentials;
+use super::oauth::DeviceCodeResponse;
+use super::oauth::OAuthConfig;
+use super::oauth::OAuthManager;
+use super::resolver::AuthResolver;
+use super::resolver::EnvAuthResolver;
+use super::storage::CredentialStorage;
+use super::storage::FileCredentialStorage;
+use super::storage::MemoryCredentialStorage;
 
 /// Authentication manager
 ///

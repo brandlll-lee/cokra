@@ -3,17 +3,27 @@
 //! Native Gemini REST API integration.
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::Stream;
+use futures::StreamExt;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::pin::Pin;
 
-use super::super::error::{ModelError, Result};
+use super::super::error::ModelError;
+use super::super::error::Result;
 use super::super::provider::ModelProvider;
-use super::super::types::{
-  ChatRequest, ChatResponse, Choice, ChoiceMessage, Chunk, ContentDelta, ListModelsResponse,
-  Message, ModelInfo, ProviderConfig, Usage,
-};
+use super::super::types::ChatRequest;
+use super::super::types::ChatResponse;
+use super::super::types::Choice;
+use super::super::types::ChoiceMessage;
+use super::super::types::Chunk;
+use super::super::types::ContentDelta;
+use super::super::types::ListModelsResponse;
+use super::super::types::Message;
+use super::super::types::ModelInfo;
+use super::super::types::ProviderConfig;
+use super::super::types::Usage;
 use super::create_client;
 
 /// Google Gemini provider.

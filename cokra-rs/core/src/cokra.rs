@@ -5,26 +5,47 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use futures::Stream;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
+use tokio::sync::Mutex;
+use tokio::sync::RwLock;
+use tokio::sync::broadcast;
+use tokio::sync::mpsc;
+use tokio::sync::watch;
 use uuid::Uuid;
 
-use cokra_config::{ApprovalMode, Config, SandboxMode};
-use cokra_protocol::{
-  AskForApproval, CompletionStatus, Event, EventMsg, Op, ReadOnlyAccess, SandboxPolicy,
-  SessionConfiguredEvent, Submission, TurnAbortedEvent, UserInput as ProtocolUserInput,
-};
+use cokra_config::ApprovalMode;
+use cokra_config::Config;
+use cokra_config::SandboxMode;
+use cokra_protocol::AskForApproval;
+use cokra_protocol::CompletionStatus;
+use cokra_protocol::Event;
+use cokra_protocol::EventMsg;
+use cokra_protocol::Op;
+use cokra_protocol::ReadOnlyAccess;
+use cokra_protocol::SandboxPolicy;
+use cokra_protocol::SessionConfiguredEvent;
+use cokra_protocol::Submission;
+use cokra_protocol::TurnAbortedEvent;
+use cokra_protocol::UserInput as ProtocolUserInput;
 
-use crate::agent::{AgentControl, AgentStatus, Turn};
-use crate::model::{ChatResponse, ModelClient, ToolCall, Usage, init_model_layer};
+use crate::agent::AgentControl;
+use crate::agent::AgentStatus;
+use crate::agent::Turn;
+use crate::model::ChatResponse;
+use crate::model::ModelClient;
+use crate::model::ToolCall;
+use crate::model::Usage;
+use crate::model::init_model_layer;
 use crate::session::Session;
 use crate::thread_manager::ThreadManager;
 use crate::tools::build_default_tools;
-use crate::tools::context::{FunctionCallError, ToolContext, ToolOutput};
-use crate::tools::handlers::spawn_agent::{
-  clear_spawn_agent_runtime, configure_spawn_agent_runtime,
-};
+use crate::tools::context::FunctionCallError;
+use crate::tools::context::ToolContext;
+use crate::tools::context::ToolOutput;
+use crate::tools::handlers::spawn_agent::clear_spawn_agent_runtime;
+use crate::tools::handlers::spawn_agent::configure_spawn_agent_runtime;
 use crate::tools::registry::ToolRegistry;
-use crate::tools::router::{ToolRouter, ToolRunContext};
+use crate::tools::router::ToolRouter;
+use crate::tools::router::ToolRunContext;
 use crate::turn::TurnConfig;
 
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 64;
@@ -715,7 +736,8 @@ impl CokraSpawnOk {
 #[cfg(test)]
 mod tests {
   use std::pin::Pin;
-  use std::sync::{Arc, Mutex};
+  use std::sync::Arc;
+  use std::sync::Mutex;
   use std::time::Duration;
 
   use async_trait::async_trait;
@@ -724,15 +746,31 @@ mod tests {
   use tokio::time::timeout;
   use uuid::Uuid;
 
-  use super::{Cokra, resolve_model_id};
+  use super::Cokra;
+  use super::resolve_model_id;
+  use crate::model::ChatRequest;
+  use crate::model::ChatResponse;
+  use crate::model::Choice;
+  use crate::model::ChoiceMessage;
+  use crate::model::Chunk;
+  use crate::model::ContentDelta;
+  use crate::model::ListModelsResponse;
+  use crate::model::Message;
+  use crate::model::ModelClient;
+  use crate::model::ModelInfo;
+  use crate::model::ProviderConfig;
+  use crate::model::ProviderRegistry;
+  use crate::model::ToolCall;
+  use crate::model::ToolCallDelta;
+  use crate::model::ToolCallFunction;
+  use crate::model::Usage;
   use crate::model::provider::ModelProvider;
-  use crate::model::{
-    ChatRequest, ChatResponse, Choice, ChoiceMessage, Chunk, ContentDelta, ListModelsResponse,
-    Message, ModelClient, ModelInfo, ProviderConfig, ProviderRegistry, ToolCall, ToolCallDelta,
-    ToolCallFunction, Usage,
-  };
   use cokra_config::ApprovalMode;
-  use cokra_protocol::{CompletionStatus, EventMsg, Op, ReviewDecision, UserInput};
+  use cokra_protocol::CompletionStatus;
+  use cokra_protocol::EventMsg;
+  use cokra_protocol::Op;
+  use cokra_protocol::ReviewDecision;
+  use cokra_protocol::UserInput;
 
   #[derive(Debug)]
   struct MockProvider {

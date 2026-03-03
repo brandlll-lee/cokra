@@ -1,10 +1,13 @@
 use std::path::Path;
 
-use cokra_protocol::{EventMsg, ExecCommandBeginEvent, ExecCommandEndEvent};
+use cokra_protocol::EventMsg;
+use cokra_protocol::ExecCommandBeginEvent;
+use cokra_protocol::ExecCommandEndEvent;
 use tokio::sync::mpsc;
 
 use crate::session::Session;
-use crate::tools::context::{FunctionCallError, ToolOutput};
+use crate::tools::context::FunctionCallError;
+use crate::tools::context::ToolOutput;
 
 #[derive(Clone)]
 pub struct ToolEventCtx<'a> {

@@ -1,7 +1,8 @@
 // Configuration Profile
 // User profile configuration
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::path::PathBuf;
 
 /// Configuration profile

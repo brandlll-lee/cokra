@@ -1,7 +1,8 @@
 // Cokra App Server Protocol V2
 // Current API version definitions
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
 /// Thread start request
 #[derive(Debug, Clone, Serialize, Deserialize)]

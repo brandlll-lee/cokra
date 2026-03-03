@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::tools::context::{FunctionCallError, ToolInvocation, ToolOutput};
+use crate::tools::context::FunctionCallError;
+use crate::tools::context::ToolInvocation;
+use crate::tools::context::ToolOutput;
 use crate::tools::spec::ToolSpec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

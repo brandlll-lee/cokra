@@ -2,8 +2,11 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::tools::context::{FunctionCallError, ToolOutput};
-use crate::tools::router::{ToolCall, ToolRouter, ToolRunContext};
+use crate::tools::context::FunctionCallError;
+use crate::tools::context::ToolOutput;
+use crate::tools::router::ToolCall;
+use crate::tools::router::ToolRouter;
+use crate::tools::router::ToolRunContext;
 
 /// Runtime gate for parallel tool execution.
 ///
@@ -41,18 +44,27 @@ impl ToolCallRuntime {
 #[cfg(test)]
 mod tests {
   use std::sync::Arc;
-  use std::sync::atomic::{AtomicUsize, Ordering};
+  use std::sync::atomic::AtomicUsize;
+  use std::sync::atomic::Ordering;
 
   use super::*;
   use crate::session::Session;
-  use crate::tools::context::{ToolInvocation, ToolOutput};
-  use crate::tools::registry::{ToolHandler, ToolKind, ToolRegistry};
+  use crate::tools::context::ToolInvocation;
+  use crate::tools::context::ToolOutput;
+  use crate::tools::registry::ToolHandler;
+  use crate::tools::registry::ToolKind;
+  use crate::tools::registry::ToolRegistry;
   use crate::tools::router::ToolRouter;
   use crate::tools::validation::ToolValidator;
-  use cokra_config::{
-    ApprovalMode, ApprovalPolicy, PatchApproval, SandboxConfig, SandboxMode, ShellApproval,
-  };
-  use cokra_protocol::{AskForApproval, ReadOnlyAccess, SandboxPolicy};
+  use cokra_config::ApprovalMode;
+  use cokra_config::ApprovalPolicy;
+  use cokra_config::PatchApproval;
+  use cokra_config::SandboxConfig;
+  use cokra_config::SandboxMode;
+  use cokra_config::ShellApproval;
+  use cokra_protocol::AskForApproval;
+  use cokra_protocol::ReadOnlyAccess;
+  use cokra_protocol::SandboxPolicy;
 
   struct CountingHandler {
     current: Arc<AtomicUsize>,

@@ -3,12 +3,21 @@
 //! Individual implementations for each supported LLM provider
 
 use reqwest::Client;
-use serde_json::{Value, json};
+use serde_json::Value;
+use serde_json::json;
 
-use super::error::{ModelError, Result};
+use super::error::ModelError;
+use super::error::Result;
 use super::registry::ProviderRegistry;
-use super::streaming::{OpenAIUsageParser, StreamingConfig, StreamingProcessor, UsageParser};
-use super::types::{ChatRequest, ChatResponse, Chunk, Message, ProviderConfig};
+use super::streaming::OpenAIUsageParser;
+use super::streaming::StreamingConfig;
+use super::streaming::StreamingProcessor;
+use super::streaming::UsageParser;
+use super::types::ChatRequest;
+use super::types::ChatResponse;
+use super::types::Chunk;
+use super::types::Message;
+use super::types::ProviderConfig;
 
 pub mod anthropic;
 pub mod github;
@@ -237,7 +246,8 @@ pub fn parse_openai_response(body: &str) -> Result<ChatResponse> {
 // Re-export stream type
 // =============================================================================
 
-use futures::{Stream, StreamExt};
+use futures::Stream;
+use futures::StreamExt;
 use std::pin::Pin;
 
 /// Helper function for creating a stream from a response
@@ -305,7 +315,8 @@ pub fn create_response_stream_with_usage_parser(
 #[cfg(test)]
 mod tests {
   use super::build_openai_request;
-  use crate::model::types::{ChatRequest, Message};
+  use crate::model::types::ChatRequest;
+  use crate::model::types::Message;
   use serde_json::json;
 
   #[test]

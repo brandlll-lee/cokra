@@ -5,16 +5,22 @@
 use async_trait::async_trait;
 use futures::Stream;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::pin::Pin;
 
-use super::super::error::{ModelError, Result};
+use super::super::error::ModelError;
+use super::super::error::Result;
 use super::super::provider::ModelProvider;
 use super::super::streaming::AnthropicUsageParser;
-use super::super::types::{
-  ChatRequest, ChatResponse, Chunk, ListModelsResponse, Message, ProviderConfig,
-};
-use super::{create_client, create_response_stream_with_usage_parser};
+use super::super::types::ChatRequest;
+use super::super::types::ChatResponse;
+use super::super::types::Chunk;
+use super::super::types::ListModelsResponse;
+use super::super::types::Message;
+use super::super::types::ProviderConfig;
+use super::create_client;
+use super::create_response_stream_with_usage_parser;
 
 /// Anthropic provider
 pub struct AnthropicProvider {
@@ -411,7 +417,11 @@ impl Default for AnthropicRequest {
 
 /// Convert Anthropic response to ChatResponse
 fn convert_anthropic_response(resp: AnthropicResponse, model: &str) -> ChatResponse {
-  use crate::model::types::{Choice, ChoiceMessage, ToolCall, ToolCallFunction, Usage};
+  use crate::model::types::Choice;
+  use crate::model::types::ChoiceMessage;
+  use crate::model::types::ToolCall;
+  use crate::model::types::ToolCallFunction;
+  use crate::model::types::Usage;
 
   let content = resp
     .content

@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -11,7 +12,10 @@ use tokio::sync::mpsc;
 
 use crate::session::Session;
 use crate::tools::network_approval::NetworkApprovalSpec;
-use cokra_protocol::{AskForApproval, EventMsg, ReviewDecision, SandboxPolicy};
+use cokra_protocol::AskForApproval;
+use cokra_protocol::EventMsg;
+use cokra_protocol::ReviewDecision;
+use cokra_protocol::SandboxPolicy;
 
 /// Approval store with per-key session caching.
 #[derive(Clone, Default, Debug)]

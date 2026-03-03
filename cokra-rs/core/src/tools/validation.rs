@@ -1,6 +1,7 @@
 use serde_json::Value;
 
-use cokra_config::{ApprovalPolicy, SandboxConfig};
+use cokra_config::ApprovalPolicy;
+use cokra_config::SandboxConfig;
 
 use crate::tools::context::FunctionCallError;
 
@@ -107,10 +108,14 @@ impl From<ValidationError> for FunctionCallError {
 
 #[cfg(test)]
 mod tests {
-  use super::{ToolCall, ToolValidator};
-  use cokra_config::{
-    ApprovalMode, ApprovalPolicy, PatchApproval, SandboxConfig, SandboxMode, ShellApproval,
-  };
+  use super::ToolCall;
+  use super::ToolValidator;
+  use cokra_config::ApprovalMode;
+  use cokra_config::ApprovalPolicy;
+  use cokra_config::PatchApproval;
+  use cokra_config::SandboxConfig;
+  use cokra_config::SandboxMode;
+  use cokra_config::ShellApproval;
 
   fn policy(mode: ApprovalMode) -> ApprovalPolicy {
     ApprovalPolicy {

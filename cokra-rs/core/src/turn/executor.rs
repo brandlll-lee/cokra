@@ -8,14 +8,20 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::model::{Message as ModelMessage, ModelClient};
+use crate::model::Message as ModelMessage;
+use crate::model::ModelClient;
 use crate::session::Session;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
-use cokra_protocol::{
-  AskForApproval, CompletionStatus, ErrorEvent, EventMsg, ModeKind, ReadOnlyAccess, SandboxPolicy,
-  TurnCompleteEvent, TurnStartedEvent,
-};
+use cokra_protocol::AskForApproval;
+use cokra_protocol::CompletionStatus;
+use cokra_protocol::ErrorEvent;
+use cokra_protocol::EventMsg;
+use cokra_protocol::ModeKind;
+use cokra_protocol::ReadOnlyAccess;
+use cokra_protocol::SandboxPolicy;
+use cokra_protocol::TurnCompleteEvent;
+use cokra_protocol::TurnStartedEvent;
 
 use super::sse_executor::SseTurnExecutor;
 
@@ -224,23 +230,36 @@ mod tests {
   use async_trait::async_trait;
   use futures::Stream;
   use reqwest::Client;
-  use tokio::sync::{Mutex, mpsc};
+  use tokio::sync::Mutex;
+  use tokio::sync::mpsc;
 
-  use cokra_protocol::{ContentDeltaEvent, EventMsg, ResponseEvent};
+  use cokra_protocol::ContentDeltaEvent;
+  use cokra_protocol::EventMsg;
+  use cokra_protocol::ResponseEvent;
 
-  use super::{TurnConfig, TurnExecutor, UserInput};
+  use super::TurnConfig;
+  use super::TurnExecutor;
+  use super::UserInput;
+  use crate::model::ChatRequest;
+  use crate::model::ChatResponse;
+  use crate::model::Chunk;
+  use crate::model::ListModelsResponse;
+  use crate::model::ModelClient;
+  use crate::model::ModelError;
+  use crate::model::ModelInfo;
+  use crate::model::ProviderConfig;
+  use crate::model::ProviderRegistry;
   use crate::model::provider::ModelProvider;
-  use crate::model::{
-    ChatRequest, ChatResponse, Chunk, ListModelsResponse, ModelClient, ModelError, ModelInfo,
-    ProviderConfig, ProviderRegistry,
-  };
   use crate::session::Session;
   use crate::tools::registry::ToolRegistry;
   use crate::tools::router::ToolRouter;
   use crate::tools::validation::ToolValidator;
-  use cokra_config::{
-    ApprovalMode, ApprovalPolicy, PatchApproval, SandboxConfig, SandboxMode, ShellApproval,
-  };
+  use cokra_config::ApprovalMode;
+  use cokra_config::ApprovalPolicy;
+  use cokra_config::PatchApproval;
+  use cokra_config::SandboxConfig;
+  use cokra_config::SandboxMode;
+  use cokra_config::ShellApproval;
 
   #[derive(Debug)]
   struct OrderedProvider {

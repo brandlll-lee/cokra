@@ -1,7 +1,8 @@
 // Cokra Configuration Module
 // Layered configuration system
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]

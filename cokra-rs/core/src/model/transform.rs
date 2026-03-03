@@ -6,13 +6,21 @@
 //! - Streaming chunk normalization across SSE formats
 
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value;
+use serde_json::json;
 
-use super::error::{ModelError, Result};
-use super::types::{
-  ChatRequest, ChatResponse, Choice, ChoiceMessage, Message, ToolCall, ToolCallFunction, Usage,
-};
+use super::error::ModelError;
+use super::error::Result;
+use super::types::ChatRequest;
+use super::types::ChatResponse;
+use super::types::Choice;
+use super::types::ChoiceMessage;
+use super::types::Message;
+use super::types::ToolCall;
+use super::types::ToolCallFunction;
+use super::types::Usage;
 
 /// Streaming chunk normalized by the transform layer.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

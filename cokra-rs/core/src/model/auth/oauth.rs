@@ -1,11 +1,15 @@
 //! OAuth device flow support.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::AuthError;
+use super::Credentials;
+use super::Result;
+use super::StoredCredentials;
 use super::storage::CredentialStorage;
-use super::{AuthError, Credentials, Result, StoredCredentials};
 
 /// OAuth provider configuration.
 #[derive(Debug, Clone)]

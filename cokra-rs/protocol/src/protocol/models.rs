@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
 /// Responses API SSE event stream items.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

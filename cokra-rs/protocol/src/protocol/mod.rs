@@ -1,7 +1,8 @@
 // Cokra Protocol Layer
 // Complete protocol definitions for Cokra
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::path::PathBuf;
 use uuid::Uuid;
 

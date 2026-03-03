@@ -8,20 +8,35 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::session::Session;
-use crate::tools::events::{ToolEmitter, ToolEventCtx, ToolEventStage};
+use crate::tools::events::ToolEmitter;
+use crate::tools::events::ToolEventCtx;
+use crate::tools::events::ToolEventStage;
+use crate::tools::network_approval::NetworkApprovalMode;
 use crate::tools::network_approval::NetworkApprovalSpec;
+use crate::tools::orchestrator::OrchestratorRunResult;
 use crate::tools::orchestrator::ToolOrchestrator;
 use crate::tools::registry::ToolRegistry;
-use crate::tools::sandboxing::{
-  Approvable, ApprovalCtx, ExecApprovalRequirement, SandboxAttempt, Sandboxable,
-  SandboxablePreference, ToolCtx, ToolError, ToolRuntime, ToolTurnContext,
-};
+use crate::tools::sandboxing::Approvable;
+use crate::tools::sandboxing::ApprovalCtx;
+use crate::tools::sandboxing::ExecApprovalRequirement;
+use crate::tools::sandboxing::SandboxAttempt;
+use crate::tools::sandboxing::Sandboxable;
+use crate::tools::sandboxing::SandboxablePreference;
+use crate::tools::sandboxing::ToolCtx;
+use crate::tools::sandboxing::ToolError;
+use crate::tools::sandboxing::ToolRuntime;
+use crate::tools::sandboxing::ToolTurnContext;
 use crate::tools::spec::ToolSpec;
-use crate::tools::validation::{ToolCall as ValidationToolCall, ToolValidator};
-use crate::tools::{network_approval::NetworkApprovalMode, orchestrator::OrchestratorRunResult};
-use cokra_protocol::{AskForApproval, EventMsg, ReviewDecision, SandboxPolicy};
+use crate::tools::validation::ToolCall as ValidationToolCall;
+use crate::tools::validation::ToolValidator;
+use cokra_protocol::AskForApproval;
+use cokra_protocol::EventMsg;
+use cokra_protocol::ReviewDecision;
+use cokra_protocol::SandboxPolicy;
 
-use crate::tools::context::{FunctionCallError, ToolInvocation, ToolOutput};
+use crate::tools::context::FunctionCallError;
+use crate::tools::context::ToolInvocation;
+use crate::tools::context::ToolOutput;
 
 #[derive(Clone, Debug)]
 pub struct ToolCall {

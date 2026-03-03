@@ -1,12 +1,17 @@
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use serde::Deserialize;
 
 use cokra_protocol::ThreadId;
 
 use crate::agent::AgentControl;
-use crate::tools::context::{FunctionCallError, ToolInvocation, ToolOutput};
-use crate::tools::registry::{ToolHandler, ToolKind};
+use crate::tools::context::FunctionCallError;
+use crate::tools::context::ToolInvocation;
+use crate::tools::context::ToolOutput;
+use crate::tools::registry::ToolHandler;
+use crate::tools::registry::ToolKind;
 
 pub struct SpawnAgentHandler;
 

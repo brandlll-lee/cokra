@@ -5,8 +5,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cokra_config::{ApprovalPolicy, Config, SandboxMode};
-use cokra_protocol::{ReadOnlyAccess, SandboxPolicy};
+use cokra_config::ApprovalPolicy;
+use cokra_config::Config;
+use cokra_config::SandboxMode;
+use cokra_protocol::ReadOnlyAccess;
+use cokra_protocol::SandboxPolicy;
 
 use crate::model::ModelClient;
 use crate::session::Session;

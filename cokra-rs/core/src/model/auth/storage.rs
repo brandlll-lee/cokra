@@ -2,10 +2,15 @@
 //!
 //! Handles persistent storage of credentials
 
-use super::{AuthError, Credentials, Result, StoredCredentials};
-use serde::{Deserialize, Serialize};
+use super::AuthError;
+use super::Credentials;
+use super::Result;
+use super::StoredCredentials;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
 /// Credential storage trait
 #[async_trait::async_trait]

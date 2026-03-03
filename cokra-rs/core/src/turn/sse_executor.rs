@@ -4,22 +4,31 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use cokra_protocol::{
-  AgentMessageContentDeltaEvent, EventMsg, FunctionCallEvent, ItemCompletedEvent, ItemStartedEvent,
-  ResponseEvent,
-};
+use cokra_protocol::AgentMessageContentDeltaEvent;
+use cokra_protocol::EventMsg;
+use cokra_protocol::FunctionCallEvent;
+use cokra_protocol::ItemCompletedEvent;
+use cokra_protocol::ItemStartedEvent;
+use cokra_protocol::ResponseEvent;
 
-use crate::model::{
-  ChatRequest, Message as ModelMessage, ModelClient, ModelError, ToolCall as ModelToolCall,
-  ToolCallFunction, Usage,
-};
+use crate::model::ChatRequest;
+use crate::model::Message as ModelMessage;
+use crate::model::ModelClient;
+use crate::model::ModelError;
+use crate::model::ToolCall as ModelToolCall;
+use crate::model::ToolCallFunction;
+use crate::model::Usage;
 use crate::session::Session;
 use crate::tools::context::ToolOutput;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::registry::ToolRegistry;
-use crate::tools::router::{ToolCall, ToolRouter, ToolRunContext};
+use crate::tools::router::ToolCall;
+use crate::tools::router::ToolRouter;
+use crate::tools::router::ToolRunContext;
 
-use super::executor::{TurnConfig, TurnError, TurnResult};
+use super::executor::TurnConfig;
+use super::executor::TurnError;
+use super::executor::TurnResult;
 
 #[derive(Clone)]
 pub struct SseTurnExecutor {
@@ -257,26 +266,45 @@ mod tests {
   use async_trait::async_trait;
   use futures::Stream;
   use reqwest::Client;
-  use tokio::sync::{Mutex, mpsc};
+  use tokio::sync::Mutex;
+  use tokio::sync::mpsc;
 
-  use cokra_config::{
-    ApprovalMode, ApprovalPolicy, PatchApproval, SandboxConfig, SandboxMode, ShellApproval,
-  };
-  use cokra_protocol::{ContentDeltaEvent, FunctionCall, ResponseErrorEvent};
+  use cokra_config::ApprovalMode;
+  use cokra_config::ApprovalPolicy;
+  use cokra_config::PatchApproval;
+  use cokra_config::SandboxConfig;
+  use cokra_config::SandboxMode;
+  use cokra_config::ShellApproval;
+  use cokra_protocol::ContentDeltaEvent;
+  use cokra_protocol::FunctionCall;
+  use cokra_protocol::ResponseErrorEvent;
 
   use super::SseTurnExecutor;
+  use crate::model::ChatRequest;
+  use crate::model::ChatResponse;
+  use crate::model::Chunk;
+  use crate::model::ListModelsResponse;
+  use crate::model::Message as ModelMessage;
+  use crate::model::ModelClient;
+  use crate::model::ModelError;
+  use crate::model::ModelInfo;
+  use crate::model::ProviderConfig;
+  use crate::model::ProviderRegistry;
   use crate::model::provider::ModelProvider;
-  use crate::model::{
-    ChatRequest, ChatResponse, Chunk, ListModelsResponse, Message as ModelMessage, ModelClient,
-    ModelError, ModelInfo, ProviderConfig, ProviderRegistry,
-  };
   use crate::session::Session;
-  use crate::tools::context::{FunctionCallError, ToolInvocation, ToolOutput};
-  use crate::tools::registry::{ToolHandler, ToolKind, ToolRegistry};
+  use crate::tools::context::FunctionCallError;
+  use crate::tools::context::ToolInvocation;
+  use crate::tools::context::ToolOutput;
+  use crate::tools::registry::ToolHandler;
+  use crate::tools::registry::ToolKind;
+  use crate::tools::registry::ToolRegistry;
   use crate::tools::router::ToolRouter;
   use crate::tools::validation::ToolValidator;
-  use crate::turn::{TurnConfig, TurnError};
-  use cokra_protocol::{EventMsg, FunctionCallEvent, ResponseEvent};
+  use crate::turn::TurnConfig;
+  use crate::turn::TurnError;
+  use cokra_protocol::EventMsg;
+  use cokra_protocol::FunctionCallEvent;
+  use cokra_protocol::ResponseEvent;
 
   #[derive(Debug)]
   enum MockStep {

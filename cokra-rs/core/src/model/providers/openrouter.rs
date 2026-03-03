@@ -7,12 +7,19 @@ use futures::Stream;
 use reqwest::Client;
 use std::pin::Pin;
 
-use super::super::error::{ModelError, Result};
+use super::super::error::ModelError;
+use super::super::error::Result;
 use super::super::provider::ModelProvider;
-use super::super::types::{
-  ChatRequest, ChatResponse, Chunk, ListModelsResponse, ModelInfo, ProviderConfig,
-};
-use super::{build_openai_request, create_client, create_response_stream, parse_openai_response};
+use super::super::types::ChatRequest;
+use super::super::types::ChatResponse;
+use super::super::types::Chunk;
+use super::super::types::ListModelsResponse;
+use super::super::types::ModelInfo;
+use super::super::types::ProviderConfig;
+use super::build_openai_request;
+use super::create_client;
+use super::create_response_stream;
+use super::parse_openai_response;
 
 /// OpenRouter provider.
 pub struct OpenRouterProvider {

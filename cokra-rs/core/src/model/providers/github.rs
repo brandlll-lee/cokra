@@ -5,13 +5,20 @@
 use async_trait::async_trait;
 use futures::Stream;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::pin::Pin;
 
-use super::super::error::{ModelError, Result};
+use super::super::error::ModelError;
+use super::super::error::Result;
 use super::super::provider::ModelProvider;
-use super::super::types::{ChatRequest, ChatResponse, Chunk, ListModelsResponse, ProviderConfig};
-use super::{create_client, create_response_stream};
+use super::super::types::ChatRequest;
+use super::super::types::ChatResponse;
+use super::super::types::Chunk;
+use super::super::types::ListModelsResponse;
+use super::super::types::ProviderConfig;
+use super::create_client;
+use super::create_response_stream;
 
 /// GitHub Copilot provider
 pub struct GitHubCopilotProvider {

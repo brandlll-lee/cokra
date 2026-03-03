@@ -2,7 +2,8 @@
 //!
 //! Core types for LLM interactions including requests, responses, and tool definitions
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
 
 /// Chat completion request

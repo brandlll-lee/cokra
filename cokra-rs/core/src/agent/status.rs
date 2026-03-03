@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
 /// Runtime status for an agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

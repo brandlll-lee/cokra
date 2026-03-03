@@ -1,7 +1,8 @@
 // Configuration Types
 // All configuration type definitions
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 

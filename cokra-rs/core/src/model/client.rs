@@ -10,9 +10,12 @@ use tokio::sync::RwLock;
 
 use cokra_protocol::ResponseEvent;
 
-use super::error::{ModelError, Result};
+use super::error::ModelError;
+use super::error::Result;
 use super::registry::ProviderRegistryRef;
-use super::types::{ChatRequest, ChatResponse, Chunk};
+use super::types::ChatRequest;
+use super::types::ChatResponse;
+use super::types::Chunk;
 
 /// Model client
 ///

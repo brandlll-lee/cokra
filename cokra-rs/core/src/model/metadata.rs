@@ -2,14 +2,18 @@
 //!
 //! Pulls model metadata from models.dev and stores a local cache.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+use std::time::SystemTime;
 use tokio::sync::RwLock;
 
-use super::error::{ModelError, Result};
+use super::error::ModelError;
+use super::error::Result;
 
 /// Interleaved reasoning config.
 #[derive(Debug, Clone, Serialize, Deserialize)]

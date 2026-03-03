@@ -1,7 +1,8 @@
 // Turn Items
 // Item types for turn content
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
 /// Agent status enum
 #[derive(Debug, Clone, Serialize, Deserialize)]

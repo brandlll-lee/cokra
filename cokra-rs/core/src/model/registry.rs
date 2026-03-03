@@ -6,9 +6,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::error::{ModelError, Result};
+use super::ModelProvider;
+use super::ProviderConfig;
+use super::error::ModelError;
+use super::error::Result;
 use super::provider::ProviderInfo;
-use super::{ModelProvider, ProviderConfig};
 
 /// Provider Registry
 ///

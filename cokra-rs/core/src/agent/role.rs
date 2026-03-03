@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
 /// Agent role definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]

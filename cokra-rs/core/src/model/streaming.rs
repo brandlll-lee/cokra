@@ -2,7 +2,10 @@
 
 use serde_json::Value;
 
-use super::types::{Chunk, ContentDelta, ToolCallDelta, Usage};
+use super::types::Chunk;
+use super::types::ContentDelta;
+use super::types::ToolCallDelta;
+use super::types::Usage;
 
 /// Optional binary decoder for stream payloads.
 pub trait BinaryDecoder: Send + Sync {

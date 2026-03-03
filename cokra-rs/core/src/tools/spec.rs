@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
 /// JSON schema representation for tool input/output contracts.
 #[derive(Debug, Clone, Serialize, Deserialize)]

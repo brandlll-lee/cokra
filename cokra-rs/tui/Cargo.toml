@@ -13,7 +13,7 @@ cokra-core = { path = "../core" }
 cokra-protocol = { path = "../protocol" }
 
 # UI framework
-ratatui = { workspace = true }
+ratatui = { workspace = true, features = ["unstable-widget-ref", "unstable-rendered-line-info"] }
 crossterm = { workspace = true }
 
 # Async
@@ -23,3 +23,15 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 unicode-segmentation = "1.12"
+textwrap = { workspace = true }
+supports-color = { workspace = true }
+unicode-width = { workspace = true }
+itertools = { workspace = true }
+serde_json = { workspace = true }
+pulldown-cmark = "0.13"
+
+[dev-dependencies]
+insta = { workspace = true }
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+tokio-util = { version = "0.7", features = ["time"] }

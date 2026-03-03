@@ -1,8 +1,8 @@
 // Utils - Absolute Path
 // Absolute path utilities
 
-use anyhow::Result as anyhow_result;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
 /// Get absolute path
 pub fn absolute_path(path: impl AsRef<Path>) -> Result<PathBuf, anyhow::Error> {

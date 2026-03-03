@@ -8,11 +8,17 @@ pub mod resolver;
 pub mod storage;
 
 pub use manager::AuthManager;
-pub use oauth::{DeviceCodeResponse, OAuthConfig, OAuthManager, OAuthToken};
-pub use resolver::{AuthResolver, EnvAuthResolver};
-pub use storage::{CredentialStorage, FileCredentialStorage};
+pub use oauth::DeviceCodeResponse;
+pub use oauth::OAuthConfig;
+pub use oauth::OAuthManager;
+pub use oauth::OAuthToken;
+pub use resolver::AuthResolver;
+pub use resolver::EnvAuthResolver;
+pub use storage::CredentialStorage;
+pub use storage::FileCredentialStorage;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use thiserror::Error;
 
 /// Authentication errors

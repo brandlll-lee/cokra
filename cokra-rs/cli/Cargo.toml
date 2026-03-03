@@ -16,6 +16,7 @@ path = "src/main.rs"
 cokra-core = { path = "../core" }
 cokra-config = { path = "../config" }
 cokra-protocol = { path = "../protocol" }
+cokra-tui = { path = "../tui" }
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }

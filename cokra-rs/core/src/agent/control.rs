@@ -1,17 +1,28 @@
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
+use std::sync::Weak;
 
-use tokio::sync::{RwLock, broadcast, mpsc, watch};
+use tokio::sync::RwLock;
+use tokio::sync::broadcast;
+use tokio::sync::mpsc;
+use tokio::sync::watch;
 
-use cokra_protocol::{CollabAgentSpawnBeginEvent, CollabAgentSpawnEndEvent, EventMsg, ThreadId};
+use cokra_protocol::CollabAgentSpawnBeginEvent;
+use cokra_protocol::CollabAgentSpawnEndEvent;
+use cokra_protocol::EventMsg;
+use cokra_protocol::ThreadId;
 
 use crate::model::ModelClient;
 use crate::session::Session;
 use crate::thread_manager::ThreadManagerState;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
-use crate::turn::{TurnConfig, TurnExecutor, TurnResult, UserInput};
+use crate::turn::TurnConfig;
+use crate::turn::TurnExecutor;
+use crate::turn::TurnResult;
+use crate::turn::UserInput;
 
-use super::guards::{Guards, exceeds_thread_spawn_depth_limit};
+use super::guards::Guards;
+use super::guards::exceeds_thread_spawn_depth_limit;
 use super::status::AgentStatus;
 
 /// Turn input handled by agent control.

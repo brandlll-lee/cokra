@@ -105,3 +105,6 @@ cokra-rs/.tmp/
 # Rust/Cargo temp workdirs at repo root
 .cargo-tmp/
 .tmp/
+
+# TUI manual test captures
+cokra-rs/cokra_tui_*capture*.txt

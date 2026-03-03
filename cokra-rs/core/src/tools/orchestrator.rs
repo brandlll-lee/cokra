@@ -1,13 +1,23 @@
-use crate::tools::network_approval::{
-  DeferredNetworkApproval, NetworkApprovalMode, begin_network_approval,
-  finish_deferred_network_approval, finish_immediate_network_approval,
-};
+use crate::tools::network_approval::DeferredNetworkApproval;
+use crate::tools::network_approval::NetworkApprovalMode;
+use crate::tools::network_approval::begin_network_approval;
+use crate::tools::network_approval::finish_deferred_network_approval;
+use crate::tools::network_approval::finish_immediate_network_approval;
+use crate::tools::sandboxing::ApprovalCtx;
+use crate::tools::sandboxing::ApprovalStore;
+use crate::tools::sandboxing::ExecApprovalRequirement;
+use crate::tools::sandboxing::SandboxAttempt;
+use crate::tools::sandboxing::SandboxKind;
+use crate::tools::sandboxing::SandboxOverride;
+use crate::tools::sandboxing::SandboxablePreference;
+use crate::tools::sandboxing::ToolCtx;
+use crate::tools::sandboxing::ToolError;
+use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::default_exec_approval_requirement;
-use crate::tools::sandboxing::{
-  ApprovalCtx, ApprovalStore, ExecApprovalRequirement, SandboxAttempt, SandboxKind,
-  SandboxOverride, SandboxablePreference, ToolCtx, ToolError, ToolRuntime, with_cached_approval,
-};
-use cokra_protocol::{AskForApproval, ReviewDecision, SandboxPolicy};
+use crate::tools::sandboxing::with_cached_approval;
+use cokra_protocol::AskForApproval;
+use cokra_protocol::ReviewDecision;
+use cokra_protocol::SandboxPolicy;
 
 /// Central place for approvals + sandbox selection + retry semantics.
 pub struct ToolOrchestrator {
@@ -249,10 +259,11 @@ mod tests {
 
   use super::*;
   use crate::session::Session;
-  use crate::tools::network_approval::{
-    NetworkApprovalMode, NetworkApprovalOutcome, NetworkApprovalSpec,
-    is_network_approval_attempt_active, record_network_approval_outcome,
-  };
+  use crate::tools::network_approval::NetworkApprovalMode;
+  use crate::tools::network_approval::NetworkApprovalOutcome;
+  use crate::tools::network_approval::NetworkApprovalSpec;
+  use crate::tools::network_approval::is_network_approval_attempt_active;
+  use crate::tools::network_approval::record_network_approval_outcome;
   use crate::tools::sandboxing::ToolTurnContext;
 
   #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]

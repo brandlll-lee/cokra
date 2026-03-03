@@ -1,7 +1,8 @@
 // User Input Types
 // Types for user input content
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::path::PathBuf;
 
 /// User input content

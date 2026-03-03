@@ -3,11 +3,16 @@ mod approvals;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
+use tokio::sync::RwLock;
+use tokio::sync::broadcast;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 use crate::model::Message;
 use approvals::PendingApprovals;
-use cokra_protocol::{EventMsg, ExecApprovalRequestEvent, ReviewDecision};
+use cokra_protocol::EventMsg;
+use cokra_protocol::ExecApprovalRequestEvent;
+use cokra_protocol::ReviewDecision;
 
 /// Runtime session state for one conversation thread.
 pub struct Session {
