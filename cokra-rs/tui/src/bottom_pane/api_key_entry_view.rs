@@ -107,7 +107,7 @@ impl BottomPaneView for ApiKeyEntryView {
 impl Renderable for ApiKeyEntryView {
   fn desired_height(&self, width: u16) -> u16 {
     let mut height = 0;
-    let header = vec![
+    let header = [
       Line::from(format!("Connect provider: {}", self.provider_id).bold()),
       Line::from("Enter API key / token (will not be displayed).".dim()),
     ];

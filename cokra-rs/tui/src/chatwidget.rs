@@ -731,10 +731,11 @@ impl ChatWidget {
       self.add_boxed_history(cell);
     }
 
-    if output.all_idle && !self.agent_turn_running {
-      if let Some(status) = self.bottom_pane.status_widget_mut() {
-        status.pause_timer();
-      }
+    if output.all_idle
+      && !self.agent_turn_running
+      && let Some(status) = self.bottom_pane.status_widget_mut()
+    {
+      status.pause_timer();
     }
   }
 

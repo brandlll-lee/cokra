@@ -252,11 +252,11 @@ impl ChatComposer {
         ..
       } => {
         // Enter = execute the selected command.
-        if let Some(popup) = &self.command_popup {
-          if let Some(cmd) = popup.selected_command() {
-            self.command_popup = None;
-            return self.apply_slash_command(cmd);
-          }
+        if let Some(popup) = &self.command_popup
+          && let Some(cmd) = popup.selected_command()
+        {
+          self.command_popup = None;
+          return self.apply_slash_command(cmd);
         }
         // Fallback to default submit handling if no command selected.
         self.command_popup = None;
@@ -459,10 +459,10 @@ impl ChatComposer {
     }
 
     // Flush any buffered burst before applying a non-char input.
-    if !matches!(input.code, KeyCode::Char(_) | KeyCode::Enter) {
-      if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-        self.handle_paste(pasted);
-      }
+    if !matches!(input.code, KeyCode::Char(_) | KeyCode::Enter)
+      && let Some(pasted) = self.paste_burst.flush_before_modified_input()
+    {
+      self.handle_paste(pasted);
     }
 
     // For non-char inputs (or after flushing), handle normally.

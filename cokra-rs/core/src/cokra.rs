@@ -433,7 +433,6 @@ fn build_turn_config(config: &Config) -> TurnConfig {
     sandbox_policy: map_sandbox_policy(config),
     cwd: config.cwd.clone(),
     has_managed_network_requirements: config.sandbox.network_access,
-    auto_approve_on_request: true,
     ..TurnConfig::default()
   }
 }
@@ -1663,10 +1662,6 @@ mod tests {
     )
     .await
     .expect("create cokra");
-
-    let mut turn_config = cokra.agent_control.turn_config().await;
-    turn_config.auto_approve_on_request = false;
-    cokra.agent_control.set_turn_config(turn_config).await;
 
     let _ = cokra
       .submit(Op::UserInput {

@@ -419,7 +419,6 @@ impl SseTurnExecutor {
       self.config.sandbox_policy.clone(),
     );
     run_ctx.has_managed_network_requirements = self.config.has_managed_network_requirements;
-    run_ctx.auto_approve_on_request = self.config.auto_approve_on_request;
     run_ctx.tx_event = Some(self.tx_event.clone());
 
     let mut output = self

@@ -7,7 +7,10 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::exec::SandboxPermissions;
+use crate::exec_policy::eval_exec_approval;
 use crate::session::Session;
+use crate::shell::default_user_shell;
 use crate::tools::events::ToolEmitter;
 use crate::tools::events::ToolEventCtx;
 use crate::tools::events::ToolEventStage;
@@ -55,7 +58,6 @@ pub struct ToolRunContext {
   pub approval_policy: AskForApproval,
   pub sandbox_policy: SandboxPolicy,
   pub has_managed_network_requirements: bool,
-  pub auto_approve_on_request: bool,
 }
 
 impl ToolRunContext {
@@ -76,7 +78,6 @@ impl ToolRunContext {
       approval_policy,
       sandbox_policy,
       has_managed_network_requirements: false,
-      auto_approve_on_request: true,
     }
   }
 }
@@ -121,7 +122,7 @@ impl ToolRouter {
       Arc::clone(&self.registry),
       self.registry.get_spec(&call.tool_name).cloned(),
       run_ctx.approval_policy.clone(),
-      run_ctx.auto_approve_on_request,
+      run_ctx.sandbox_policy.clone(),
     );
     let turn_ctx = ToolTurnContext {
       thread_id: run_ctx.thread_id.clone(),
@@ -234,7 +235,7 @@ struct RegistryToolRuntime {
   registry: Arc<ToolRegistry>,
   spec: Option<ToolSpec>,
   approval_policy: AskForApproval,
-  auto_approve_on_request: bool,
+  sandbox_policy: SandboxPolicy,
 }
 
 impl RegistryToolRuntime {
@@ -242,13 +243,13 @@ impl RegistryToolRuntime {
     registry: Arc<ToolRegistry>,
     spec: Option<ToolSpec>,
     approval_policy: AskForApproval,
-    auto_approve_on_request: bool,
+    sandbox_policy: SandboxPolicy,
   ) -> Self {
     Self {
       registry,
       spec,
       approval_policy,
-      auto_approve_on_request,
+      sandbox_policy,
     }
   }
 }
@@ -272,6 +273,21 @@ impl Approvable<ToolCall> for RegistryToolRuntime {
       return Some(ExecApprovalRequirement::Skip {
         bypass_sandbox: false,
       });
+    }
+
+    // 1:1 codex: for shell tool, parse the actual command and route through
+    // eval_exec_approval() for command safety classification.
+    if req.tool_name == "shell"
+      && let Some(command_str) = req.args.get("command").and_then(|v| v.as_str())
+    {
+      let shell = default_user_shell();
+      let argv = shell.derive_exec_args(command_str, true);
+      return Some(eval_exec_approval(
+        &argv,
+        &self.sandbox_policy,
+        self.approval_policy.clone(),
+        SandboxPermissions::Default,
+      ));
     }
 
     match self.approval_policy {
@@ -303,32 +319,18 @@ impl Approvable<ToolCall> for RegistryToolRuntime {
       req.tool_name.clone()
     };
 
-    if self.auto_approve_on_request {
-      ctx
-        .session
-        .emit_exec_approval_request(
-          ctx.turn.thread_id.clone(),
-          ctx.turn.turn_id.clone(),
-          ctx.call_id.to_string(),
-          display_command,
-          ctx.turn.cwd.clone(),
-          ctx.turn.tx_event.clone(),
-        )
-        .await;
-      ReviewDecision::Approved
-    } else {
-      ctx
-        .session
-        .request_exec_approval(
-          ctx.turn.thread_id.clone(),
-          ctx.turn.turn_id.clone(),
-          ctx.call_id.to_string(),
-          display_command,
-          ctx.turn.cwd.clone(),
-          ctx.turn.tx_event.clone(),
-        )
-        .await
-    }
+    // 1:1 codex: always block until the user responds (no auto-approve hack).
+    ctx
+      .session
+      .request_exec_approval(
+        ctx.turn.thread_id.clone(),
+        ctx.turn.turn_id.clone(),
+        ctx.call_id.to_string(),
+        display_command,
+        ctx.turn.cwd.clone(),
+        ctx.turn.tx_event.clone(),
+      )
+      .await
   }
 }
 

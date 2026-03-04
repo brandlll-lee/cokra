@@ -163,10 +163,11 @@ fn build_user_message_lines_with_elements(
         continue;
       }
       let rel_cursor = cursor - line_start;
-      if cursor < start && line_text.is_char_boundary(rel_cursor) {
-        if let Some(segment) = line_text.get(rel_cursor..rel_start) {
-          spans.push(Span::from(segment.to_string()));
-        }
+      if cursor < start
+        && line_text.is_char_boundary(rel_cursor)
+        && let Some(segment) = line_text.get(rel_cursor..rel_start)
+      {
+        spans.push(Span::from(segment.to_string()));
       }
       if let Some(segment) = line_text.get(rel_start..rel_end) {
         spans.push(Span::styled(segment.to_string(), element_style));
@@ -174,10 +175,11 @@ fn build_user_message_lines_with_elements(
       }
     }
     let rel_cursor = cursor - line_start;
-    if cursor < line_end && line_text.is_char_boundary(rel_cursor) {
-      if let Some(segment) = line_text.get(rel_cursor..) {
-        spans.push(Span::from(segment.to_string()));
-      }
+    if cursor < line_end
+      && line_text.is_char_boundary(rel_cursor)
+      && let Some(segment) = line_text.get(rel_cursor..)
+    {
+      spans.push(Span::from(segment.to_string()));
     }
     let line = if spans.is_empty() {
       Line::from(line_text.to_string()).style(style)

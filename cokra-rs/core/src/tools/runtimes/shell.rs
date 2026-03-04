@@ -88,15 +88,13 @@ pub struct ShellRequest {
 pub struct ShellRuntime {
   shell: Shell,
   approval_policy: AskForApproval,
-  auto_approve: bool,
 }
 
 impl ShellRuntime {
-  pub fn new(shell: Shell, approval_policy: AskForApproval, auto_approve: bool) -> Self {
+  pub fn new(shell: Shell, approval_policy: AskForApproval) -> Self {
     Self {
       shell,
       approval_policy,
-      auto_approve,
     }
   }
 
@@ -149,32 +147,18 @@ impl Approvable<ShellCommandRequest> for ShellRuntime {
     req: &ShellCommandRequest,
     ctx: ApprovalCtx<'_>,
   ) -> ReviewDecision {
-    if self.auto_approve {
-      ctx
-        .session
-        .emit_exec_approval_request(
-          ctx.turn.thread_id.clone(),
-          ctx.turn.turn_id.clone(),
-          ctx.call_id.to_string(),
-          req.command.clone(),
-          ctx.turn.cwd.clone(),
-          ctx.turn.tx_event.clone(),
-        )
-        .await;
-      ReviewDecision::Approved
-    } else {
-      ctx
-        .session
-        .request_exec_approval(
-          ctx.turn.thread_id.clone(),
-          ctx.turn.turn_id.clone(),
-          ctx.call_id.to_string(),
-          req.command.clone(),
-          ctx.turn.cwd.clone(),
-          ctx.turn.tx_event.clone(),
-        )
-        .await
-    }
+    // 1:1 codex: always block until the user responds.
+    ctx
+      .session
+      .request_exec_approval(
+        ctx.turn.thread_id.clone(),
+        ctx.turn.turn_id.clone(),
+        ctx.call_id.to_string(),
+        req.command.clone(),
+        ctx.turn.cwd.clone(),
+        ctx.turn.tx_event.clone(),
+      )
+      .await
   }
 }
 

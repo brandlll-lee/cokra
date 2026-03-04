@@ -645,13 +645,6 @@ impl App {
   }
 
   async fn handle_cokra_event(&mut self, event: Event) -> Result<()> {
-    // If execution has started after a prior approval request, approval is now resolved.
-    // Ensure stale overlay/pending state is cleared so bottom-pane input is unblocked.
-    if matches!(event.msg, EventMsg::ExecCommandBegin(_)) {
-      self.pending_approval = None;
-      self.chat_widget.bottom_pane.close_approval();
-    }
-
     let turn_finished = matches!(
       event.msg,
       EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) | EventMsg::Error(_)
@@ -695,13 +688,10 @@ impl App {
       self
         .chat_widget
         .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-          Line::from(vec![
-            ratatui::text::Span::from(format!(
-              "'/{}' is disabled while a task is in progress.",
-              cmd.command()
-            ))
-            .into(),
-          ]),
+          Line::from(vec![ratatui::text::Span::from(format!(
+            "'/{}' is disabled while a task is in progress.",
+            cmd.command()
+          ))]),
         ]));
       return Ok(());
     }

@@ -236,11 +236,9 @@ impl BottomPane {
       let last_idx = self.view_stack.len() - 1;
       let view = &mut self.view_stack[last_idx];
 
-      if key.code == KeyCode::Esc {
-        if view.on_cancel() {
-          self.view_stack.pop();
-          return BottomPaneAction::None;
-        }
+      if key.code == KeyCode::Esc && view.on_cancel() {
+        self.view_stack.pop();
+        return BottomPaneAction::None;
       }
 
       view.handle_key_event(key);
