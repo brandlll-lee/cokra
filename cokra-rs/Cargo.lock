@@ -567,6 +567,7 @@ dependencies = [
  "cokra-state",
  "dirs",
  "futures",
+ "libc",
  "pin-project",
  "ratatui",
  "reqwest",
@@ -576,8 +577,10 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
+ "which",
 ]
 
 [[package]]
@@ -781,6 +784,7 @@ name = "cokra-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cokra-config",
  "cokra-core",
  "cokra-protocol",
  "crossterm",

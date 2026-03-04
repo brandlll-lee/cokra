@@ -27,18 +27,19 @@ use cokra_protocol::UserInput;
 
 use crate::app_event::AppEvent;
 use crate::app_event::ExitMode;
+use crate::app_event::StatusLineMode;
 use crate::app_event::UiMode;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPaneAction;
 use crate::bottom_pane::approval_overlay::ApprovalOverlay;
 use crate::bottom_pane::approval_overlay::ApprovalRequest;
-use crate::slash_command::SlashCommand;
 use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ChatWidgetAction;
 use crate::chatwidget::TokenUsage;
 use crate::custom_terminal::Frame;
 use crate::history_cell::HistoryCell;
 use crate::render::renderable::Renderable;
+use crate::slash_command::SlashCommand;
 use crate::tui::FrameRequester;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
@@ -67,6 +68,7 @@ pub struct App {
   scroll_offset: u16,
   history_width: u16,
   has_emitted_history_lines: bool,
+  status_line_mode: StatusLineMode,
 }
 
 #[derive(Debug, Clone)]
@@ -93,7 +95,7 @@ impl App {
     let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
     let app_event_sender = AppEventSender::new(app_event_tx);
 
-    Self {
+    let mut app = Self {
       cokra,
       chat_widget: ChatWidget::new(app_event_sender.clone(), frame_requester, true),
       exit_info: None,
@@ -109,7 +111,14 @@ impl App {
       scroll_offset: 0,
       history_width: 1,
       has_emitted_history_lines: false,
-    }
+      status_line_mode: StatusLineMode::Default,
+    };
+
+    // 1:1 codex: status line is enabled by default.
+    app.chat_widget.bottom_pane.set_status_line_enabled(true);
+    app.refresh_status_line();
+
+    app
   }
 
   pub(crate) async fn run(&mut self, tui: &mut Tui) -> Result<AppExitInfo> {
@@ -203,16 +212,8 @@ impl App {
   ) {
     use crate::bottom_pane::api_key_entry_view::ApiKeyEntryView;
 
-    let view = ApiKeyEntryView::new(
-      provider_id,
-      model_id,
-      effort,
-      self.app_event_tx.clone(),
-    );
-    self
-      .chat_widget
-      .bottom_pane
-      .push_view(Box::new(view));
+    let view = ApiKeyEntryView::new(provider_id, model_id, effort, self.app_event_tx.clone());
+    self.chat_widget.bottom_pane.push_view(Box::new(view));
   }
 
   async fn register_provider_with_api_key(
@@ -220,12 +221,12 @@ impl App {
     provider_id: &str,
     api_key: String,
   ) -> Result<()> {
+    use cokra_core::model::ProviderConfig;
     use cokra_core::model::providers::AnthropicProvider;
     use cokra_core::model::providers::GitHubCopilotProvider;
     use cokra_core::model::providers::GoogleProvider;
     use cokra_core::model::providers::OpenAIProvider;
     use cokra_core::model::providers::OpenRouterProvider;
-    use cokra_core::model::ProviderConfig;
 
     let config = ProviderConfig {
       provider_id: provider_id.to_string(),
@@ -314,7 +315,9 @@ impl App {
         self.open_reasoning_popup(model_id);
       }
       AppEvent::ApplyModelSelection { model_id, effort } => {
-        self.apply_model_selection_or_connect(model_id, effort).await?;
+        self
+          .apply_model_selection_or_connect(model_id, effort)
+          .await?;
       }
       AppEvent::ApiKeySubmitted {
         provider_id,
@@ -325,7 +328,9 @@ impl App {
         self
           .register_provider_with_api_key(&provider_id, api_key)
           .await?;
-        self.apply_model_selection_or_connect(model_id, effort).await?;
+        self
+          .apply_model_selection_or_connect(model_id, effort)
+          .await?;
       }
       AppEvent::InsertHistoryCell(cell) => {
         self.insert_history_cell(cell, tui)?;
@@ -374,14 +379,35 @@ impl App {
         self.transcript_cells.clear();
         self.transcript_lines_cache.clear();
         self.has_emitted_history_lines = false;
-        self.chat_widget.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-          Line::from("• New session".dim()),
-        ]));
+        self
+          .chat_widget
+          .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+            Line::from("• New session".dim()),
+          ]));
       }
       AppEvent::ForkCurrentSession => {
-        self.chat_widget.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-          Line::from("• Fork current session (not implemented)".dim()),
-        ]));
+        self
+          .chat_widget
+          .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+            Line::from("• Fork current session (not implemented)".dim()),
+          ]));
+      }
+      AppEvent::SetStatusLineMode(mode) => {
+        if self.status_line_mode != mode {
+          let label = match mode {
+            StatusLineMode::Default => "Default",
+            StatusLineMode::Minimal => "Minimal",
+            StatusLineMode::Off => "Off",
+          };
+          self
+            .chat_widget
+            .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+              Line::from(format!("• Status line: {label}")).dim(),
+            ]));
+        }
+        self.status_line_mode = mode;
+        self.refresh_status_line();
+        tui.frame_requester().schedule_frame();
       }
     }
     Ok(())
@@ -619,6 +645,13 @@ impl App {
   }
 
   async fn handle_cokra_event(&mut self, event: Event) -> Result<()> {
+    // If execution has started after a prior approval request, approval is now resolved.
+    // Ensure stale overlay/pending state is cleared so bottom-pane input is unblocked.
+    if matches!(event.msg, EventMsg::ExecCommandBegin(_)) {
+      self.pending_approval = None;
+      self.chat_widget.bottom_pane.close_approval();
+    }
+
     let turn_finished = matches!(
       event.msg,
       EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) | EventMsg::Error(_)
@@ -649,6 +682,8 @@ impl App {
     if turn_finished {
       self.task_running = false;
       self.chat_widget.set_agent_turn_running(false);
+      self.pending_approval = None;
+      self.chat_widget.bottom_pane.close_approval();
     }
 
     Ok(())
@@ -657,11 +692,17 @@ impl App {
   // 1:1 codex: dispatch_command handles all slash commands at the app layer.
   async fn dispatch_command(&mut self, cmd: SlashCommand) -> Result<()> {
     if !cmd.available_during_task() && self.task_running {
-      self.chat_widget.add_to_history(
-        crate::history_cell::PlainHistoryCell::new(vec![Line::from(vec![
-          ratatui::text::Span::from(format!("'/{}' is disabled while a task is in progress.", cmd.command())).into(),
-        ])]),
-      );
+      self
+        .chat_widget
+        .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+          Line::from(vec![
+            ratatui::text::Span::from(format!(
+              "'/{}' is disabled while a task is in progress.",
+              cmd.command()
+            ))
+            .into(),
+          ]),
+        ]));
       return Ok(());
     }
 
@@ -680,11 +721,11 @@ impl App {
       }
       SlashCommand::Compact => {
         let _ = self.cokra.submit(Op::Interrupt).await?;
-        self.chat_widget.add_to_history(
-          crate::history_cell::PlainHistoryCell::new(vec![Line::from(
-            "• Context compacted".dim(),
-          )]),
-        );
+        self
+          .chat_widget
+          .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+            Line::from("• Context compacted".dim()),
+          ]));
       }
       SlashCommand::Quit | SlashCommand::Exit => {
         self.exit_info = Some(self.build_exit_info(ExitReason::UserRequested));
@@ -692,32 +733,87 @@ impl App {
       SlashCommand::Status => {
         let usage = self.chat_widget.token_usage();
         let model = &self.chat_widget.model_name;
+        let cwd = self
+          .chat_widget
+          .cwd()
+          .cloned()
+          .unwrap_or_else(|| self.cokra.cwd());
         let lines = vec![
           Line::from(format!("• Model: {model}")),
+          Line::from(format!("• Cwd: {}", cwd.display())),
           Line::from(format!(
             "• Tokens: {} input, {} output, {} total",
             usage.input_tokens, usage.output_tokens, usage.total_tokens
           )),
           Line::from(format!("• Task running: {}", self.task_running)),
         ];
-        self.chat_widget.add_to_history(
-          crate::history_cell::PlainHistoryCell::new(lines),
-        );
+        self
+          .chat_widget
+          .add_to_history(crate::history_cell::PlainHistoryCell::new(lines));
+      }
+      SlashCommand::DebugConfig => {
+        let Some(stack) = self.cokra.config_layer_stack() else {
+          self
+            .chat_widget
+            .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+              Line::from("• No config layer stack available.".dim()),
+            ]));
+          return Ok(());
+        };
+
+        let mut lines = Vec::new();
+        lines.push(Line::from("• Config layers (high → low):".to_string()));
+        for layer in stack.layers_high_to_low() {
+          let mut header = String::new();
+          match &layer.source {
+            cokra_config::ConfigLayerSource::Default => header = "  - default".to_string(),
+            cokra_config::ConfigLayerSource::System { file } => {
+              header = format!("  - system  {}", file.display());
+            }
+            cokra_config::ConfigLayerSource::User { file } => {
+              header = format!("  - user    {}", file.display());
+            }
+            cokra_config::ConfigLayerSource::Project { dot_cokra_folder } => {
+              header = format!("  - project {}", dot_cokra_folder.display());
+            }
+            cokra_config::ConfigLayerSource::SessionFlags => {
+              header = "  - session-flags".to_string()
+            }
+          }
+          if layer.disabled_reason.is_some() {
+            header.push_str("  [disabled]");
+          }
+          header.push_str(&format!("  v={}", layer.version));
+          lines.push(Line::from(header));
+          if let Some(reason) = &layer.disabled_reason {
+            lines.push(Line::from(format!("    reason: {reason}")).dim());
+          }
+        }
+
+        let origins = stack.origins();
+        lines.push(Line::from(format!("• Origins keys: {}", origins.len())));
+
+        self
+          .chat_widget
+          .add_to_history(crate::history_cell::PlainHistoryCell::new(lines));
+      }
+      SlashCommand::Statusline => {
+        self.open_statusline_popup();
       }
       SlashCommand::Diff => {
-        self.chat_widget.add_to_history(
-          crate::history_cell::PlainHistoryCell::new(vec![Line::from(
-            "• /diff is not yet implemented.".dim(),
-          )]),
-        );
+        self
+          .chat_widget
+          .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+            Line::from("• /diff is not yet implemented.".dim()),
+          ]));
       }
       // All other commands: show not-yet-implemented message.
       _ => {
-        self.chat_widget.add_to_history(
-          crate::history_cell::PlainHistoryCell::new(vec![Line::from(
-            format!("• /{}  — not yet implemented.", cmd.command()).dim(),
-          )]),
-        );
+        self
+          .chat_widget
+          .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+            Line::from(format!("• /{}  — not yet implemented.", cmd.command()).dim()),
+          ]));
       }
     }
     Ok(())
@@ -736,21 +832,22 @@ impl App {
       .list_models_catalog()
       .await;
     if providers.is_empty() {
-      self.chat_widget.add_to_history(
-        crate::history_cell::PlainHistoryCell::new(vec![Line::from(vec![
-          ratatui::text::Span::from("No models found. ").red(),
-          ratatui::text::Span::from(
-            "models.dev database is empty or unavailable; try again later.",
-          ),
-        ])]),
-      );
+      self
+        .chat_widget
+        .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+          Line::from(vec![
+            ratatui::text::Span::from("No models found. ").red(),
+            ratatui::text::Span::from(
+              "models.dev database is empty or unavailable; try again later.",
+            ),
+          ]),
+        ]));
       return Ok(());
     }
 
     let current_model = self.chat_widget.model_name.clone();
 
-    let mut all_model_ids: std::collections::HashSet<String> =
-      std::collections::HashSet::new();
+    let mut all_model_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for provider in &providers {
       for model in &provider.models {
         let model_id = if model.starts_with(&format!("{}/", provider.id)) {
@@ -774,11 +871,7 @@ impl App {
       "openrouter/openai/gpt-4o-mini",
       "github/gpt-4o-mini",
     ]);
-    let balanced = find_candidate(&[
-      "openai/gpt-4o",
-      "openrouter/openai/gpt-4o",
-      "github/gpt-4o",
-    ]);
+    let balanced = find_candidate(&["openai/gpt-4o", "openrouter/openai/gpt-4o", "github/gpt-4o"]);
     let thorough = find_candidate(&[
       "openai/o3",
       "openai/o1",
@@ -831,14 +924,65 @@ impl App {
       ..Default::default()
     });
 
-    self.chat_widget.bottom_pane.show_selection_view(SelectionViewParams {
-      title: Some("Select Model".to_string()),
-      subtitle: Some("Pick a quick auto mode or browse all models.".to_string()),
-      footer_hint: Some(standard_popup_hint_line()),
-      items,
-      ..Default::default()
-    });
+    self
+      .chat_widget
+      .bottom_pane
+      .show_selection_view(SelectionViewParams {
+        title: Some("Select Model".to_string()),
+        subtitle: Some("Pick a quick auto mode or browse all models.".to_string()),
+        footer_hint: Some(standard_popup_hint_line()),
+        items,
+        ..Default::default()
+      });
     Ok(())
+  }
+
+  fn open_statusline_popup(&mut self) {
+    use crate::bottom_pane::list_selection_view::SelectionAction;
+    use crate::bottom_pane::list_selection_view::SelectionItem;
+    use crate::bottom_pane::list_selection_view::SelectionViewParams;
+    use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+
+    let current = self.status_line_mode;
+    let mut items: Vec<SelectionItem> = Vec::new();
+
+    let mut push_mode = |name: &str, mode: StatusLineMode, description: &str, is_default: bool| {
+      let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+        tx.send(AppEvent::SetStatusLineMode(mode));
+      })];
+      items.push(SelectionItem {
+        name: name.to_string(),
+        description: Some(description.to_string()),
+        is_current: mode == current,
+        is_default,
+        actions,
+        dismiss_on_select: true,
+        ..Default::default()
+      });
+    };
+
+    push_mode(
+      "Default",
+      StatusLineMode::Default,
+      "model + tokens + cwd",
+      true,
+    );
+    push_mode("Minimal", StatusLineMode::Minimal, "cwd only", false);
+    push_mode("Off", StatusLineMode::Off, "hide status line", false);
+
+    let initial_selected_idx = items.iter().position(|i| i.is_current);
+
+    self
+      .chat_widget
+      .bottom_pane
+      .show_selection_view(SelectionViewParams {
+        title: Some("Status Line".to_string()),
+        subtitle: Some("Choose what appears in the status line.".to_string()),
+        footer_hint: Some(standard_popup_hint_line()),
+        items,
+        initial_selected_idx,
+        ..Default::default()
+      });
   }
 
   fn open_all_models_popup(&mut self, providers: Vec<cokra_core::model::ProviderInfo>) {
@@ -875,15 +1019,18 @@ impl App {
       }
     }
 
-    self.chat_widget.bottom_pane.show_selection_view(SelectionViewParams {
-      title: Some("Select Model and Effort".to_string()),
-      subtitle: Some("Type to search models.".to_string()),
-      footer_hint: Some(standard_popup_hint_line()),
-      items,
-      is_searchable: true,
-      search_placeholder: Some("Type to search models".to_string()),
-      ..Default::default()
-    });
+    self
+      .chat_widget
+      .bottom_pane
+      .show_selection_view(SelectionViewParams {
+        title: Some("Select Model and Effort".to_string()),
+        subtitle: Some("Type to search models.".to_string()),
+        footer_hint: Some(standard_popup_hint_line()),
+        items,
+        is_searchable: true,
+        search_placeholder: Some("Type to search models".to_string()),
+        ..Default::default()
+      });
   }
 
   fn open_reasoning_popup(&mut self, model_id: String) {
@@ -893,23 +1040,24 @@ impl App {
     use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 
     let mut items: Vec<SelectionItem> = Vec::new();
-    let push_effort = |items: &mut Vec<SelectionItem>,
-                       label: &str,
-                       effort: Option<cokra_protocol::ReasoningEffortConfig>| {
-      let model_for_action = model_id.clone();
-      let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-        tx.send(AppEvent::ApplyModelSelection {
-          model_id: model_for_action.clone(),
-          effort: effort.clone(),
+    let push_effort =
+      |items: &mut Vec<SelectionItem>,
+       label: &str,
+       effort: Option<cokra_protocol::ReasoningEffortConfig>| {
+        let model_for_action = model_id.clone();
+        let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+          tx.send(AppEvent::ApplyModelSelection {
+            model_id: model_for_action.clone(),
+            effort: effort.clone(),
+          });
+        })];
+        items.push(SelectionItem {
+          name: label.to_string(),
+          actions,
+          dismiss_on_select: true,
+          ..Default::default()
         });
-      })];
-      items.push(SelectionItem {
-        name: label.to_string(),
-        actions,
-        dismiss_on_select: true,
-        ..Default::default()
-      });
-    };
+      };
 
     push_effort(&mut items, "Default", None);
     push_effort(
@@ -941,13 +1089,16 @@ impl App {
       }),
     );
 
-    self.chat_widget.bottom_pane.show_selection_view(SelectionViewParams {
-      title: Some("Select Reasoning Effort".to_string()),
-      subtitle: Some(model_id),
-      footer_hint: Some(standard_popup_hint_line()),
-      items,
-      ..Default::default()
-    });
+    self
+      .chat_widget
+      .bottom_pane
+      .show_selection_view(SelectionViewParams {
+        title: Some("Select Reasoning Effort".to_string()),
+        subtitle: Some(model_id),
+        footer_hint: Some(standard_popup_hint_line()),
+        items,
+        ..Default::default()
+      });
   }
 
   // 1:1 codex: model_selection_actions sends OverrideTurnContext + UpdateModel +
@@ -984,11 +1135,11 @@ impl App {
     self.chat_widget.model_name = model_id.clone();
 
     // 4) Show confirmation in chat history.
-    self.chat_widget.add_to_history(
-      crate::history_cell::PlainHistoryCell::new(vec![Line::from(format!(
-        "• Model changed to {model_id}"
-      ))]),
-    );
+    self
+      .chat_widget
+      .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+        Line::from(format!("• Model changed to {model_id}")),
+      ]));
     Ok(())
   }
 
@@ -1001,7 +1152,58 @@ impl App {
     } else {
       Some(usage.input_tokens.saturating_add(usage.output_tokens))
     };
-    self.chat_widget.bottom_pane.set_context_window(None, used_tokens);
+    self
+      .chat_widget
+      .bottom_pane
+      .set_context_window(None, used_tokens);
+    self.refresh_status_line();
+  }
+
+  fn refresh_status_line(&mut self) {
+    let enabled = !matches!(self.status_line_mode, StatusLineMode::Off);
+    self
+      .chat_widget
+      .bottom_pane
+      .set_status_line_enabled(enabled);
+    if !enabled {
+      self.chat_widget.bottom_pane.set_status_line(None);
+      return;
+    }
+
+    let cwd = self
+      .chat_widget
+      .cwd()
+      .cloned()
+      .unwrap_or_else(|| self.cokra.cwd());
+    let model = self.chat_widget.model_name.clone();
+    let usage = self.chat_widget.token_usage();
+
+    let line = match self.status_line_mode {
+      StatusLineMode::Minimal => Line::from(vec![
+        ratatui::text::Span::from("cwd: ").dim(),
+        ratatui::text::Span::from(cwd.display().to_string()),
+      ]),
+      StatusLineMode::Default => {
+        let mut spans = Vec::new();
+        if !model.is_empty() {
+          spans.push(ratatui::text::Span::from("model: ").dim());
+          spans.push(ratatui::text::Span::from(model));
+          spans.push(ratatui::text::Span::from("  •  ").dim());
+        }
+        spans.push(ratatui::text::Span::from("tokens: ").dim());
+        spans.push(ratatui::text::Span::from(format!(
+          "{} in, {} out, {} total",
+          usage.input_tokens, usage.output_tokens, usage.total_tokens
+        )));
+        spans.push(ratatui::text::Span::from("  •  ").dim());
+        spans.push(ratatui::text::Span::from("cwd: ").dim());
+        spans.push(ratatui::text::Span::from(cwd.display().to_string()));
+        Line::from(spans)
+      }
+      StatusLineMode::Off => Line::from(""),
+    };
+
+    self.chat_widget.bottom_pane.set_status_line(Some(line));
   }
 
   fn render(&mut self, frame: &mut Frame) {
@@ -1026,22 +1228,18 @@ impl App {
           .bottom_pane
           .desired_height(area.width)
           .min(area.height);
-        let chunks = Layout::vertical([
-          Constraint::Min(1),
-          Constraint::Length(bottom_height),
-        ])
-        .split(area);
+        let chunks =
+          Layout::vertical([Constraint::Min(1), Constraint::Length(bottom_height)]).split(area);
         self.chat_widget.render_alt_screen(
           chunks[0],
           frame.buffer_mut(),
           &self.transcript_lines_cache,
           self.scroll_offset,
         );
-        self.chat_widget.bottom_pane.render(
-          chunks[1],
-          frame.buffer_mut(),
-          self.task_running,
-        );
+        self
+          .chat_widget
+          .bottom_pane
+          .render(chunks[1], frame.buffer_mut(), self.task_running);
         if let Some((x, y)) = self.chat_widget.bottom_pane.cursor_pos(chunks[1]) {
           frame.set_cursor_position((x, y));
         }

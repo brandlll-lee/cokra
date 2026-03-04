@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -12,6 +14,12 @@ pub enum ToolKind {
   Mcp,
 }
 
+/// 1:1 codex: ToolHandler trait with async support.
+///
+/// Existing synchronous handlers implement `handle()` as before.
+/// Async handlers (e.g. shell) override `handle_async()` instead.
+/// The default `handle_async` delegates to synchronous `handle`.
+#[async_trait]
 pub trait ToolHandler: Send + Sync {
   fn kind(&self) -> ToolKind;
 
@@ -19,7 +27,19 @@ pub trait ToolHandler: Send + Sync {
     false
   }
 
-  fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError>;
+  fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    let _ = invocation;
+    Err(FunctionCallError::Execution(
+      "synchronous handle not implemented; use handle_async".to_string(),
+    ))
+  }
+
+  async fn handle_async(
+    &self,
+    invocation: ToolInvocation,
+  ) -> Result<ToolOutput, FunctionCallError> {
+    self.handle(invocation)
+  }
 }
 
 #[derive(Default)]
@@ -64,6 +84,17 @@ impl ToolRegistry {
       .get_handler(&invocation.name)
       .ok_or_else(|| FunctionCallError::ToolNotFound(invocation.name.clone()))?;
     handler.handle(invocation)
+  }
+
+  /// 1:1 codex: async dispatch for handlers that need async execution (e.g. shell).
+  pub async fn dispatch_async(
+    &self,
+    invocation: ToolInvocation,
+  ) -> Result<ToolOutput, FunctionCallError> {
+    let handler = self
+      .get_handler(&invocation.name)
+      .ok_or_else(|| FunctionCallError::ToolNotFound(invocation.name.clone()))?;
+    handler.handle_async(invocation).await
   }
 
   pub fn is_mutating(&self, invocation: &ToolInvocation) -> Result<bool, FunctionCallError> {

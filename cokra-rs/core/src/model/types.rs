@@ -7,7 +7,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 
 /// Chat completion request
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatRequest {
   /// Model identifier (e.g., "gpt-4o", "claude-sonnet-4-20250514")
   pub model: String,
@@ -50,24 +50,6 @@ pub struct ChatRequest {
   /// User identifier
   #[serde(default)]
   pub user: Option<String>,
-}
-
-impl Default for ChatRequest {
-  fn default() -> Self {
-    Self {
-      model: String::new(),
-      messages: Vec::new(),
-      temperature: None,
-      max_tokens: None,
-      tools: None,
-      stream: false,
-      stop: None,
-      presence_penalty: None,
-      frequency_penalty: None,
-      top_p: None,
-      user: None,
-    }
-  }
 }
 
 /// Message in a conversation

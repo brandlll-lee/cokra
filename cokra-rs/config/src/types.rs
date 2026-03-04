@@ -6,33 +6,93 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::layer_stack::ConfigLayerStack;
+
+fn default_cwd() -> PathBuf {
+  std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
   /// Approval policy settings
+  #[serde(default)]
   pub approval: ApprovalPolicy,
   /// Sandbox configuration
+  #[serde(default)]
   pub sandbox: SandboxConfig,
   /// Personality settings
+  #[serde(default)]
   pub personality: PersonalityConfig,
   /// Feature flags
+  #[serde(default)]
   pub features: FeaturesConfig,
   /// MCP server configurations
+  #[serde(default)]
   pub mcp: McpConfig,
   /// Skills configuration
+  #[serde(default)]
   pub skills: SkillsConfig,
   /// Memory settings
+  #[serde(default)]
   pub memories: MemoriesConfig,
   /// Model configuration
+  #[serde(default)]
   pub models: ModelsConfig,
   /// History settings
+  #[serde(default)]
   pub history: HistoryConfig,
   /// TUI settings
+  #[serde(default)]
   pub tui: TuiConfig,
   /// Shell environment policy
+  #[serde(default)]
   pub shell_environment: ShellEnvironmentPolicy,
   /// Agent configuration
+  #[serde(default)]
   pub agents: AgentConfig,
+
+  /// Projects trust map keyed by canonical path string.
+  ///
+  /// Mirrors Codex: `[projects."..."] trust_level = "trusted" | "untrusted"`.
+  #[serde(default)]
+  pub projects: HashMap<String, ProjectConfig>,
+
+  /// Markers used to detect the project root when searching parent directories
+  /// for `.cokra` folders. Defaults to [".git"] when unset.
+  #[serde(default)]
+  pub project_root_markers: Option<Vec<String>>,
+
+  /// Session working directory (runtime override, not persisted in config.toml).
+  #[serde(default = "default_cwd", skip_serializing)]
+  pub cwd: PathBuf,
+
+  /// Debug-only metadata: resolved config layers for this session cwd.
+  #[serde(skip)]
+  pub config_layer_stack: Option<ConfigLayerStack>,
+}
+
+impl Default for Config {
+  fn default() -> Self {
+    Self {
+      approval: ApprovalPolicy::default(),
+      sandbox: SandboxConfig::default(),
+      personality: PersonalityConfig::default(),
+      features: FeaturesConfig::default(),
+      mcp: McpConfig::default(),
+      skills: SkillsConfig::default(),
+      memories: MemoriesConfig::default(),
+      models: ModelsConfig::default(),
+      history: HistoryConfig::default(),
+      tui: TuiConfig::default(),
+      shell_environment: ShellEnvironmentPolicy::default(),
+      agents: AgentConfig::default(),
+      projects: HashMap::new(),
+      project_root_markers: None,
+      cwd: default_cwd(),
+      config_layer_stack: None,
+    }
+  }
 }
 
 // ============================================================================
@@ -50,6 +110,16 @@ pub struct ApprovalPolicy {
   pub patch: PatchApproval,
 }
 
+impl Default for ApprovalPolicy {
+  fn default() -> Self {
+    Self {
+      policy: ApprovalMode::Ask,
+      shell: ShellApproval::OnFailure,
+      patch: PatchApproval::OnRequest,
+    }
+  }
+}
+
 /// Approval modes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -57,6 +127,12 @@ pub enum ApprovalMode {
   Ask,
   Auto,
   Never,
+}
+
+impl Default for ApprovalMode {
+  fn default() -> Self {
+    Self::Ask
+  }
 }
 
 /// Shell approval modes
@@ -69,6 +145,12 @@ pub enum ShellApproval {
   Never,
 }
 
+impl Default for ShellApproval {
+  fn default() -> Self {
+    Self::OnFailure
+  }
+}
+
 /// Patch approval modes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -76,6 +158,12 @@ pub enum PatchApproval {
   Auto,
   OnRequest,
   Never,
+}
+
+impl Default for PatchApproval {
+  fn default() -> Self {
+    Self::OnRequest
+  }
 }
 
 // ============================================================================
@@ -91,6 +179,15 @@ pub struct SandboxConfig {
   pub network_access: bool,
 }
 
+impl Default for SandboxConfig {
+  fn default() -> Self {
+    Self {
+      mode: SandboxMode::Permissive,
+      network_access: false,
+    }
+  }
+}
+
 /// Sandbox modes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -98,6 +195,12 @@ pub enum SandboxMode {
   Strict,
   Permissive,
   DangerFullAccess,
+}
+
+impl Default for SandboxMode {
+  fn default() -> Self {
+    Self::Permissive
+  }
 }
 
 // ============================================================================
@@ -111,6 +214,15 @@ pub struct PersonalityConfig {
   pub name: String,
   /// Custom instructions
   pub instructions: Option<String>,
+}
+
+impl Default for PersonalityConfig {
+  fn default() -> Self {
+    Self {
+      name: "default".to_string(),
+      instructions: None,
+    }
+  }
 }
 
 // ============================================================================
@@ -149,9 +261,10 @@ impl Default for FeaturesConfig {
 // ============================================================================
 
 /// MCP configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct McpConfig {
   /// MCP server configurations
+  #[serde(default)]
   pub servers: HashMap<String, McpServerConfig>,
 }
 
@@ -203,6 +316,15 @@ pub struct SkillsConfig {
   pub enabled: bool,
   /// Local skill paths
   pub paths: Vec<PathBuf>,
+}
+
+impl Default for SkillsConfig {
+  fn default() -> Self {
+    Self {
+      enabled: true,
+      paths: Vec::new(),
+    }
+  }
 }
 
 // ============================================================================
@@ -274,12 +396,27 @@ pub struct HistoryConfig {
   pub max_bytes: Option<usize>,
 }
 
+impl Default for HistoryConfig {
+  fn default() -> Self {
+    Self {
+      persistence: HistoryPersistence::SaveAll,
+      max_bytes: None,
+    }
+  }
+}
+
 /// History persistence modes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HistoryPersistence {
   SaveAll,
   None,
+}
+
+impl Default for HistoryPersistence {
+  fn default() -> Self {
+    Self::SaveAll
+  }
 }
 
 // ============================================================================
@@ -325,6 +462,16 @@ pub struct ShellEnvironmentPolicy {
   pub set: HashMap<String, String>,
 }
 
+impl Default for ShellEnvironmentPolicy {
+  fn default() -> Self {
+    Self {
+      inherit: ShellEnvironmentPolicyInherit::Core,
+      exclude: Vec::new(),
+      set: HashMap::new(),
+    }
+  }
+}
+
 /// Shell environment inheritance modes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -332,6 +479,12 @@ pub enum ShellEnvironmentPolicyInherit {
   Core,
   All,
   None,
+}
+
+impl Default for ShellEnvironmentPolicyInherit {
+  fn default() -> Self {
+    Self::Core
+  }
 }
 
 // ============================================================================
@@ -363,4 +516,31 @@ pub struct AgentRoleConfig {
   pub description: Option<String>,
   /// Config file path
   pub config_file: Option<String>,
+}
+
+// ============================================================================
+// PROJECT TRUST CONFIGURATION
+// ============================================================================
+
+/// Project trust configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProjectConfig {
+  pub trust_level: Option<TrustLevel>,
+}
+
+impl ProjectConfig {
+  pub fn is_trusted(&self) -> bool {
+    matches!(self.trust_level, Some(TrustLevel::Trusted))
+  }
+
+  pub fn is_untrusted(&self) -> bool {
+    matches!(self.trust_level, Some(TrustLevel::Untrusted))
+  }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TrustLevel {
+  Trusted,
+  Untrusted,
 }

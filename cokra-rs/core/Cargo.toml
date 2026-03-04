@@ -26,12 +26,15 @@ rmcp = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
 dirs = "5.0"
+which = "6"
+libc = { workspace = true }
 async-trait = "0.1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 pin-project = "1.0"
 async-stream = "0.3"
+tokio-util = { workspace = true }
 
 [features]
 default = []

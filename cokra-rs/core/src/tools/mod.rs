@@ -6,6 +6,7 @@ pub mod orchestrator;
 pub mod parallel;
 pub mod registry;
 pub mod router;
+pub mod runtimes;
 pub mod sandboxing;
 pub mod spec;
 pub mod validation;

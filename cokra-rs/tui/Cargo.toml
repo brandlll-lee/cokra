@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 # Core
 cokra-core = { path = "../core" }
+cokra-config = { path = "../config" }
 cokra-protocol = { path = "../protocol" }
 
 # UI framework

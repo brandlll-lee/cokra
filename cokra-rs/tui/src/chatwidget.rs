@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
@@ -18,6 +19,7 @@ use cokra_protocol::ExecApprovalRequestEvent;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::bottom_pane::BottomPane;
 use crate::exec_cell::ExecCall;
 use crate::exec_cell::ExecCell;
 use crate::exec_cell::model::CommandOutput;
@@ -31,7 +33,6 @@ use crate::history_cell::SessionConfiguredCell;
 use crate::history_cell::TurnCompleteHistoryCell;
 use crate::history_cell::UserHistoryCell;
 use crate::multi_agents;
-use crate::bottom_pane::BottomPane;
 use crate::render::Insets;
 use crate::render::renderable::FlexRenderable;
 use crate::render::renderable::Renderable;
@@ -71,9 +72,11 @@ pub(crate) struct ChatWidget {
   pub(crate) bottom_pane: BottomPane,
   token_usage: TokenUsage,
   pub(crate) model_name: String,
+  pub(crate) cwd: Option<std::path::PathBuf>,
   agent_turn_running: bool,
   has_seen_session_configured: bool,
   pending_exec_calls: HashMap<String, ExecCall>,
+  streamed_agent_item_ids: HashSet<String>,
   animations_enabled: bool,
   app_event_tx: AppEventSender,
 }
@@ -90,16 +93,14 @@ impl ChatWidget {
       stream_controller: None,
       plan_stream_controller: None,
       chunking_policy: AdaptiveChunkingPolicy::default(),
-      bottom_pane: BottomPane::new(
-        app_event_tx.clone(),
-        frame_requester,
-        animations_enabled,
-      ),
+      bottom_pane: BottomPane::new(app_event_tx.clone(), frame_requester, animations_enabled),
       token_usage: TokenUsage::default(),
       model_name: String::new(),
+      cwd: None,
       agent_turn_running: false,
       has_seen_session_configured: false,
       pending_exec_calls: HashMap::new(),
+      streamed_agent_item_ids: HashSet::new(),
       animations_enabled,
       app_event_tx,
     }
@@ -107,6 +108,10 @@ impl ChatWidget {
 
   pub(crate) fn token_usage(&self) -> TokenUsage {
     self.token_usage
+  }
+
+  pub(crate) fn cwd(&self) -> Option<&std::path::PathBuf> {
+    self.cwd.as_ref()
   }
 
   fn flush_active_cell(&mut self) {
@@ -211,10 +216,15 @@ impl ChatWidget {
         let text = text_parts.join("\n");
         self.add_to_history(UserHistoryCell::new(text, text_elements, remote_image_urls));
       }
-      EventMsg::TurnStarted(_) => {
+      EventMsg::TurnStarted(e) => {
         self.set_agent_turn_running(true);
+        self.cwd = Some(e.cwd.clone());
       }
       EventMsg::AgentMessageDelta(e) | EventMsg::AgentMessageContentDelta(e) => {
+        // 1:1 codex: track item_id so we can hard-dedup any later AgentMessage
+        // carrying the same item_id (prevents double-rendering regardless of
+        // stream_controller lifetime).
+        self.streamed_agent_item_ids.insert(e.item_id.clone());
         let is_new = self.stream_controller.is_none();
         let controller = self
           .stream_controller
@@ -225,9 +235,10 @@ impl ChatWidget {
         }
       }
       EventMsg::AgentMessage(e) => {
-        // Streaming already committed this content progressively; skip duplicate
-        // final payloads when a stream controller is active.
-        if self.stream_controller.is_none() {
+        // 1:1 codex: hard dedup by item_id. If streaming deltas already
+        // committed content for this item, unconditionally drop the final
+        // AgentMessage regardless of stream_controller lifetime/timing.
+        if !self.streamed_agent_item_ids.contains(&e.item_id) {
           let mut lines = Vec::new();
           for part in &e.content {
             match part {
@@ -405,6 +416,7 @@ impl ChatWidget {
           Span::from(e.user_facing_message.clone()),
         ])]));
         self.set_agent_turn_running(false);
+        self.streamed_agent_item_ids.clear();
       }
       EventMsg::TurnComplete(_) => {
         self.flush_stream_controllers();
@@ -416,6 +428,8 @@ impl ChatWidget {
           output_tokens: self.token_usage.output_tokens,
         });
         self.set_agent_turn_running(false);
+        // 1:1 codex: clear dedup set so next turn starts fresh.
+        self.streamed_agent_item_ids.clear();
       }
       EventMsg::TurnAborted(e) => {
         self.app_event_tx.send(AppEvent::StopCommitAnimation);
@@ -426,6 +440,7 @@ impl ChatWidget {
           Span::from(e.reason.clone()),
         ])]));
         self.set_agent_turn_running(false);
+        self.streamed_agent_item_ids.clear();
       }
       EventMsg::CollabAgentSpawnBegin(e) => {
         self.add_to_history(multi_agents::spawn_begin(e.clone()));
@@ -439,16 +454,16 @@ impl ChatWidget {
       EventMsg::CollabAgentInteractionEnd(e) => {
         self.add_to_history(multi_agents::interaction_end(e.clone()));
       }
-      EventMsg::ItemStarted(e) => {
-        self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
-          "• {} started ({})",
-          e.item_type, e.item_id
-        ))]));
+      EventMsg::ItemStarted(_) => {
+        // 1:1 codex: no-op. Item lifecycle is handled by delta streaming
+        // and ItemCompleted; rendering ItemStarted would add noise.
       }
-      EventMsg::ItemCompleted(e) => {
-        if !e.result.trim().is_empty() {
-          self.add_to_history(PlainHistoryCell::new(vec![Line::from(e.result.clone())]));
-        }
+      EventMsg::ItemCompleted(_) => {
+        // 1:1 codex: ItemCompleted carries the full assistant text in `result`,
+        // but streaming deltas have ALREADY committed that content progressively.
+        // Rendering `result` here would duplicate the entire response.
+        // In codex, ItemCompleted dispatches to typed handlers for status
+        // indicator management only — it never re-renders assistant text.
       }
       EventMsg::ShutdownComplete => {}
 
@@ -726,7 +741,9 @@ impl ChatWidget {
   // 1:1 codex: compose active_cell (flex=1) + bottom_pane (flex=0) using FlexRenderable.
   fn as_renderable(&self) -> RenderableItem<'_> {
     let active_cell_renderable = match &self.active_cell {
-      Some(cell) => RenderableItem::Borrowed(cell as &dyn Renderable).inset(Insets::tlbr(1, 0, 0, 0)),
+      Some(cell) => {
+        RenderableItem::Borrowed(cell as &dyn Renderable).inset(Insets::tlbr(1, 0, 0, 0))
+      }
       None => RenderableItem::Owned(Box::new(())),
     };
     let mut flex = FlexRenderable::new();

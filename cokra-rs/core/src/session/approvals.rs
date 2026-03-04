@@ -44,9 +44,7 @@ impl PendingApprovals {
     let mut state = self.state.lock().await;
     let removed = state.by_id.remove(approval_id);
 
-    if removed.is_none() {
-      return None;
-    }
+    removed.as_ref()?;
 
     let mut empty_turns = Vec::new();
     for (turn_id, ids) in &mut state.ids_by_turn {

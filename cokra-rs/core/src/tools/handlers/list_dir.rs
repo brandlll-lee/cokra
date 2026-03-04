@@ -1,7 +1,10 @@
+//! 1:1 codex: list_dir tool handler — requires absolute paths.
+
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
+use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::tools::context::FunctionCallError;
@@ -18,6 +21,7 @@ struct ListDirArgs {
   recursive: Option<bool>,
 }
 
+#[async_trait]
 impl ToolHandler for ListDirHandler {
   fn kind(&self) -> ToolKind {
     ToolKind::Function
@@ -25,7 +29,14 @@ impl ToolHandler for ListDirHandler {
 
   fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
     let args: ListDirArgs = invocation.parse_arguments()?;
-    let root = PathBuf::from(args.dir_path);
+
+    // 1:1 codex: require absolute paths.
+    let root = PathBuf::from(&args.dir_path);
+    if !root.is_absolute() {
+      return Err(FunctionCallError::RespondToModel(
+        "dir_path must be an absolute path".to_string(),
+      ));
+    }
 
     if !root.exists() {
       return Err(FunctionCallError::Execution(format!(

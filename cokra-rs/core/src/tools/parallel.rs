@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolOutput;
@@ -26,17 +27,28 @@ impl ToolCallRuntime {
     }
   }
 
-  pub(crate) async fn handle_tool_call(
+  pub(crate) async fn handle_tool_call_with_cancellation(
     &self,
     call: ToolCall,
     run_ctx: ToolRunContext,
+    cancellation_token: CancellationToken,
   ) -> Result<ToolOutput, FunctionCallError> {
     if self.router.tool_supports_parallel(&call) {
-      let _guard = self.parallel_execution.read().await;
-      self.router.dispatch_tool_call(call, run_ctx).await
+      tokio::select! {
+        _ = cancellation_token.cancelled() => Err(FunctionCallError::Fatal("tool call cancelled".to_string())),
+        out = async {
+          let _guard = self.parallel_execution.read().await;
+          self.router.dispatch_tool_call(call, run_ctx).await
+        } => out,
+      }
     } else {
-      let _guard = self.parallel_execution.write().await;
-      self.router.dispatch_tool_call(call, run_ctx).await
+      tokio::select! {
+        _ = cancellation_token.cancelled() => Err(FunctionCallError::Fatal("tool call cancelled".to_string())),
+        out = async {
+          let _guard = self.parallel_execution.write().await;
+          self.router.dispatch_tool_call(call, run_ctx).await
+        } => out,
+      }
     }
   }
 }
@@ -46,6 +58,8 @@ mod tests {
   use std::sync::Arc;
   use std::sync::atomic::AtomicUsize;
   use std::sync::atomic::Ordering;
+
+  use async_trait::async_trait;
 
   use super::*;
   use crate::session::Session;
@@ -72,6 +86,7 @@ mod tests {
     mutating: bool,
   }
 
+  #[async_trait]
   impl ToolHandler for CountingHandler {
     fn kind(&self) -> ToolKind {
       ToolKind::Function
@@ -165,8 +180,13 @@ mod tests {
       args: serde_json::json!({}),
     };
 
-    let f1 = runtime.handle_tool_call(c1, run_ctx(Arc::clone(&session)));
-    let f2 = runtime.handle_tool_call(c2, run_ctx(session));
+    let f1 = runtime.handle_tool_call_with_cancellation(
+      c1,
+      run_ctx(Arc::clone(&session)),
+      CancellationToken::new(),
+    );
+    let f2 =
+      runtime.handle_tool_call_with_cancellation(c2, run_ctx(session), CancellationToken::new());
     let _ = tokio::join!(f1, f2);
 
     assert_eq!(peak.load(Ordering::SeqCst), 1);

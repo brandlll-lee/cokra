@@ -88,6 +88,10 @@ pub fn chunk_stream_to_response_events(
   mut chunk_stream: Pin<Box<dyn Stream<Item = Result<Chunk>> + Send>>,
 ) -> ResponseEventStream {
   Box::pin(async_stream::stream! {
+    yield Ok(ResponseEvent::Created);
+    let response_item_id = "assistant_item_0".to_string();
+    let mut emitted_item_started = false;
+
     let mut text_index: usize = 0;
     let mut function_calls: BTreeMap<String, FunctionCallBuffer> = BTreeMap::new();
     let mut active_call_id: Option<String> = None;
@@ -106,6 +110,14 @@ pub fn chunk_stream_to_response_events(
         Chunk::Content { delta } => {
           if delta.text.is_empty() {
             continue;
+          }
+          if !emitted_item_started {
+            emitted_item_started = true;
+            yield Ok(ResponseEvent::OutputItemAdded(cokra_protocol::OutputItemEvent {
+              id: response_item_id.clone(),
+              role: Some("assistant".to_string()),
+              item_type: Some("message".to_string()),
+            }));
           }
           let text = delta.text;
           yield Ok(ResponseEvent::ContentDelta(ResponseContentDeltaEvent {
@@ -154,6 +166,17 @@ pub fn chunk_stream_to_response_events(
           function_calls.clear();
           active_call_id = None;
           emitted_end_turn = true;
+          if emitted_item_started {
+            yield Ok(ResponseEvent::OutputItemDone(cokra_protocol::OutputItemEvent {
+              id: response_item_id.clone(),
+              role: Some("assistant".to_string()),
+              item_type: Some("message".to_string()),
+            }));
+          }
+          yield Ok(ResponseEvent::Completed {
+            response_id: String::new(),
+            token_usage: None,
+          });
           yield Ok(ResponseEvent::EndTurn);
         }
         Chunk::MessageStart { .. } | Chunk::MessageDelta { .. } | Chunk::Unknown => {}
@@ -177,6 +200,10 @@ pub fn chunk_stream_to_response_events(
     }
 
     if !emitted_end_turn {
+      yield Ok(ResponseEvent::Completed {
+        response_id: String::new(),
+        token_usage: None,
+      });
       yield Ok(ResponseEvent::EndTurn);
     }
   })
@@ -379,20 +406,25 @@ mod tests {
       seen.push(event.expect("response event"));
     }
 
+    assert_eq!(seen[0], ResponseEvent::Created);
+    assert!(matches!(&seen[1], ResponseEvent::OutputItemAdded(_)));
     assert_eq!(
-      seen,
-      vec![
-        ResponseEvent::ContentDelta(ResponseContentDeltaEvent {
-          text: "Hello".to_string(),
-          index: 0,
-        }),
-        ResponseEvent::ContentDelta(ResponseContentDeltaEvent {
-          text: " World".to_string(),
-          index: 1,
-        }),
-        ResponseEvent::EndTurn,
-      ]
+      seen[2],
+      ResponseEvent::ContentDelta(ResponseContentDeltaEvent {
+        text: "Hello".to_string(),
+        index: 0,
+      })
     );
+    assert_eq!(
+      seen[3],
+      ResponseEvent::ContentDelta(ResponseContentDeltaEvent {
+        text: " World".to_string(),
+        index: 1,
+      })
+    );
+    assert!(matches!(&seen[4], ResponseEvent::OutputItemDone(_)));
+    assert!(matches!(&seen[5], ResponseEvent::Completed { .. }));
+    assert_eq!(seen[6], ResponseEvent::EndTurn);
   }
 
   #[tokio::test]
@@ -414,19 +446,19 @@ mod tests {
       seen.push(event.expect("response event"));
     }
 
+    assert_eq!(seen[0], ResponseEvent::Created);
     assert_eq!(
-      seen,
-      vec![
-        ResponseEvent::FunctionCall(ResponseFunctionCallEvent {
-          id: "call_1".to_string(),
-          call_type: "function".to_string(),
-          function: ResponseFunctionCall {
-            name: "read_file".to_string(),
-            arguments: "{\"file_path\":\"a.txt\"}".to_string(),
-          },
-        }),
-        ResponseEvent::EndTurn,
-      ]
+      seen[1],
+      ResponseEvent::FunctionCall(ResponseFunctionCallEvent {
+        id: "call_1".to_string(),
+        call_type: "function".to_string(),
+        function: ResponseFunctionCall {
+          name: "read_file".to_string(),
+          arguments: "{\"file_path\":\"a.txt\"}".to_string(),
+        },
+      })
     );
+    assert!(matches!(&seen[2], ResponseEvent::Completed { .. }));
+    assert_eq!(seen[3], ResponseEvent::EndTurn);
   }
 }

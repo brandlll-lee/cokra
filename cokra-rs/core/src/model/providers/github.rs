@@ -240,7 +240,7 @@ impl ModelProvider for GitHubCopilotProvider {
       .json(&body)
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     Ok(create_response_stream(response))
   }
@@ -286,7 +286,7 @@ impl ModelProvider for GitHubCopilotProvider {
       .json(&body)
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     if response.status().is_success() {
       Ok(())
@@ -334,7 +334,7 @@ impl GitHubCopilotProvider {
       .json(&body)
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     if !response.status().is_success() {
       let status = response.status();
@@ -372,7 +372,7 @@ impl GitHubCopilotProvider {
       .json(&body)
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     if !response.status().is_success() {
       let status = response.status();

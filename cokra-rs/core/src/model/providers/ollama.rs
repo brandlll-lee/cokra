@@ -60,7 +60,7 @@ impl OllamaProvider {
       .get(&url)
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     #[derive(Deserialize)]
     struct TagsResponse {
@@ -91,7 +91,7 @@ impl OllamaProvider {
       })
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     Ok(())
   }
@@ -207,7 +207,7 @@ impl ModelProvider for OllamaProvider {
       .json(&ollama_request)
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     if !response.status().is_success() {
       let status = response.status();
@@ -304,7 +304,7 @@ impl ModelProvider for OllamaProvider {
       .json(&ollama_request)
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     Ok(create_response_stream(response))
   }
@@ -340,7 +340,7 @@ impl ModelProvider for OllamaProvider {
       .get(&url)
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     if response.status().is_success() {
       Ok(())

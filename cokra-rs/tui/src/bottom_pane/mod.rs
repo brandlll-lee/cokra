@@ -21,8 +21,8 @@ use chat_composer::ChatComposer;
 use chat_composer::ComposerAction;
 use chat_composer::ComposerSubmission;
 
-pub(crate) mod approval_overlay;
 pub(crate) mod api_key_entry_view;
+pub(crate) mod approval_overlay;
 pub(crate) mod bottom_pane_view;
 pub(crate) mod chat_composer;
 pub(crate) mod chat_composer_history;
@@ -176,16 +176,17 @@ impl BottomPane {
     self.approval_overlay = Some(overlay);
   }
 
+  pub(crate) fn close_approval(&mut self) {
+    self.approval_overlay = None;
+  }
+
   /// 1:1 codex: push a view onto the view_stack.
   pub(crate) fn push_view(&mut self, view: Box<dyn BottomPaneView>) {
     self.view_stack.push(view);
   }
 
   /// 1:1 codex show_selection_view: convenience to push a ListSelectionView.
-  pub(crate) fn show_selection_view(
-    &mut self,
-    params: list_selection_view::SelectionViewParams,
-  ) {
+  pub(crate) fn show_selection_view(&mut self, params: list_selection_view::SelectionViewParams) {
     let view = list_selection_view::ListSelectionView::new(params, self.app_event_tx.clone());
     self.push_view(Box::new(view));
   }
@@ -262,9 +263,7 @@ impl BottomPane {
         .prepare_submission()
         .map(BottomPaneAction::Submit)
         .unwrap_or(BottomPaneAction::None),
-      ComposerAction::SlashCommand(cmd) => {
-        BottomPaneAction::SlashCommand(cmd)
-      }
+      ComposerAction::SlashCommand(cmd) => BottomPaneAction::SlashCommand(cmd),
     }
   }
 
@@ -284,7 +283,10 @@ impl BottomPane {
       if let Some(status) = &self.status {
         flex.push(0, RenderableItem::Borrowed(status as &dyn Renderable));
       }
-      flex.push(0, RenderableItem::Borrowed(&self.composer as &dyn Renderable));
+      flex.push(
+        0,
+        RenderableItem::Borrowed(&self.composer as &dyn Renderable),
+      );
       RenderableItem::Owned(Box::new(flex))
     }
   }

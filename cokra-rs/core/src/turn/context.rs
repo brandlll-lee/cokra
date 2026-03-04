@@ -38,7 +38,7 @@ impl TurnContext {
       session,
       model_client,
       tool_registry,
-      cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+      cwd: config.cwd.clone(),
       approval_policy: config.approval.clone(),
       sandbox_policy: map_sandbox_policy(config),
       enable_tools: true,
@@ -84,12 +84,7 @@ fn map_sandbox_policy(config: &Config) -> SandboxPolicy {
       access: ReadOnlyAccess::FullAccess,
     },
     SandboxMode::Permissive => SandboxPolicy::WorkspaceWrite {
-      writable_roots: vec![
-        std::env::current_dir()
-          .unwrap_or_else(|_| PathBuf::from("."))
-          .display()
-          .to_string(),
-      ],
+      writable_roots: vec![config.cwd.display().to_string()],
       read_only_access: ReadOnlyAccess::FullAccess,
       network_access: config.sandbox.network_access,
       exclude_tmpdir_env_var: false,

@@ -218,7 +218,9 @@ impl Cokra {
       agent_status,
       session,
       model_client,
-      tool_context: Arc::new(ToolContext::default()),
+      tool_context: Arc::new(ToolContext {
+        cwd: config.cwd.clone(),
+      }),
       config,
       turn_state: Arc::new(RwLock::new(TurnState::default())),
       event_bus,
@@ -264,7 +266,7 @@ impl Cokra {
       state.current_input = Some(user_message.clone());
     }
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = self.config.cwd.clone();
     let op = Op::UserTurn {
       items: vec![ProtocolUserInput::Text {
         text: user_message,
@@ -347,7 +349,7 @@ impl Cokra {
       Arc::clone(&self.session),
       thread_id,
       Uuid::new_v4().to_string(),
-      std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+      self.config.cwd.clone(),
       map_approval_policy(&self.config),
       map_sandbox_policy(&self.config),
     );
@@ -398,6 +400,14 @@ impl Cokra {
     &self.model_client
   }
 
+  pub fn cwd(&self) -> PathBuf {
+    self.config.cwd.clone()
+  }
+
+  pub fn config_layer_stack(&self) -> Option<cokra_config::ConfigLayerStack> {
+    self.config.config_layer_stack.clone()
+  }
+
   pub fn list_thread_ids(&self) -> Vec<cokra_protocol::ThreadId> {
     self.thread_manager.list_thread_ids()
   }
@@ -421,7 +431,7 @@ fn build_turn_config(config: &Config) -> TurnConfig {
     model: resolved_model,
     approval_policy: map_approval_policy(config),
     sandbox_policy: map_sandbox_policy(config),
-    cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    cwd: config.cwd.clone(),
     has_managed_network_requirements: config.sandbox.network_access,
     auto_approve_on_request: true,
     ..TurnConfig::default()
@@ -455,12 +465,7 @@ fn map_sandbox_policy(config: &Config) -> SandboxPolicy {
       access: ReadOnlyAccess::FullAccess,
     },
     SandboxMode::Permissive => SandboxPolicy::WorkspaceWrite {
-      writable_roots: vec![
-        std::env::current_dir()
-          .unwrap_or_else(|_| PathBuf::from("."))
-          .display()
-          .to_string(),
-      ],
+      writable_roots: vec![config.cwd.display().to_string()],
       read_only_access: ReadOnlyAccess::FullAccess,
       network_access: config.sandbox.network_access,
       exclude_tmpdir_env_var: false,

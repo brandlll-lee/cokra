@@ -2,20 +2,15 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Runtime status for an agent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AgentStatus {
+  #[default]
   PendingInit,
   Initializing,
   Ready,
   Busy,
   Error(String),
   Shutdown,
-}
-
-impl Default for AgentStatus {
-  fn default() -> Self {
-    Self::PendingInit
-  }
 }
 
 impl AgentStatus {

@@ -112,7 +112,7 @@ impl ModelProvider for OpenAIProvider {
       .json(&body)
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     if !response.status().is_success() {
       let status = response.status();
@@ -142,7 +142,7 @@ impl ModelProvider for OpenAIProvider {
       .json(&body)
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     Ok(create_response_stream(response))
   }
@@ -156,7 +156,7 @@ impl ModelProvider for OpenAIProvider {
       .header("Authorization", self.auth_header())
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     if !response.status().is_success() {
       return Err(ModelError::AuthError("Failed to list models".to_string()));
@@ -202,7 +202,7 @@ impl ModelProvider for OpenAIProvider {
       .header("Authorization", self.auth_header())
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     if response.status().is_success() {
       Ok(())

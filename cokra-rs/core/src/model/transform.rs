@@ -199,13 +199,13 @@ impl AnthropicTransform {
       } => {
         let mut parts = Vec::<Value>::new();
 
-        if let Some(text) = content {
-          if !text.is_empty() {
-            parts.push(json!({
-              "type": "text",
-              "text": text
-            }));
-          }
+        if let Some(text) = content
+          && !text.is_empty()
+        {
+          parts.push(json!({
+            "type": "text",
+            "text": text
+          }));
         }
 
         if let Some(calls) = tool_calls {
@@ -499,23 +499,23 @@ fn parse_openai_compatible_chunk(value: Value) -> Option<StreamChunk> {
   let mut tool_name = None;
   let mut tool_arguments = None;
 
-  if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
-    if let Some(first) = tool_calls.first() {
-      tool_call_id = first
-        .get("id")
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
-      tool_name = first
-        .get("function")
-        .and_then(|f| f.get("name"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
-      tool_arguments = first
-        .get("function")
-        .and_then(|f| f.get("arguments"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
-    }
+  if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array)
+    && let Some(first) = tool_calls.first()
+  {
+    tool_call_id = first
+      .get("id")
+      .and_then(Value::as_str)
+      .map(ToString::to_string);
+    tool_name = first
+      .get("function")
+      .and_then(|f| f.get("name"))
+      .and_then(Value::as_str)
+      .map(ToString::to_string);
+    tool_arguments = first
+      .get("function")
+      .and_then(|f| f.get("arguments"))
+      .and_then(Value::as_str)
+      .map(ToString::to_string);
   }
 
   let done = choice

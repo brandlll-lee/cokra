@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::tools::context::FunctionCallError;
@@ -15,6 +16,7 @@ struct McpArgs {
   arguments: Option<serde_json::Value>,
 }
 
+#[async_trait]
 impl ToolHandler for McpHandler {
   fn kind(&self) -> ToolKind {
     ToolKind::Mcp

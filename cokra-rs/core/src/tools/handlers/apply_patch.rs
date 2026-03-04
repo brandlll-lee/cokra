@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::tools::context::FunctionCallError;
@@ -13,6 +14,7 @@ struct ApplyPatchArgs {
   patch: String,
 }
 
+#[async_trait]
 impl ToolHandler for ApplyPatchHandler {
   fn kind(&self) -> ToolKind {
     ToolKind::Function

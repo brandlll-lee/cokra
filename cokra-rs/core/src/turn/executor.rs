@@ -4,8 +4,10 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::model::Message as ModelMessage;
@@ -13,6 +15,8 @@ use crate::model::ModelClient;
 use crate::session::Session;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
+use crate::truncate::DEFAULT_TOOL_OUTPUT_TOKENS;
+use crate::truncate::TruncationPolicy;
 use cokra_protocol::AskForApproval;
 use cokra_protocol::CompletionStatus;
 use cokra_protocol::ErrorEvent;
@@ -23,6 +27,7 @@ use cokra_protocol::SandboxPolicy;
 use cokra_protocol::TurnCompleteEvent;
 use cokra_protocol::TurnStartedEvent;
 
+use super::response_items::ResponseItem;
 use super::sse_executor::SseTurnExecutor;
 
 type Event = cokra_protocol::EventMsg;
@@ -41,6 +46,24 @@ pub enum TurnError {
 
   #[error("Session error: {0}")]
   SessionError(String),
+
+  #[error("Context window exceeded")]
+  ContextWindowExceeded,
+
+  #[error("Turn aborted")]
+  TurnAborted,
+
+  #[error("Stream error: {0}")]
+  Stream(String, Option<Duration>),
+
+  #[error("Fatal error: {0}")]
+  Fatal(String),
+}
+
+impl TurnError {
+  pub fn is_retryable(&self) -> bool {
+    matches!(self, TurnError::Stream(_, _))
+  }
 }
 
 /// Turn execution result
@@ -67,6 +90,9 @@ pub struct TurnConfig {
   pub cwd: PathBuf,
   pub has_managed_network_requirements: bool,
   pub auto_approve_on_request: bool,
+  pub tool_output_truncation: TruncationPolicy,
+  pub context_window_limit: Option<usize>,
+  pub auto_compact_token_limit: Option<usize>,
 }
 
 impl Default for TurnConfig {
@@ -84,6 +110,9 @@ impl Default for TurnConfig {
       cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
       has_managed_network_requirements: false,
       auto_approve_on_request: true,
+      tool_output_truncation: TruncationPolicy::Tokens(DEFAULT_TOOL_OUTPUT_TOKENS),
+      context_window_limit: Some(128_000),
+      auto_compact_token_limit: Some(96_000),
     }
   }
 }
@@ -96,6 +125,7 @@ pub struct TurnExecutor {
   session: Arc<Session>,
   tx_event: mpsc::Sender<Event>,
   config: TurnConfig,
+  cancellation_token: CancellationToken,
 }
 
 impl TurnExecutor {
@@ -114,6 +144,7 @@ impl TurnExecutor {
       session,
       tx_event,
       config,
+      cancellation_token: CancellationToken::new(),
     }
   }
 
@@ -132,18 +163,27 @@ impl TurnExecutor {
         turn_id: turn_id.clone(),
         mode: ModeKind::Default,
         model: self.config.model.clone(),
+        cwd: self.config.cwd.clone(),
         start_time: chrono::Utc::now().timestamp(),
       }))
       .await?;
 
     let messages = self.build_messages(input.clone()).await?;
-    let sse_executor = SseTurnExecutor::new(
+
+    let user_message = ModelMessage::User(input.content.clone());
+    self.session.append_message(user_message.clone()).await;
+    if let Some(item) = ResponseItem::from_model_message(&user_message) {
+      self.session.append_response_item(item).await;
+    }
+
+    let sse_executor = SseTurnExecutor::new_with_cancellation(
       self.model_client.clone(),
       self.tool_registry.clone(),
       self.tool_router.clone(),
       self.session.clone(),
       self.tx_event.clone(),
       self.config.clone(),
+      self.cancellation_token.child_token(),
     );
 
     let output = match sse_executor
@@ -184,7 +224,19 @@ impl TurnExecutor {
       messages.push(ModelMessage::System(system.clone()));
     }
 
-    let history = self.session.get_history(100).await;
+    // 1:1 codex: inject environment_context so the model knows the cwd
+    // and uses absolute paths for file tools (read_file, write_file, list_dir).
+    let env_context = format!(
+      "<environment_context>\n  <cwd>{}</cwd>\n</environment_context>",
+      self.config.cwd.display()
+    );
+    messages.push(ModelMessage::User(env_context));
+
+    let history = if let Some(limit) = self.config.context_window_limit {
+      self.session.get_history_for_prompt(limit).await
+    } else {
+      self.session.get_history(100).await
+    };
     messages.extend(history);
     messages.push(ModelMessage::User(input.content));
 
@@ -198,6 +250,10 @@ impl TurnExecutor {
       .send(event)
       .await
       .map_err(|e| TurnError::SessionError(format!("failed to send event: {e}")))
+  }
+
+  pub fn cancel_current_turn(&self) {
+    self.cancellation_token.cancel();
   }
 }
 

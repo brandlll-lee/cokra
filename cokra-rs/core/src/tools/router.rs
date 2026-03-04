@@ -140,7 +140,19 @@ impl ToolRouter {
       network_attempt_id: None,
     };
 
-    let emitter = ToolEmitter::new(call.tool_name.clone());
+    // 1:1 codex: for shell tool, pass the actual command string so TUI
+    // renders "$ pwd" instead of "$ shell".
+    let emitter = if call.tool_name == "shell" {
+      let raw_cmd = call
+        .args
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("shell")
+        .to_string();
+      ToolEmitter::shell_with_command(raw_cmd)
+    } else {
+      ToolEmitter::new(call.tool_name.clone())
+    };
     let event_ctx = ToolEventCtx {
       session: run_ctx.session.as_ref(),
       tx_event: run_ctx.tx_event.clone(),
@@ -188,6 +200,8 @@ impl ToolRouter {
       id: call.call_id.clone(),
       name: call.tool_name.clone(),
       arguments: call.args.to_string(),
+      // cwd is unused for is_mutating checks, but required by struct.
+      cwd: PathBuf::from("."),
     };
     match self.registry.is_mutating(&invocation) {
       Ok(is_mutating) => !is_mutating,
@@ -276,6 +290,19 @@ impl Approvable<ToolCall> for RegistryToolRuntime {
   }
 
   async fn start_approval_async(&mut self, req: &ToolCall, ctx: ApprovalCtx<'_>) -> ReviewDecision {
+    // 1:1 codex: for shell tool, pass the actual command string so
+    // approval prompt shows "$ pwd" instead of "$ shell".
+    let display_command = if req.tool_name == "shell" {
+      req
+        .args
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&req.tool_name)
+        .to_string()
+    } else {
+      req.tool_name.clone()
+    };
+
     if self.auto_approve_on_request {
       ctx
         .session
@@ -283,7 +310,7 @@ impl Approvable<ToolCall> for RegistryToolRuntime {
           ctx.turn.thread_id.clone(),
           ctx.turn.turn_id.clone(),
           ctx.call_id.to_string(),
-          req.tool_name.clone(),
+          display_command,
           ctx.turn.cwd.clone(),
           ctx.turn.tx_event.clone(),
         )
@@ -296,7 +323,7 @@ impl Approvable<ToolCall> for RegistryToolRuntime {
           ctx.turn.thread_id.clone(),
           ctx.turn.turn_id.clone(),
           ctx.call_id.to_string(),
-          req.tool_name.clone(),
+          display_command,
           ctx.turn.cwd.clone(),
           ctx.turn.tx_event.clone(),
         )
@@ -335,15 +362,19 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
     &mut self,
     req: &ToolCall,
     attempt: &SandboxAttempt<'_>,
-    _ctx: &ToolCtx<'_>,
+    ctx: &ToolCtx<'_>,
   ) -> Result<ToolOutput, ToolError> {
+    // 1:1 codex: thread session-level cwd into ToolInvocation so handlers
+    // resolve paths against the correct working directory.
     let invocation = ToolInvocation {
       id: req.call_id.clone(),
       name: req.tool_name.clone(),
       arguments: req.args.to_string(),
+      cwd: ctx.turn.cwd.clone(),
     };
 
-    match self.registry.dispatch(invocation) {
+    // 1:1 codex: use dispatch_async to support async handlers (e.g. shell).
+    match self.registry.dispatch_async(invocation).await {
       Ok(output) => Ok(output),
       Err(err) => {
         let message = err.to_string();

@@ -1,7 +1,14 @@
+//! 1:1 codex: grep_files tool handler — uses session cwd for path resolution.
+//!
+//! Unlike read_file/write_file/list_dir which require absolute paths,
+//! grep_files has an optional `path` parameter that defaults to cwd.
+//! This mirrors codex's `turn.resolve_path(args.path)` pattern.
+
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
+use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::tools::context::FunctionCallError;
@@ -18,6 +25,7 @@ struct GrepFilesArgs {
   path: Option<String>,
 }
 
+#[async_trait]
 impl ToolHandler for GrepFilesHandler {
   fn kind(&self) -> ToolKind {
     ToolKind::Function
@@ -25,7 +33,9 @@ impl ToolHandler for GrepFilesHandler {
 
   fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
     let args: GrepFilesArgs = invocation.parse_arguments()?;
-    let root = PathBuf::from(args.path.unwrap_or_else(|| ".".to_string()));
+
+    // 1:1 codex: use session cwd via resolve_path for optional path param.
+    let root = invocation.resolve_path(args.path.as_deref());
 
     let mut files = Vec::new();
     collect_files(&root, &mut files).map_err(|e| {

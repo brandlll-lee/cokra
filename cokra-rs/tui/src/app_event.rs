@@ -12,6 +12,13 @@ pub enum UiMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatusLineMode {
+  Default,
+  Minimal,
+  Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExitMode {
   ShutdownFirst,
   Immediate,
@@ -29,6 +36,7 @@ pub(crate) enum AppEvent {
   OpenResumePicker,
   NewSession,
   ForkCurrentSession,
+  SetStatusLineMode(StatusLineMode),
 
   OpenAllModelsPopup {
     providers: Vec<ProviderInfo>,

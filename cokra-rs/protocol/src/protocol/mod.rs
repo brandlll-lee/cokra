@@ -315,6 +315,7 @@ pub struct TurnStartedEvent {
   pub turn_id: String,
   pub mode: ModeKind,
   pub model: String,
+  pub cwd: PathBuf,
   pub start_time: i64,
 }
 

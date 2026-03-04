@@ -198,10 +198,10 @@ impl ModelProvider for OpenRouterProvider {
       let body = response.text().await.map_err(ModelError::NetworkError)?;
 
       // First try standard OpenAI list-models format
-      if let Ok(models) = serde_json::from_str::<ListModelsResponse>(&body) {
-        if !models.data.is_empty() {
-          return Ok(models);
-        }
+      if let Ok(models) = serde_json::from_str::<ListModelsResponse>(&body)
+        && !models.data.is_empty()
+      {
+        return Ok(models);
       }
 
       // OpenRouter uses a slightly different format: { "data": [{ "id": "...", ... }] }
@@ -219,22 +219,22 @@ impl ModelProvider for OpenRouterProvider {
         created: Option<u64>,
       }
 
-      if let Ok(or_resp) = serde_json::from_str::<OpenRouterModelsResponse>(&body) {
-        if !or_resp.data.is_empty() {
-          return Ok(ListModelsResponse {
-            object_type: "list".to_string(),
-            data: or_resp
-              .data
-              .into_iter()
-              .map(|m| ModelInfo {
-                id: m.id,
-                object_type: "model".to_string(),
-                created: m.created.unwrap_or(0),
-                owned_by: Some("openrouter".to_string()),
-              })
-              .collect(),
-          });
-        }
+      if let Ok(or_resp) = serde_json::from_str::<OpenRouterModelsResponse>(&body)
+        && !or_resp.data.is_empty()
+      {
+        return Ok(ListModelsResponse {
+          object_type: "list".to_string(),
+          data: or_resp
+            .data
+            .into_iter()
+            .map(|m| ModelInfo {
+              id: m.id,
+              object_type: "model".to_string(),
+              created: m.created.unwrap_or(0),
+              owned_by: Some("openrouter".to_string()),
+            })
+            .collect(),
+        });
       }
     }
 

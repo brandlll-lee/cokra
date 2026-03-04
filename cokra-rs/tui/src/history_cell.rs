@@ -231,12 +231,11 @@ impl HistoryCell for UserHistoryCell {
       None
     } else {
       Some(word_wrap_lines(
-        self.remote_image_urls
+        self
+          .remote_image_urls
           .iter()
           .enumerate()
-          .map(|(idx, _url)| {
-            Line::from(format!("[image {}]", idx + 1)).style(element_style)
-          }),
+          .map(|(idx, _url)| Line::from(format!("[image {}]", idx + 1)).style(element_style)),
         RtOptions::new(wrap_width as usize),
       ))
     };
@@ -246,7 +245,9 @@ impl HistoryCell for UserHistoryCell {
     } else if self.text_elements.is_empty() {
       let msg = self.message.trim_end_matches(['\r', '\n']);
       let wrapped = word_wrap_lines(
-        msg.split('\n').map(|line| Line::from(line.to_string()).style(style)),
+        msg
+          .split('\n')
+          .map(|line| Line::from(line.to_string()).style(style)),
         RtOptions::new(wrap_width as usize),
       );
       let wrapped = trim_trailing_blank_lines(wrapped);
@@ -258,10 +259,7 @@ impl HistoryCell for UserHistoryCell {
         style,
         element_style,
       );
-      let wrapped = word_wrap_lines(
-        raw_lines,
-        RtOptions::new(wrap_width as usize),
-      );
+      let wrapped = word_wrap_lines(raw_lines, RtOptions::new(wrap_width as usize));
       let wrapped = trim_trailing_blank_lines(wrapped);
       (!wrapped.is_empty()).then_some(wrapped)
     };
@@ -287,7 +285,8 @@ impl HistoryCell for UserHistoryCell {
   }
 
   fn desired_height(&self, width: u16) -> u16 {
-    self.display_lines(width)
+    self
+      .display_lines(width)
       .len()
       .try_into()
       .unwrap_or(u16::MAX)
@@ -333,9 +332,8 @@ impl HistoryCell for SessionConfiguredCell {
 
     if self.is_first_session {
       lines.push(Line::from(""));
-      lines.push(
-        Line::from("  To get started, describe a task or try one of these commands:").dim(),
-      );
+      lines
+        .push(Line::from("  To get started, describe a task or try one of these commands:").dim());
       lines.push(Line::from(""));
       lines.push(Line::from(vec![
         "  ".into(),
@@ -464,10 +462,7 @@ impl HistoryCell for TurnCompleteHistoryCell {
   fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
     // 1:1 codex FinalMessageSeparator: visual divider with optional token summary.
     let label = if self.input_tokens > 0 || self.output_tokens > 0 {
-      format!(
-        "─ {} in / {} out ─",
-        self.input_tokens, self.output_tokens
-      )
+      format!("─ {} in / {} out ─", self.input_tokens, self.output_tokens)
     } else {
       String::new()
     };
@@ -478,12 +473,7 @@ impl HistoryCell for TurnCompleteHistoryCell {
 
     let label_width = label.chars().count();
     let remaining = (width as usize).saturating_sub(label_width);
-    vec![
-      Line::from(vec![
-        label.dim(),
-        "─".repeat(remaining).dim(),
-      ]),
-    ]
+    vec![Line::from(vec![label.dim(), "─".repeat(remaining).dim()])]
   }
 }
 

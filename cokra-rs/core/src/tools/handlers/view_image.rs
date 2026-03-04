@@ -1,5 +1,6 @@
-use std::path::Path;
+//! 1:1 codex: view_image tool handler — uses session cwd for path resolution.
 
+use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::tools::context::FunctionCallError;
@@ -15,6 +16,7 @@ struct ViewImageArgs {
   path: String,
 }
 
+#[async_trait]
 impl ToolHandler for ViewImageHandler {
   fn kind(&self) -> ToolKind {
     ToolKind::Function
@@ -22,7 +24,9 @@ impl ToolHandler for ViewImageHandler {
 
   fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
     let args: ViewImageArgs = invocation.parse_arguments()?;
-    let path = Path::new(&args.path);
+
+    // 1:1 codex: resolve path against session cwd.
+    let path = invocation.resolve_path(Some(&args.path));
 
     if !path.exists() {
       return Err(FunctionCallError::Execution(format!(

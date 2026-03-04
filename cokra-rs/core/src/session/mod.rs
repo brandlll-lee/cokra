@@ -9,30 +9,62 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 use crate::model::Message;
+use crate::model::Usage;
+use crate::shell::Shell;
+use crate::turn::response_items::ResponseItem;
 use approvals::PendingApprovals;
 use cokra_protocol::EventMsg;
 use cokra_protocol::ExecApprovalRequestEvent;
 use cokra_protocol::ReviewDecision;
 
 /// Runtime session state for one conversation thread.
+///
+/// Spec 3.2: Session caches the resolved user shell so that
+/// `default_user_shell()` is called once at init, not per-tool-call.
 pub struct Session {
   session_id: String,
   thread_id: cokra_protocol::ThreadId,
   history: Arc<RwLock<Vec<Message>>>,
+  response_history: Arc<RwLock<Vec<ResponseItem>>>,
   event_tx: broadcast::Sender<cokra_protocol::EventMsg>,
   pending_approvals: Arc<PendingApprovals>,
+  /// Spec 3.2: cached user shell, resolved once at session creation.
+  cached_shell: Arc<RwLock<Shell>>,
+  token_usage: Arc<RwLock<TokenUsageState>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TokenUsageState {
+  pub input_tokens: u64,
+  pub output_tokens: u64,
+  pub total_tokens: u64,
 }
 
 impl Session {
   pub fn new() -> Self {
     let (event_tx, _event_rx) = broadcast::channel(512);
+    let shell = crate::shell::default_user_shell();
     Self {
       session_id: uuid::Uuid::new_v4().to_string(),
       thread_id: cokra_protocol::ThreadId::new(),
       history: Arc::new(RwLock::new(Vec::new())),
+      response_history: Arc::new(RwLock::new(Vec::new())),
       event_tx,
       pending_approvals: Arc::new(PendingApprovals::default()),
+      cached_shell: Arc::new(RwLock::new(shell)),
+      token_usage: Arc::new(RwLock::new(TokenUsageState::default())),
     }
+  }
+
+  /// Spec 3.2: get the session-cached user shell.
+  pub async fn user_shell(&self) -> Shell {
+    self.cached_shell.read().await.clone()
+  }
+
+  /// Spec 3.2: reset the cached shell (e.g. after config/model change).
+  pub async fn reset_user_shell(&self) {
+    let new_shell = crate::shell::default_user_shell();
+    *self.cached_shell.write().await = new_shell;
   }
 
   pub fn id(&self) -> Option<String> {
@@ -47,12 +79,101 @@ impl Session {
     history[history.len() - limit..].to_vec()
   }
 
+  /// Return history constrained by an estimated token budget.
+  ///
+  /// Strategy: always keep all `System` messages, then walk non-system messages
+  /// from newest to oldest until budget is exhausted.
+  pub async fn get_history_for_prompt(&self, max_tokens: usize) -> Vec<Message> {
+    let history = self.history.read().await;
+    if max_tokens == 0 {
+      return history
+        .iter()
+        .filter(|msg| matches!(msg, Message::System(_)))
+        .cloned()
+        .collect();
+    }
+
+    let mut systems = Vec::new();
+    let mut selected_non_system_rev = Vec::new();
+    let mut used = 0usize;
+
+    for msg in history.iter() {
+      if matches!(msg, Message::System(_)) {
+        systems.push(msg.clone());
+      }
+    }
+
+    for msg in history.iter().rev() {
+      if matches!(msg, Message::System(_)) {
+        continue;
+      }
+      let msg_tokens = estimate_message_tokens(msg);
+      if used + msg_tokens > max_tokens {
+        break;
+      }
+      used += msg_tokens;
+      selected_non_system_rev.push(msg.clone());
+    }
+
+    selected_non_system_rev.reverse();
+    systems.extend(selected_non_system_rev);
+    systems
+  }
+
   pub async fn append_message(&self, msg: Message) {
     self.history.write().await.push(msg);
   }
 
   pub async fn append_messages(&self, msgs: Vec<Message>) {
     self.history.write().await.extend(msgs);
+  }
+
+  pub async fn append_response_item(&self, item: ResponseItem) {
+    self.response_history.write().await.push(item);
+  }
+
+  pub async fn append_response_items(&self, items: Vec<ResponseItem>) {
+    self.response_history.write().await.extend(items);
+  }
+
+  pub async fn clone_response_history(&self) -> Vec<ResponseItem> {
+    self.response_history.read().await.clone()
+  }
+
+  pub async fn update_token_usage(&self, usage: &Usage) {
+    let mut token_usage = self.token_usage.write().await;
+    token_usage.input_tokens += usage.input_tokens as u64;
+    token_usage.output_tokens += usage.output_tokens as u64;
+    token_usage.total_tokens += usage.total_tokens as u64;
+  }
+
+  pub async fn set_token_usage(&self, usage: &Usage) {
+    let mut token_usage = self.token_usage.write().await;
+    token_usage.input_tokens = usage.input_tokens as u64;
+    token_usage.output_tokens = usage.output_tokens as u64;
+    token_usage.total_tokens = usage.total_tokens as u64;
+  }
+
+  pub async fn get_total_token_usage(&self) -> u64 {
+    self.token_usage.read().await.total_tokens
+  }
+
+  /// Drop oldest non-system messages until usage is below `target_total_tokens`.
+  pub async fn compact_history_to_token_target(&self, target_total_tokens: usize) {
+    let mut history = self.history.write().await;
+    loop {
+      let current = estimate_messages_tokens(&history);
+      if current <= target_total_tokens {
+        break;
+      }
+      let Some(idx) = history
+        .iter()
+        .position(|msg| !matches!(msg, Message::System(_)))
+      else {
+        break;
+      };
+      history.remove(idx);
+    }
   }
 
   pub fn subscribe_events(&self) -> broadcast::Receiver<cokra_protocol::EventMsg> {
@@ -165,11 +286,26 @@ impl Default for Session {
   }
 }
 
+fn estimate_message_tokens(msg: &Message) -> usize {
+  let text_len = msg.text().map_or(0usize, |s| s.chars().count());
+  // Fast deterministic estimate: 1 token ~= 4 chars.
+  if text_len == 0 {
+    1
+  } else {
+    text_len.div_ceil(4)
+  }
+}
+
+fn estimate_messages_tokens(messages: &[Message]) -> usize {
+  messages.iter().map(estimate_message_tokens).sum()
+}
+
 #[cfg(test)]
 mod tests {
   use tokio::sync::oneshot;
 
   use super::Session;
+  use crate::model::Message;
   use cokra_protocol::ReviewDecision;
 
   #[tokio::test]
@@ -224,5 +360,55 @@ mod tests {
       .await;
     assert!(notified);
     assert!(matches!(rx3.await, Ok(ReviewDecision::Approved)));
+  }
+
+  #[tokio::test]
+  async fn get_history_for_prompt_keeps_system_and_recent_messages() {
+    let session = Session::new();
+    session
+      .append_messages(vec![
+        Message::System("sys".to_string()),
+        Message::User("old message that should drop".to_string()),
+        Message::Assistant {
+          content: Some("recent".to_string()),
+          tool_calls: None,
+        },
+      ])
+      .await;
+
+    let selected = session.get_history_for_prompt(3).await;
+    assert!(matches!(selected.first(), Some(Message::System(_))));
+    assert!(selected.iter().any(|m| match m {
+      Message::Assistant { content, .. } => content.as_deref() == Some("recent"),
+      _ => false,
+    }));
+    assert!(!selected.iter().any(|m| match m {
+      Message::User(text) => text == "old message that should drop",
+      _ => false,
+    }));
+  }
+
+  #[tokio::test]
+  async fn compact_history_to_token_target_drops_oldest_non_system() {
+    let session = Session::new();
+    session
+      .append_messages(vec![
+        Message::System("sys".to_string()),
+        Message::User("1111111111".to_string()),
+        Message::User("2222222222".to_string()),
+      ])
+      .await;
+
+    session.compact_history_to_token_target(4).await;
+    let history = session.get_history(10).await;
+
+    assert!(matches!(history.first(), Some(Message::System(_))));
+    assert_eq!(
+      history
+        .iter()
+        .filter(|m| matches!(m, Message::User(_)))
+        .count(),
+      1
+    );
   }
 }

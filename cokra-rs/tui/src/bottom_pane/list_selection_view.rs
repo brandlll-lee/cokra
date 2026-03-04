@@ -181,13 +181,15 @@ impl ListSelectionView {
       .state
       .selected_idx
       .and_then(|visible_idx| {
-        self.filtered_indices
+        self
+          .filtered_indices
           .get(visible_idx)
           .and_then(|idx| self.filtered_indices.iter().position(|cur| cur == idx))
       })
       .or_else(|| {
         previously_selected.and_then(|actual_idx| {
-          self.filtered_indices
+          self
+            .filtered_indices
             .iter()
             .position(|idx| *idx == actual_idx)
         })
@@ -445,9 +447,12 @@ impl Renderable for ListSelectionView {
     let rows = self.build_rows();
     let rows_width = Self::rows_width(width);
     let rows_height = match self.col_width_mode {
-      ColumnWidthMode::AutoVisible => {
-        measure_rows_height(&rows, &self.state, MAX_POPUP_ROWS, rows_width.saturating_add(1))
-      }
+      ColumnWidthMode::AutoVisible => measure_rows_height(
+        &rows,
+        &self.state,
+        MAX_POPUP_ROWS,
+        rows_width.saturating_add(1),
+      ),
       ColumnWidthMode::AutoAllRows => measure_rows_height_stable_col_widths(
         &rows,
         &self.state,
@@ -503,9 +508,12 @@ impl Renderable for ListSelectionView {
     let rows = self.build_rows();
     let rows_width = Self::rows_width(outer_content_area.width);
     let rows_height = match self.col_width_mode {
-      ColumnWidthMode::AutoVisible => {
-        measure_rows_height(&rows, &self.state, MAX_POPUP_ROWS, rows_width.saturating_add(1))
-      }
+      ColumnWidthMode::AutoVisible => measure_rows_height(
+        &rows,
+        &self.state,
+        MAX_POPUP_ROWS,
+        rows_width.saturating_add(1),
+      ),
       ColumnWidthMode::AutoAllRows => measure_rows_height_stable_col_widths(
         &rows,
         &self.state,

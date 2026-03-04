@@ -62,25 +62,25 @@ impl AuthResolver for EnvAuthResolver {
   fn resolve(&self, provider_id: &str) -> Option<Credentials> {
     // Check provider-specific env vars first
     for var in Self::get_env_vars_for_provider(provider_id) {
-      if let Ok(key) = std::env::var(&var) {
-        if !key.is_empty() {
-          tracing::debug!("Found credentials for {} in env var {}", provider_id, var);
-          return Some(Credentials::ApiKey { key });
-        }
+      if let Ok(key) = std::env::var(&var)
+        && !key.is_empty()
+      {
+        tracing::debug!("Found credentials for {} in env var {}", provider_id, var);
+        return Some(Credentials::ApiKey { key });
       }
     }
 
     // Check common fallbacks
     for var in Self::get_fallback_env_vars() {
-      if let Ok(key) = std::env::var(&var) {
-        if !key.is_empty() {
-          tracing::debug!(
-            "Found credentials for {} in fallback env var {}",
-            provider_id,
-            var
-          );
-          return Some(Credentials::ApiKey { key });
-        }
+      if let Ok(key) = std::env::var(&var)
+        && !key.is_empty()
+      {
+        tracing::debug!(
+          "Found credentials for {} in fallback env var {}",
+          provider_id,
+          var
+        );
+        return Some(Credentials::ApiKey { key });
       }
     }
 

@@ -16,6 +16,7 @@ use cokra_tui::UiMode;
 use cokra_tui::run_main as run_tui_main;
 use std::io::Write;
 use std::io::{self};
+use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -32,13 +33,21 @@ struct TopCli {
   #[arg(short = 'p', long = "prompt")]
   prompt: Option<String>,
 
-  /// Working directory
-  #[arg(short = 'd', long = "dir")]
-  dir: Option<PathBuf>,
+  /// Tell the agent to use the specified directory as its working root.
+  #[arg(long = "cd", short = 'C', value_name = "DIR", alias = "cwd")]
+  cwd: Option<PathBuf>,
+
+  /// Legacy working directory flag (compat). Prefer `--cd/-C`.
+  #[arg(long = "dir", short = 'd', value_name = "DIR", hide = true)]
+  dir_compat: Option<PathBuf>,
 
   /// TUI mode: inline or alt-screen
   #[arg(long = "ui-mode", value_enum)]
   ui_mode: Option<CliUiMode>,
+
+  /// Allow running non-interactive commands outside a Git repository.
+  #[arg(long = "skip-git-repo-check", global = true, default_value_t = false)]
+  skip_git_repo_check: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -66,18 +75,42 @@ struct CliConfigOverrides {
 #[derive(Debug, Subcommand)]
 enum Commands {
   Interactive {
-    #[arg(short = 'd', long = "dir")]
-    dir: Option<PathBuf>,
+    /// Tell the agent to use the specified directory as its working root.
+    #[arg(long = "cd", short = 'C', value_name = "DIR", alias = "cwd")]
+    cwd: Option<PathBuf>,
+
+    /// Legacy working directory flag (compat). Prefer `--cd/-C`.
+    #[arg(long = "dir", short = 'd', value_name = "DIR", hide = true)]
+    dir_compat: Option<PathBuf>,
   },
   Run {
     task: String,
-    #[arg(short = 'd', long = "dir")]
-    dir: Option<PathBuf>,
+    /// Tell the agent to use the specified directory as its working root.
+    #[arg(long = "cd", short = 'C', value_name = "DIR", alias = "cwd")]
+    cwd: Option<PathBuf>,
+
+    /// Legacy working directory flag (compat). Prefer `--cd/-C`.
+    #[arg(long = "dir", short = 'd', value_name = "DIR", hide = true)]
+    dir_compat: Option<PathBuf>,
+
+    /// Allow running outside a Git repository (Codex parity for non-interactive mode).
+    #[arg(long = "skip-git-repo-check", default_value_t = false)]
+    skip_git_repo_check: bool,
   },
   Exec {
     task: String,
-    #[arg(short = 'd', long = "dir")]
-    dir: Option<PathBuf>,
+    /// Tell the agent to use the specified directory as its working root.
+    #[arg(long = "cd", short = 'C', value_name = "DIR", alias = "cwd")]
+    cwd: Option<PathBuf>,
+
+    /// Legacy working directory flag (compat). Prefer `--cd/-C`.
+    #[arg(long = "dir", short = 'd', value_name = "DIR", hide = true)]
+    dir_compat: Option<PathBuf>,
+
+    /// Allow running outside a Git repository (Codex parity for non-interactive mode).
+    #[arg(long = "skip-git-repo-check", default_value_t = false)]
+    skip_git_repo_check: bool,
+
     /// Print events as JSON Lines instead of human-readable text
     #[arg(long = "jsonl")]
     jsonl: bool,
@@ -156,22 +189,62 @@ async fn main() -> Result<()> {
   let ui_mode = cli.ui_mode;
 
   match cli.command {
-    Some(Commands::Interactive { dir }) => {
-      run_interactive(dir.or(cli.dir), overrides, ui_mode).await
+    Some(Commands::Interactive { cwd, dir_compat }) => {
+      let resolved_cwd = resolve_cwd(cwd, dir_compat, cli.cwd, cli.dir_compat)?;
+      run_interactive(resolved_cwd, overrides.clone(), ui_mode).await
     }
-    Some(Commands::Run { task, dir }) => run_task(task, dir.or(cli.dir), overrides).await,
-    Some(Commands::Exec { task, dir, jsonl }) => {
-      run_exec(task, dir.or(cli.dir), overrides, jsonl).await
+    Some(Commands::Run {
+      task,
+      cwd,
+      dir_compat,
+      skip_git_repo_check,
+    }) => {
+      let resolved_cwd = resolve_cwd(cwd, dir_compat, cli.cwd, cli.dir_compat)?;
+      run_task(
+        task,
+        resolved_cwd,
+        overrides.clone(),
+        skip_git_repo_check || cli.skip_git_repo_check,
+      )
+      .await
+    }
+    Some(Commands::Exec {
+      task,
+      cwd,
+      dir_compat,
+      skip_git_repo_check,
+      jsonl,
+    }) => {
+      let resolved_cwd = resolve_cwd(cwd, dir_compat, cli.cwd, cli.dir_compat)?;
+      run_exec(
+        task,
+        resolved_cwd,
+        overrides.clone(),
+        skip_git_repo_check || cli.skip_git_repo_check,
+        jsonl,
+      )
+      .await
     }
     Some(Commands::Mcp { mcp_command }) => handle_mcp_command(mcp_command).await,
     Some(Commands::Config { config_command }) => handle_config_command(config_command).await,
     Some(Commands::Auth { auth_command }) => handle_auth_command(auth_command).await,
-    Some(Commands::Models) => list_models(cli.dir, overrides).await,
+    Some(Commands::Models) => {
+      let resolved_cwd = resolve_cwd(None, None, cli.cwd, cli.dir_compat)?;
+      list_models(resolved_cwd, overrides.clone()).await
+    }
     None => {
       if let Some(prompt) = cli.prompt {
-        run_task(prompt, cli.dir, overrides).await
+        let resolved_cwd = resolve_cwd(None, None, cli.cwd, cli.dir_compat)?;
+        run_task(
+          prompt,
+          resolved_cwd,
+          overrides.clone(),
+          cli.skip_git_repo_check,
+        )
+        .await
       } else {
-        run_interactive(cli.dir, overrides, ui_mode).await
+        let resolved_cwd = resolve_cwd(None, None, cli.cwd, cli.dir_compat)?;
+        run_interactive(resolved_cwd, overrides.clone(), ui_mode).await
       }
     }
   }
@@ -189,23 +262,44 @@ fn parse_overrides(overrides: &[String]) -> Result<Vec<(String, String)>> {
     .collect()
 }
 
-fn set_workdir(dir: &Option<PathBuf>) -> Result<()> {
-  if let Some(dir) = dir {
-    std::env::set_current_dir(dir)
-      .with_context(|| format!("failed to set working directory to {}", dir.display()))?;
+fn resolve_cwd(
+  command_cwd: Option<PathBuf>,
+  command_dir_compat: Option<PathBuf>,
+  top_cwd: Option<PathBuf>,
+  top_dir_compat: Option<PathBuf>,
+) -> Result<PathBuf> {
+  let raw = command_cwd
+    .or(command_dir_compat)
+    .or(top_cwd)
+    .or(top_dir_compat);
+
+  match raw.as_ref() {
+    Some(path) => std::fs::canonicalize(path)
+      .with_context(|| format!("failed to resolve working directory {}", path.display())),
+    None => std::env::current_dir().context("failed to get current working directory"),
   }
-  Ok(())
 }
 
 fn load_config(
-  dir: &Option<PathBuf>,
+  resolved_cwd: &Path,
   overrides: Vec<(String, String)>,
 ) -> Result<cokra_config::Config> {
-  let loader = match dir {
-    Some(d) => ConfigLoader::default().with_project_dir(d.clone()),
-    None => ConfigLoader::default(),
-  };
-  loader.load_with_cli_overrides(overrides)
+  ConfigLoader::default()
+    .with_cwd(resolved_cwd.to_path_buf())
+    .load_with_cli_overrides(overrides)
+}
+
+fn get_git_repo_root(base_dir: &Path) -> Option<PathBuf> {
+  let mut dir = base_dir.to_path_buf();
+  loop {
+    if dir.join(".git").exists() {
+      return Some(dir);
+    }
+    if !dir.pop() {
+      break;
+    }
+  }
+  None
 }
 
 fn resolve_ui_mode(cli_ui_mode: Option<CliUiMode>) -> UiMode {
@@ -235,11 +329,16 @@ fn parse_ui_mode_from_str(raw: &str) -> Option<UiMode> {
 
 async fn run_task(
   task: String,
-  dir: Option<PathBuf>,
+  resolved_cwd: PathBuf,
   overrides: Vec<(String, String)>,
+  skip_git_repo_check: bool,
 ) -> anyhow::Result<()> {
-  set_workdir(&dir)?;
-  let config = load_config(&dir, overrides)?;
+  if !skip_git_repo_check && get_git_repo_root(&resolved_cwd).is_none() {
+    eprintln!("Not inside a trusted directory and --skip-git-repo-check was not specified.");
+    std::process::exit(1);
+  }
+
+  let config = load_config(&resolved_cwd, overrides)?;
   let cokra = Cokra::new(config).await?;
   let result = cokra.run_turn(task).await?;
   println!("{}", result.final_message);
@@ -247,12 +346,11 @@ async fn run_task(
 }
 
 async fn run_interactive(
-  dir: Option<PathBuf>,
+  resolved_cwd: PathBuf,
   overrides: Vec<(String, String)>,
   cli_ui_mode: Option<CliUiMode>,
 ) -> anyhow::Result<()> {
-  set_workdir(&dir)?;
-  let config = load_config(&dir, overrides)?;
+  let config = load_config(&resolved_cwd, overrides)?;
   let ui_mode = resolve_ui_mode(cli_ui_mode);
   let cokra = Cokra::new(config).await?;
   let _ = run_tui_main(cokra, ui_mode).await?;
@@ -261,12 +359,17 @@ async fn run_interactive(
 
 async fn run_exec(
   task: String,
-  dir: Option<PathBuf>,
+  resolved_cwd: PathBuf,
   overrides: Vec<(String, String)>,
+  skip_git_repo_check: bool,
   jsonl: bool,
 ) -> anyhow::Result<()> {
-  set_workdir(&dir)?;
-  let config = load_config(&dir, overrides)?;
+  if !skip_git_repo_check && get_git_repo_root(&resolved_cwd).is_none() {
+    eprintln!("Not inside a trusted directory and --skip-git-repo-check was not specified.");
+    std::process::exit(1);
+  }
+
+  let config = load_config(&resolved_cwd, overrides)?;
   let cokra = Cokra::new(config).await?;
 
   let _submission_id = cokra
@@ -447,9 +550,11 @@ async fn handle_auth_command(cmd: AuthCommands) -> anyhow::Result<()> {
   Ok(())
 }
 
-async fn list_models(dir: Option<PathBuf>, overrides: Vec<(String, String)>) -> anyhow::Result<()> {
-  set_workdir(&dir)?;
-  let config = load_config(&dir, overrides)?;
+async fn list_models(
+  resolved_cwd: PathBuf,
+  overrides: Vec<(String, String)>,
+) -> anyhow::Result<()> {
+  let config = load_config(&resolved_cwd, overrides)?;
   let model_client = init_model_layer(&config).await?;
   let mut providers = model_client.registry().list_providers().await;
   providers.sort_by(|a, b| a.id.cmp(&b.id));

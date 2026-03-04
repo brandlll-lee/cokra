@@ -1,7 +1,10 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
+use futures::stream::FuturesOrdered;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use cokra_protocol::AgentMessageContentDeltaEvent;
@@ -29,6 +32,13 @@ use crate::tools::router::ToolRunContext;
 use super::executor::TurnConfig;
 use super::executor::TurnError;
 use super::executor::TurnResult;
+use super::response_items::ResponseItem;
+
+#[derive(Debug)]
+struct SamplingRequestResult {
+  assistant_delta: String,
+  function_calls: Vec<FunctionCallEvent>,
+}
 
 #[derive(Clone)]
 pub struct SseTurnExecutor {
@@ -38,6 +48,7 @@ pub struct SseTurnExecutor {
   session: Arc<Session>,
   tx_event: mpsc::Sender<EventMsg>,
   config: TurnConfig,
+  cancellation_token: CancellationToken,
 }
 
 impl SseTurnExecutor {
@@ -49,6 +60,26 @@ impl SseTurnExecutor {
     tx_event: mpsc::Sender<EventMsg>,
     config: TurnConfig,
   ) -> Self {
+    Self::new_with_cancellation(
+      model_client,
+      tool_registry,
+      tool_router,
+      session,
+      tx_event,
+      config,
+      CancellationToken::new(),
+    )
+  }
+
+  pub fn new_with_cancellation(
+    model_client: Arc<ModelClient>,
+    tool_registry: Arc<ToolRegistry>,
+    tool_router: Arc<ToolRouter>,
+    session: Arc<Session>,
+    tx_event: mpsc::Sender<EventMsg>,
+    config: TurnConfig,
+    cancellation_token: CancellationToken,
+  ) -> Self {
     Self {
       model_client,
       tool_registry,
@@ -56,7 +87,163 @@ impl SseTurnExecutor {
       session,
       tx_event,
       config,
+      cancellation_token,
     }
+  }
+
+  async fn try_run_sampling_request(
+    &self,
+    messages: Vec<ModelMessage>,
+    thread_id: &str,
+    turn_id: &str,
+    item_id: &str,
+    cancellation_token: CancellationToken,
+  ) -> Result<SamplingRequestResult, TurnError> {
+    let request = ChatRequest {
+      model: self.config.model.clone(),
+      messages,
+      temperature: self.config.temperature,
+      max_tokens: self.config.max_tokens,
+      tools: if self.config.enable_tools {
+        Some(self.tool_registry.model_tools())
+      } else {
+        None
+      },
+      stream: true,
+      ..Default::default()
+    };
+
+    let mut stream = self
+      .model_client
+      .responses_stream(request)
+      .await
+      .map_err(map_stream_model_error)?;
+    let mut assistant_delta = String::new();
+    let mut function_calls: Vec<FunctionCallEvent> = Vec::new();
+
+    loop {
+      let event = tokio::select! {
+        _ = cancellation_token.cancelled() => return Err(TurnError::TurnAborted),
+        event = stream.next() => event,
+      };
+      let Some(event) = event else {
+        break;
+      };
+
+      let event = event.map_err(map_stream_model_error)?;
+      match event {
+        ResponseEvent::ContentDelta(delta) => {
+          if delta.text.is_empty() {
+            continue;
+          }
+          assistant_delta.push_str(&delta.text);
+          self
+            .send_event(EventMsg::AgentMessageContentDelta(
+              AgentMessageContentDeltaEvent {
+                thread_id: thread_id.to_string(),
+                turn_id: turn_id.to_string(),
+                item_id: item_id.to_string(),
+                delta: delta.text,
+              },
+            ))
+            .await?;
+        }
+        ResponseEvent::FunctionCall(call) => {
+          function_calls.push(call);
+        }
+        ResponseEvent::Completed {
+          token_usage: Some(usage),
+          ..
+        } => {
+          self
+            .session
+            .set_token_usage(&Usage {
+              input_tokens: usage.input_tokens.max(0) as u32,
+              output_tokens: usage.output_tokens.max(0) as u32,
+              total_tokens: usage.total_tokens.max(0) as u32,
+            })
+            .await;
+        }
+        ResponseEvent::RateLimits(_) => {
+          // phase-6: reserved for future UI/state integration
+        }
+        ResponseEvent::EndTurn => break,
+        ResponseEvent::Error(err) => {
+          return Err(TurnError::ModelError(ModelError::StreamError(err.message)));
+        }
+        _ => {}
+      }
+    }
+
+    Ok(SamplingRequestResult {
+      assistant_delta,
+      function_calls,
+    })
+  }
+
+  async fn run_sampling_request(
+    &self,
+    messages: Vec<ModelMessage>,
+    thread_id: &str,
+    turn_id: &str,
+    item_id: &str,
+    cancellation_token: CancellationToken,
+  ) -> Result<SamplingRequestResult, TurnError> {
+    let max_retries = 3;
+    let mut retries = 0;
+
+    loop {
+      match self
+        .try_run_sampling_request(
+          messages.clone(),
+          thread_id,
+          turn_id,
+          item_id,
+          cancellation_token.child_token(),
+        )
+        .await
+      {
+        Ok(output) => return Ok(output),
+        Err(err) if err.is_retryable() && retries < max_retries => {
+          retries += 1;
+          let delay = backoff(retries);
+          self
+            .send_event(EventMsg::Warning(cokra_protocol::WarningEvent {
+              thread_id: thread_id.to_string(),
+              turn_id: turn_id.to_string(),
+              message: format!("Reconnecting... {retries}/{max_retries}"),
+            }))
+            .await?;
+          tokio::time::sleep(delay).await;
+        }
+        Err(err) => return Err(err),
+      }
+    }
+  }
+
+  async fn maybe_run_auto_compact_for_messages(&self, messages: &mut Vec<ModelMessage>) {
+    let Some(limit) = self.config.auto_compact_token_limit else {
+      return;
+    };
+
+    if estimate_messages_tokens(messages) < limit {
+      return;
+    }
+
+    self.session.compact_history_to_token_target(limit).await;
+
+    let mut rebuilt = Vec::new();
+    if let Some(system) = &self.config.system_prompt {
+      rebuilt.push(ModelMessage::System(system.clone()));
+    }
+
+    if let Some(context_limit) = self.config.context_window_limit {
+      rebuilt.extend(self.session.get_history_for_prompt(context_limit).await);
+    } else {
+      rebuilt.extend(self.session.get_history(100).await);
+    }
+
+    *messages = rebuilt;
   }
 
   pub async fn run_sse_interaction(
@@ -66,9 +253,17 @@ impl SseTurnExecutor {
     turn_id: String,
   ) -> Result<TurnResult, TurnError> {
     let mut final_content = String::new();
-    let max_iterations = 10;
+    let turn_cancellation = self.cancellation_token.child_token();
 
-    for _ in 0..max_iterations {
+    loop {
+      if turn_cancellation.is_cancelled() {
+        return Err(TurnError::TurnAborted);
+      }
+
+      self
+        .maybe_run_auto_compact_for_messages(&mut messages)
+        .await;
+
       let item_id = Uuid::new_v4().to_string();
       self
         .send_event(EventMsg::ItemStarted(ItemStartedEvent {
@@ -79,52 +274,18 @@ impl SseTurnExecutor {
         }))
         .await?;
 
-      let request = ChatRequest {
-        model: self.config.model.clone(),
-        messages: messages.clone(),
-        temperature: self.config.temperature,
-        max_tokens: self.config.max_tokens,
-        tools: if self.config.enable_tools {
-          Some(self.tool_registry.model_tools())
-        } else {
-          None
-        },
-        stream: true,
-        ..Default::default()
-      };
-
-      let mut stream = self.model_client.responses_stream(request).await?;
-
-      let mut assistant_delta = String::new();
-      let mut function_calls: Vec<FunctionCallEvent> = Vec::new();
-
-      while let Some(event) = stream.next().await {
-        match event? {
-          ResponseEvent::ContentDelta(delta) => {
-            if delta.text.is_empty() {
-              continue;
-            }
-            assistant_delta.push_str(&delta.text);
-            self
-              .send_event(EventMsg::AgentMessageContentDelta(
-                AgentMessageContentDeltaEvent {
-                  thread_id: thread_id.clone(),
-                  turn_id: turn_id.clone(),
-                  item_id: item_id.clone(),
-                  delta: delta.text,
-                },
-              ))
-              .await?;
-          }
-          ResponseEvent::FunctionCall(call) => {
-            function_calls.push(call);
-          }
-          ResponseEvent::EndTurn => break,
-          ResponseEvent::Error(err) => {
-            return Err(TurnError::ModelError(ModelError::StreamError(err.message)));
-          }
-        }
-      }
+      let SamplingRequestResult {
+        assistant_delta,
+        function_calls,
+      } = self
+        .run_sampling_request(
+          messages.clone(),
+          &thread_id,
+          &turn_id,
+          &item_id,
+          turn_cancellation.child_token(),
+        )
+        .await?;
 
       if !assistant_delta.is_empty() {
         final_content.push_str(&assistant_delta);
@@ -148,7 +309,18 @@ impl SseTurnExecutor {
         },
       };
       messages.push(assistant_message.clone());
-      self.session.append_message(assistant_message).await;
+      self.session.append_message(assistant_message.clone()).await;
+      if let Some(item) = ResponseItem::from_model_message(&assistant_message) {
+        self.session.append_response_item(item).await;
+      }
+
+      if !function_calls.is_empty() {
+        let call_items = function_calls
+          .iter()
+          .map(ResponseItem::from_function_call_event)
+          .collect::<Vec<_>>();
+        self.session.append_response_items(call_items).await;
+      }
 
       if function_calls.is_empty() {
         self
@@ -167,10 +339,20 @@ impl SseTurnExecutor {
         });
       }
 
+      let mut in_flight = FuturesOrdered::new();
       for call in function_calls {
-        let output = self.execute_tool_call(&call, &thread_id, &turn_id).await?;
+        in_flight.push_back(self.execute_tool_call(
+          call,
+          &thread_id,
+          &turn_id,
+          turn_cancellation.child_token(),
+        ));
+      }
+
+      while let Some(output_res) = in_flight.next().await {
+        let (call_id, output) = output_res?;
         let output_call_id = if output.id.is_empty() {
-          call.id
+          call_id.clone()
         } else {
           output.id
         };
@@ -180,7 +362,15 @@ impl SseTurnExecutor {
           content: output.content,
         };
         messages.push(tool_msg.clone());
-        self.session.append_message(tool_msg).await;
+        self.session.append_message(tool_msg.clone()).await;
+        self
+          .session
+          .append_response_item(ResponseItem::FunctionCallOutput {
+            call_id,
+            output: tool_msg.text().unwrap_or_default().to_string(),
+            is_error: false,
+          })
+          .await;
       }
 
       self
@@ -192,10 +382,6 @@ impl SseTurnExecutor {
         }))
         .await?;
     }
-
-    Err(TurnError::SessionError(
-      "too many tool call iterations".to_string(),
-    ))
   }
 
   fn to_model_tool_call(call: &FunctionCallEvent) -> ModelToolCall {
@@ -211,10 +397,11 @@ impl SseTurnExecutor {
 
   async fn execute_tool_call(
     &self,
-    call: &FunctionCallEvent,
+    call: FunctionCallEvent,
     thread_id: &str,
     turn_id: &str,
-  ) -> Result<ToolOutput, TurnError> {
+    cancellation_token: CancellationToken,
+  ) -> Result<(String, ToolOutput), TurnError> {
     let args = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
       .map_err(|err| TurnError::ToolError(format!("invalid tool arguments: {err}")))?;
 
@@ -237,7 +424,7 @@ impl SseTurnExecutor {
 
     let mut output = self
       .tool_runtime
-      .handle_tool_call(tool_call, run_ctx)
+      .handle_tool_call_with_cancellation(tool_call, run_ctx, cancellation_token)
       .await
       .map_err(|err| TurnError::ToolError(err.to_string()))?;
 
@@ -245,7 +432,7 @@ impl SseTurnExecutor {
       output.id = call.id.clone();
     }
 
-    Ok(output)
+    Ok((call.id, output))
   }
 
   async fn send_event(&self, event: EventMsg) -> Result<(), TurnError> {
@@ -256,6 +443,39 @@ impl SseTurnExecutor {
       .await
       .map_err(|err| TurnError::SessionError(format!("failed to send event: {err}")))
   }
+
+  pub fn cancel_current_turn(&self) {
+    self.cancellation_token.cancel();
+  }
+}
+
+fn estimate_message_tokens(msg: &ModelMessage) -> usize {
+  let text_len = match msg {
+    ModelMessage::System(text) | ModelMessage::User(text) => text.chars().count(),
+    ModelMessage::Assistant { content, .. } => content.as_deref().map_or(0, |s| s.chars().count()),
+    ModelMessage::Tool { content, .. } => content.chars().count(),
+  };
+  if text_len == 0 {
+    1
+  } else {
+    text_len.div_ceil(4)
+  }
+}
+
+fn estimate_messages_tokens(messages: &[ModelMessage]) -> usize {
+  messages.iter().map(estimate_message_tokens).sum()
+}
+
+fn map_stream_model_error(err: ModelError) -> TurnError {
+  match err {
+    ModelError::StreamError(msg) => TurnError::Stream(msg, None),
+    other => TurnError::ModelError(other),
+  }
+}
+
+fn backoff(retries: usize) -> Duration {
+  let seconds = 2u64.pow((retries.min(5) as u32).saturating_sub(1));
+  Duration::from_secs(seconds.max(1))
 }
 
 #[cfg(test)]
@@ -444,6 +664,7 @@ mod tests {
   #[derive(Debug)]
   struct ReadFileLikeHandler;
 
+  #[async_trait]
   impl ToolHandler for ReadFileLikeHandler {
     fn kind(&self) -> ToolKind {
       ToolKind::Function

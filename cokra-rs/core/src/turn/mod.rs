@@ -5,6 +5,7 @@
 pub mod context;
 pub mod executor;
 pub mod regular_task;
+pub mod response_items;
 pub mod sse_executor;
 pub mod task;
 
@@ -17,6 +18,7 @@ pub use executor::TurnExecutor;
 pub use executor::TurnResult;
 pub use executor::UserInput;
 pub use regular_task::RegularTask;
+pub use response_items::ResponseItem;
 pub use task::CancellationToken;
 pub use task::SessionTask;
 pub use task::TaskKind;

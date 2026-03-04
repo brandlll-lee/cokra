@@ -58,7 +58,7 @@ impl LMStudioProvider {
       .get(&url)
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     if !response.status().is_success() {
       return Err(ModelError::ApiError("LM Studio not reachable".to_string()));
@@ -118,7 +118,7 @@ impl ModelProvider for LMStudioProvider {
       .json(&body)
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     if !response.status().is_success() {
       let status = response.status();
@@ -147,7 +147,7 @@ impl ModelProvider for LMStudioProvider {
       .json(&body)
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     Ok(super::super::providers::create_response_stream(response))
   }
@@ -179,7 +179,7 @@ impl ModelProvider for LMStudioProvider {
       .get(&url)
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     if response.status().is_success() {
       Ok(())

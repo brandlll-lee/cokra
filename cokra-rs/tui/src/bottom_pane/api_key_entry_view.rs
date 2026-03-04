@@ -70,8 +70,7 @@ impl BottomPaneView for ApiKeyEntryView {
   fn handle_key_event(&mut self, key_event: KeyEvent) {
     match key_event {
       KeyEvent {
-        code: KeyCode::Esc,
-        ..
+        code: KeyCode::Esc, ..
       } => {
         self.complete = true;
       }

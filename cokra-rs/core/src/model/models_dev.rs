@@ -111,6 +111,12 @@ pub struct ModelsDevClient {
   client: reqwest::Client,
 }
 
+impl Default for ModelsDevClient {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl ModelsDevClient {
   pub fn new() -> Self {
     let cache_dir = dirs::cache_dir()
@@ -139,14 +145,13 @@ impl ModelsDevClient {
     }
 
     // Try loading from disk cache
-    if let Ok(contents) = tokio::fs::read_to_string(&self.cache_path).await {
-      if let Ok(db) = serde_json::from_str::<ModelsDevDatabase>(&contents) {
-        if !db.is_empty() {
-          let mut data = self.data.write().await;
-          *data = Some(db.clone());
-          return Ok(db);
-        }
-      }
+    if let Ok(contents) = tokio::fs::read_to_string(&self.cache_path).await
+      && let Ok(db) = serde_json::from_str::<ModelsDevDatabase>(&contents)
+      && !db.is_empty()
+    {
+      let mut data = self.data.write().await;
+      *data = Some(db.clone());
+      return Ok(db);
     }
 
     // Fetch from API
@@ -204,7 +209,7 @@ impl ModelsDevClient {
       .header("User-Agent", "cokra-cli")
       .send()
       .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+      .map_err(ModelError::NetworkError)?;
 
     if !response.status().is_success() {
       return Err(ModelError::ApiError(format!(
@@ -213,13 +218,10 @@ impl ModelsDevClient {
       )));
     }
 
-    let text = response
-      .text()
-      .await
-      .map_err(|e| ModelError::NetworkError(e))?;
+    let text = response.text().await.map_err(ModelError::NetworkError)?;
 
-    let db: ModelsDevDatabase =
-      serde_json::from_str(&text).map_err(|e| ModelError::ApiError(format!("JSON parse error: {e}")))?;
+    let db: ModelsDevDatabase = serde_json::from_str(&text)
+      .map_err(|e| ModelError::ApiError(format!("JSON parse error: {e}")))?;
 
     Ok(db)
   }

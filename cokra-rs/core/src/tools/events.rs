@@ -31,12 +31,25 @@ pub enum ToolEventStage {
 /// ExecCommandBegin/End so stream consumers get deterministic begin/end events.
 pub struct ToolEmitter {
   tool_name: String,
+  /// 1:1 codex: actual command string for ExecCommandBegin.command.
+  /// When set, this is used instead of tool_name in the Begin event
+  /// so the TUI renders the real command (e.g. "pwd") not "shell".
+  display_command: Option<String>,
 }
 
 impl ToolEmitter {
   pub fn new(tool_name: impl Into<String>) -> Self {
     Self {
       tool_name: tool_name.into(),
+      display_command: None,
+    }
+  }
+
+  /// 1:1 codex: construct emitter for shell tool with the actual command string.
+  pub fn shell_with_command(raw_command: impl Into<String>) -> Self {
+    Self {
+      tool_name: "shell".to_string(),
+      display_command: Some(raw_command.into()),
     }
   }
 
@@ -57,7 +70,10 @@ impl ToolEmitter {
             thread_id: ctx.thread_id.to_string(),
             turn_id: ctx.turn_id.to_string(),
             command_id: ctx.call_id.to_string(),
-            command: self.tool_name.clone(),
+            command: self
+              .display_command
+              .clone()
+              .unwrap_or_else(|| self.tool_name.clone()),
             cwd: ctx.cwd.to_path_buf(),
           }),
         )
@@ -112,6 +128,13 @@ impl ToolEmitter {
         Err(err)
       }
     }
+  }
+}
+
+async fn emit_event(ctx: &ToolEventCtx<'_>, event: EventMsg) {
+  ctx.session.emit_event(event.clone());
+  if let Some(tx_event) = &ctx.tx_event {
+    let _ = tx_event.send(event).await;
   }
 }
 
@@ -183,12 +206,5 @@ mod tests {
 
     assert!(matches!(first, EventMsg::ExecCommandBegin(_)));
     assert!(matches!(second, EventMsg::ExecCommandEnd(_)));
-  }
-}
-
-async fn emit_event(ctx: &ToolEventCtx<'_>, event: EventMsg) {
-  ctx.session.emit_event(event.clone());
-  if let Some(tx_event) = &ctx.tx_event {
-    let _ = tx_event.send(event).await;
   }
 }

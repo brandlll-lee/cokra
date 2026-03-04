@@ -200,6 +200,7 @@ impl ModelProvider for MockResponsesProvider {
 #[derive(Debug)]
 struct ReadFileLikeHandler;
 
+#[async_trait]
 impl ToolHandler for ReadFileLikeHandler {
   fn kind(&self) -> ToolKind {
     ToolKind::Function
@@ -218,6 +219,7 @@ struct FlakyWriteHandler {
   calls: Arc<AtomicUsize>,
 }
 
+#[async_trait]
 impl ToolHandler for FlakyWriteHandler {
   fn kind(&self) -> ToolKind {
     ToolKind::Function

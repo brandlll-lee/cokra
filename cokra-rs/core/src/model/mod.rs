@@ -50,14 +50,10 @@ pub use types::*;
 use std::sync::Arc;
 
 /// Default providers to register
-pub fn register_default_providers(
-  _registry: &ProviderRegistry,
-) -> impl std::future::Future<Output = Result<()>> + '_ {
-  async move {
-    // Providers will be registered with their specific implementations
-    // This is called during Cokra initialization
-    Ok(())
-  }
+pub async fn register_default_providers(_registry: &ProviderRegistry) -> Result<()> {
+  // Providers will be registered with their specific implementations
+  // This is called during Cokra initialization
+  Ok(())
 }
 
 /// Initialize the model layer with default configuration

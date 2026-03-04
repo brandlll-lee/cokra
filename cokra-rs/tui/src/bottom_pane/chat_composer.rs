@@ -14,8 +14,8 @@ use ratatui::layout::Layout;
 use ratatui::layout::Rect;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::text::Span;
 use ratatui::widgets::Block;
-use ratatui::widgets::Borders;
 use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::Widget;
 
@@ -23,7 +23,6 @@ use super::MentionBinding;
 use super::chat_composer_history::ChatComposerHistory;
 use super::chat_composer_history::HistoryEntry;
 use super::command_popup::CommandPopup;
-use super::slash_commands;
 use super::footer;
 use super::footer::CollaborationModeIndicator;
 use super::footer::FooterMode;
@@ -31,12 +30,17 @@ use super::footer::FooterProps;
 use super::paste_burst::CharDecision;
 use super::paste_burst::FlushResult;
 use super::paste_burst::PasteBurst;
+use super::slash_commands;
 use super::textarea::TextArea;
 use super::textarea::TextAreaState;
 use crate::key_hint;
 use crate::key_hint::has_ctrl_or_alt;
+use crate::render::Insets;
+use crate::render::RectExt as _;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
+use crate::style::user_message_style;
+use crate::ui_consts::LIVE_PREFIX_COLS;
 
 const FOOTER_TRANSIENT_HINT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -81,6 +85,8 @@ pub(crate) struct ChatComposer {
   remote_image_urls: Vec<String>,
   mention_bindings: Vec<MentionBinding>,
   pending_pastes: Vec<(String, String)>,
+  // 1:1 codex: placeholder shown when textarea is empty.
+  placeholder_text: String,
 }
 
 impl ChatComposer {
@@ -88,6 +94,9 @@ impl ChatComposer {
     Self {
       textarea: TextArea::new(),
       textarea_state: RefCell::new(TextAreaState::default()),
+      // 1:1 codex: default placeholder text matching codex's input hint.
+      placeholder_text:
+        "Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts".to_string(),
       is_task_running: false,
       footer_mode: FooterMode::ComposerEmpty,
       footer_timer: None,
@@ -174,36 +183,60 @@ impl ChatComposer {
     self.footer_mode = footer::reset_mode_after_activity(self.footer_mode);
 
     match key {
-      KeyEvent { code: KeyCode::Up, .. }
-      | KeyEvent { code: KeyCode::Char('p'), modifiers: KeyModifiers::CONTROL, .. } => {
+      KeyEvent {
+        code: KeyCode::Up, ..
+      }
+      | KeyEvent {
+        code: KeyCode::Char('p'),
+        modifiers: KeyModifiers::CONTROL,
+        ..
+      } => {
         if let Some(popup) = &mut self.command_popup {
           popup.move_up();
         }
         ComposerAction::None
       }
-      KeyEvent { code: KeyCode::Down, .. }
-      | KeyEvent { code: KeyCode::Char('n'), modifiers: KeyModifiers::CONTROL, .. } => {
+      KeyEvent {
+        code: KeyCode::Down,
+        ..
+      }
+      | KeyEvent {
+        code: KeyCode::Char('n'),
+        modifiers: KeyModifiers::CONTROL,
+        ..
+      } => {
         if let Some(popup) = &mut self.command_popup {
           popup.move_down();
         }
         ComposerAction::None
       }
-      KeyEvent { code: KeyCode::Esc, .. } => {
+      KeyEvent {
+        code: KeyCode::Esc, ..
+      } => {
         // Dismiss the slash popup; keep the current input untouched.
         self.command_popup = None;
         ComposerAction::None
       }
-      KeyEvent { code: KeyCode::Tab, .. } => {
+      KeyEvent {
+        code: KeyCode::Tab, ..
+      } => {
         // Tab = autocomplete the selected command.
         if let Some(popup) = &mut self.command_popup {
-          let first_line = self.textarea.text().lines().next().unwrap_or("").to_string();
+          let first_line = self
+            .textarea
+            .text()
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
           popup.on_composer_text_change(first_line.clone());
           if let Some(cmd) = popup.selected_command() {
             let starts_with_cmd = first_line
               .trim_start()
               .starts_with(&format!("/{}", cmd.command()));
             if !starts_with_cmd {
-              self.textarea
+              self
+                .textarea
                 .set_text_clearing_elements(&format!("/{} ", cmd.command()));
             }
             if !self.textarea.text().is_empty() {
@@ -213,7 +246,11 @@ impl ChatComposer {
         }
         ComposerAction::None
       }
-      KeyEvent { code: KeyCode::Enter, modifiers: KeyModifiers::NONE, .. } => {
+      KeyEvent {
+        code: KeyCode::Enter,
+        modifiers: KeyModifiers::NONE,
+        ..
+      } => {
         // Enter = execute the selected command.
         if let Some(popup) = &self.command_popup {
           if let Some(cmd) = popup.selected_command() {
@@ -226,7 +263,7 @@ impl ChatComposer {
         self.handle_key_event_without_popup(key)
       }
       // All other keys: fall through to handle_input_basic (paste burst + char insert).
-      input => self.handle_input_basic(input)
+      input => self.handle_input_basic(input),
     }
   }
 
@@ -344,7 +381,7 @@ impl ChatComposer {
         self.handle_input_basic(key)
       }
       // Everything else -> handle_input_basic (paste burst + char insert).
-      _ => self.handle_input_basic(key)
+      _ => self.handle_input_basic(key),
     }
   }
 
@@ -370,7 +407,12 @@ impl ChatComposer {
     }
 
     // Intercept plain Char inputs to optionally accumulate into a burst buffer.
-    if let KeyEvent { code: KeyCode::Char(ch), modifiers, .. } = input {
+    if let KeyEvent {
+      code: KeyCode::Char(ch),
+      modifiers,
+      ..
+    } = input
+    {
       let has_ctrl_or_alt = has_ctrl_or_alt(modifiers);
       if !has_ctrl_or_alt {
         // Non-ASCII characters: handle via handle_non_ascii_char (IME path).
@@ -389,9 +431,10 @@ impl ChatComposer {
             let txt = self.textarea.text();
             let safe_cur = Self::clamp_to_char_boundary(txt, cursor);
             let before = &txt[..safe_cur];
-            if let Some(grab) = self
-              .paste_burst
-              .decide_begin_buffer(now, before, retro_chars as usize)
+            if let Some(grab) =
+              self
+                .paste_burst
+                .decide_begin_buffer(now, before, retro_chars as usize)
             {
               if !grab.grabbed.is_empty() {
                 self.textarea.replace_range(grab.start_byte..safe_cur, "");
@@ -480,9 +523,10 @@ impl ChatComposer {
           let txt = self.textarea.text();
           let safe_cur = Self::clamp_to_char_boundary(txt, cur);
           let before = &txt[..safe_cur];
-          if let Some(grab) = self
-            .paste_burst
-            .decide_begin_buffer(now, before, retro_chars as usize)
+          if let Some(grab) =
+            self
+              .paste_burst
+              .decide_begin_buffer(now, before, retro_chars as usize)
           {
             if !grab.grabbed.is_empty() {
               self.textarea.replace_range(grab.start_byte..safe_cur, "");
@@ -707,8 +751,8 @@ impl ChatComposer {
     };
     let [composer_rect, _popup_rect] =
       Layout::vertical([Constraint::Min(3), popup_constraint]).areas(area);
-    let block = Block::default().borders(Borders::ALL);
-    let textarea_rect = block.inner(composer_rect);
+    // 1:1 codex: Insets(top=1, left=LIVE_PREFIX_COLS, bottom=1, right=1) instead of Block border.
+    let textarea_rect = composer_rect.inset(Insets::tlbr(1, LIVE_PREFIX_COLS, 1, 1));
     self
       .textarea
       .cursor_pos_with_state(textarea_rect, *self.textarea_state.borrow())
@@ -761,8 +805,8 @@ impl ChatComposer {
 }
 
 impl Renderable for ChatComposer {
-  // 1:1 codex: layout_areas → render_with_mask.
-  // Layout: [composer_rect (border + textarea)] then [popup_rect (popup OR footer)].
+  // 1:1 codex: render_with_mask.
+  // Layout: [composer_rect (background fill + › prefix + textarea)] then [popup_rect (popup OR footer)].
   // Popup and footer share the SAME slot below the composer.
   fn render(&self, area: Rect, buf: &mut Buffer) {
     if area.height == 0 || area.width == 0 {
@@ -781,15 +825,29 @@ impl Renderable for ChatComposer {
     let [composer_rect, popup_rect] =
       Layout::vertical([Constraint::Min(3), popup_constraint]).areas(area);
 
-    // Render the input border and textarea.
-    let border = if self.input_enabled {
-      Block::default().title("Input").borders(Borders::ALL)
-    } else {
-      Block::default().title("Input".dim()).borders(Borders::ALL)
-    };
-    let textarea_rect = border.inner(composer_rect);
-    border.render(composer_rect, buf);
+    // 1:1 codex: Insets(top=1, left=LIVE_PREFIX_COLS, bottom=1, right=1) — no border, just spacing.
+    let textarea_rect = composer_rect.inset(Insets::tlbr(1, LIVE_PREFIX_COLS, 1, 1));
 
+    // 1:1 codex: fill composer_rect with user_message_style (subtle background tint, no border).
+    let style = user_message_style();
+    Block::default().style(style).render(composer_rect, buf);
+
+    // 1:1 codex: render the › prompt at the left gutter.
+    if !textarea_rect.is_empty() {
+      let prompt = if self.input_enabled {
+        "›".bold()
+      } else {
+        "›".dim()
+      };
+      buf.set_span(
+        textarea_rect.x.saturating_sub(LIVE_PREFIX_COLS),
+        textarea_rect.y,
+        &prompt,
+        textarea_rect.width,
+      );
+    }
+
+    // 1:1 codex: render the textarea content.
     if textarea_rect.height > 0 {
       StatefulWidgetRef::render_ref(
         &&self.textarea,
@@ -797,6 +855,17 @@ impl Renderable for ChatComposer {
         buf,
         &mut self.textarea_state.borrow_mut(),
       );
+    }
+
+    // 1:1 codex: render placeholder text when textarea is empty.
+    if self.textarea.text().is_empty() && !textarea_rect.is_empty() {
+      let text = if self.input_enabled {
+        self.placeholder_text.as_str()
+      } else {
+        "Input disabled."
+      };
+      let placeholder = Span::from(text.to_string()).dim();
+      Line::from(vec![placeholder]).render(textarea_rect, buf);
     }
 
     // Render popup OR footer in the shared bottom slot.
@@ -869,19 +938,20 @@ impl Renderable for ChatComposer {
     }
   }
 
-  // 1:1 codex: desired_height includes popup height when popup is active.
+  // 1:1 codex: desired_height uses Insets (top=1, bottom=1) instead of border (top+bottom=2).
+  // The effective overhead is the same (2 rows) but semantics match codex layout_areas.
   fn desired_height(&self, width: u16) -> u16 {
-    let textarea_h = self
-      .textarea
-      .desired_height(width.saturating_sub(2).max(1))
-      .clamp(1, 8);
+    // 1:1 codex: inner_width = total_width - LIVE_PREFIX_COLS - right_margin(1)
+    const COLS_WITH_MARGIN: u16 = LIVE_PREFIX_COLS + 1;
+    let inner_width = width.saturating_sub(COLS_WITH_MARGIN).max(1);
+    let textarea_h = self.textarea.desired_height(inner_width).clamp(1, 8);
     let popup_or_footer_h = if let Some(popup) = &self.command_popup {
       popup.calculate_required_height(width)
     } else {
       footer::footer_height(&self.footer_props())
     };
     textarea_h
-      .saturating_add(2) // border top + bottom
+      .saturating_add(2) // top inset (1) + bottom inset (1)
       .saturating_add(popup_or_footer_h)
   }
 

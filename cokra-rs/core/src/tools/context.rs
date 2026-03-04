@@ -4,11 +4,17 @@ use std::path::PathBuf;
 use serde::de::DeserializeOwned;
 
 /// Invocation payload passed to a tool handler.
+///
+/// 1:1 codex: includes session-level `cwd` so handlers can resolve paths
+/// against the correct working directory instead of `std::env::current_dir()`.
 #[derive(Debug, Clone)]
 pub struct ToolInvocation {
   pub id: String,
   pub name: String,
   pub arguments: String,
+  /// Session-level working directory. Handlers that accept file paths should
+  /// use this for resolution instead of the process-level cwd.
+  pub cwd: PathBuf,
 }
 
 impl ToolInvocation {
@@ -22,6 +28,23 @@ impl ToolInvocation {
     serde_json::from_str(&self.arguments).map_err(|e| {
       FunctionCallError::InvalidArguments(format!("invalid arguments for {}: {e}", self.name))
     })
+  }
+
+  /// 1:1 codex TurnContext::resolve_path — resolve an optional path against
+  /// the session cwd. If `path` is `None`, returns `self.cwd`. If `path` is
+  /// absolute, returns it as-is. If relative, joins with `self.cwd`.
+  pub fn resolve_path(&self, path: Option<&str>) -> PathBuf {
+    match path {
+      Some(p) => {
+        let pb = PathBuf::from(p);
+        if pb.is_absolute() {
+          pb
+        } else {
+          self.cwd.join(pb)
+        }
+      }
+      None => self.cwd.clone(),
+    }
   }
 }
 
@@ -72,6 +95,8 @@ pub enum FunctionCallError {
   ToolNotFound(String),
   PermissionDenied(String),
   Validation(String),
+  RespondToModel(String),
+  Fatal(String),
   Execution(String),
   Other(String),
 }
@@ -83,6 +108,8 @@ impl fmt::Display for FunctionCallError {
       | FunctionCallError::ToolNotFound(msg)
       | FunctionCallError::PermissionDenied(msg)
       | FunctionCallError::Validation(msg)
+      | FunctionCallError::RespondToModel(msg)
+      | FunctionCallError::Fatal(msg)
       | FunctionCallError::Execution(msg)
       | FunctionCallError::Other(msg) => write!(f, "{msg}"),
     }
