@@ -12,6 +12,7 @@ use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
+use ratatui::prelude::Stylize;
 use ratatui::text::Line;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -31,6 +32,7 @@ use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPaneAction;
 use crate::bottom_pane::approval_overlay::ApprovalOverlay;
 use crate::bottom_pane::approval_overlay::ApprovalRequest;
+use crate::slash_command::SlashCommand;
 use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ChatWidgetAction;
 use crate::chatwidget::TokenUsage;
@@ -167,6 +169,131 @@ impl App {
     Ok(())
   }
 
+  async fn apply_model_selection_or_connect(
+    &mut self,
+    model_id: String,
+    effort: Option<cokra_protocol::ReasoningEffortConfig>,
+  ) -> Result<()> {
+    let provider_id = model_id.split('/').next().unwrap_or("").to_string();
+    if provider_id.is_empty() {
+      self.apply_model_selection(model_id).await?;
+      return Ok(());
+    }
+
+    let has_provider = self
+      .cokra
+      .model_client()
+      .registry()
+      .has_provider(&provider_id)
+      .await;
+    if has_provider {
+      self.apply_model_selection(model_id).await?;
+      return Ok(());
+    }
+
+    self.open_api_key_entry(provider_id, model_id, effort);
+    Ok(())
+  }
+
+  fn open_api_key_entry(
+    &mut self,
+    provider_id: String,
+    model_id: String,
+    effort: Option<cokra_protocol::ReasoningEffortConfig>,
+  ) {
+    use crate::bottom_pane::api_key_entry_view::ApiKeyEntryView;
+
+    let view = ApiKeyEntryView::new(
+      provider_id,
+      model_id,
+      effort,
+      self.app_event_tx.clone(),
+    );
+    self
+      .chat_widget
+      .bottom_pane
+      .push_view(Box::new(view));
+  }
+
+  async fn register_provider_with_api_key(
+    &mut self,
+    provider_id: &str,
+    api_key: String,
+  ) -> Result<()> {
+    use cokra_core::model::providers::AnthropicProvider;
+    use cokra_core::model::providers::GitHubCopilotProvider;
+    use cokra_core::model::providers::GoogleProvider;
+    use cokra_core::model::providers::OpenAIProvider;
+    use cokra_core::model::providers::OpenRouterProvider;
+    use cokra_core::model::ProviderConfig;
+
+    let config = ProviderConfig {
+      provider_id: provider_id.to_string(),
+      api_key: Some(api_key.clone()),
+      base_url: None,
+      ..Default::default()
+    };
+
+    match provider_id {
+      "openai" => {
+        let provider = OpenAIProvider::new(api_key, config.clone());
+        self
+          .cokra
+          .model_client()
+          .registry()
+          .register_with_config(provider, config)
+          .await;
+      }
+      "anthropic" => {
+        let provider = AnthropicProvider::new(api_key, config.clone());
+        self
+          .cokra
+          .model_client()
+          .registry()
+          .register_with_config(provider, config)
+          .await;
+      }
+      "openrouter" => {
+        let provider = OpenRouterProvider::new(api_key, config.clone());
+        self
+          .cokra
+          .model_client()
+          .registry()
+          .register_with_config(provider, config)
+          .await;
+      }
+      "google" => {
+        let provider = GoogleProvider::new(api_key, config.clone());
+        self
+          .cokra
+          .model_client()
+          .registry()
+          .register_with_config(provider, config)
+          .await;
+      }
+      "github" => {
+        let provider = GitHubCopilotProvider::new(api_key, config.clone());
+        self
+          .cokra
+          .model_client()
+          .registry()
+          .register_with_config(provider, config)
+          .await;
+      }
+      _ => {
+        let provider = OpenAIProvider::new(api_key, config.clone());
+        self
+          .cokra
+          .model_client()
+          .registry()
+          .register_with_config(provider, config)
+          .await;
+      }
+    }
+
+    Ok(())
+  }
+
   fn build_exit_info(&self, reason: ExitReason) -> AppExitInfo {
     AppExitInfo {
       token_usage: self.chat_widget.token_usage(),
@@ -179,6 +306,26 @@ impl App {
     match event {
       AppEvent::CodexOp(op) => {
         let _ = self.cokra.submit(op).await?;
+      }
+      AppEvent::OpenAllModelsPopup { providers } => {
+        self.open_all_models_popup(providers);
+      }
+      AppEvent::OpenReasoningPopup { model_id } => {
+        self.open_reasoning_popup(model_id);
+      }
+      AppEvent::ApplyModelSelection { model_id, effort } => {
+        self.apply_model_selection_or_connect(model_id, effort).await?;
+      }
+      AppEvent::ApiKeySubmitted {
+        provider_id,
+        api_key,
+        model_id,
+        effort,
+      } => {
+        self
+          .register_provider_with_api_key(&provider_id, api_key)
+          .await?;
+        self.apply_model_selection_or_connect(model_id, effort).await?;
       }
       AppEvent::InsertHistoryCell(cell) => {
         self.insert_history_cell(cell, tui)?;
@@ -218,11 +365,24 @@ impl App {
       }
       AppEvent::CommitTick => {
         self.chat_widget.on_commit_tick();
-        // CommitTick may have updated the active streaming cell or paused the status
-        // indicator timer; schedule a frame so the change becomes visible.
-        tui.frame_requester().schedule_frame();
       }
-      AppEvent::OpenResumePicker | AppEvent::NewSession | AppEvent::ForkCurrentSession => {}
+      AppEvent::OpenResumePicker => {
+        self.chat_widget.open_resume_picker();
+      }
+      AppEvent::NewSession => {
+        // Clear transcript and push a new session cell.
+        self.transcript_cells.clear();
+        self.transcript_lines_cache.clear();
+        self.has_emitted_history_lines = false;
+        self.chat_widget.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+          Line::from("• New session".dim()),
+        ]));
+      }
+      AppEvent::ForkCurrentSession => {
+        self.chat_widget.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+          Line::from("• Fork current session (not implemented)".dim()),
+        ]));
+      }
     }
     Ok(())
   }
@@ -299,6 +459,14 @@ impl App {
         // Schedule a redraw after every keypress so the compositor
         // reflects the updated textarea/cursor state immediately.
         tui.frame_requester().schedule_frame();
+        // If a paste-burst hold is active (e.g. first fast char like '/'),
+        // schedule a follow-up flush tick so the held char is released
+        // even if no further keypress arrives.
+        if self.chat_widget.bottom_pane.is_in_paste_burst() {
+          tui.frame_requester().schedule_frame_in(
+            crate::bottom_pane::chat_composer::ChatComposer::recommended_paste_flush_delay(),
+          );
+        }
         if let Some(delay) = self.chat_widget.bottom_pane.next_footer_transition_in() {
           tui.frame_requester().schedule_frame_in(delay);
         }
@@ -413,6 +581,9 @@ impl App {
             .await?;
         }
       }
+      BottomPaneAction::SlashCommand(cmd) => {
+        self.dispatch_command(cmd).await?;
+      }
     }
 
     Ok(())
@@ -480,6 +651,344 @@ impl App {
       self.chat_widget.set_agent_turn_running(false);
     }
 
+    Ok(())
+  }
+
+  // 1:1 codex: dispatch_command handles all slash commands at the app layer.
+  async fn dispatch_command(&mut self, cmd: SlashCommand) -> Result<()> {
+    if !cmd.available_during_task() && self.task_running {
+      self.chat_widget.add_to_history(
+        crate::history_cell::PlainHistoryCell::new(vec![Line::from(vec![
+          ratatui::text::Span::from(format!("'/{}' is disabled while a task is in progress.", cmd.command())).into(),
+        ])]),
+      );
+      return Ok(());
+    }
+
+    match cmd {
+      SlashCommand::Model => {
+        self.open_model_popup().await?;
+      }
+      SlashCommand::New => {
+        self.app_event_tx.send(AppEvent::NewSession);
+      }
+      SlashCommand::Resume => {
+        self.app_event_tx.send(AppEvent::OpenResumePicker);
+      }
+      SlashCommand::Fork => {
+        self.app_event_tx.send(AppEvent::ForkCurrentSession);
+      }
+      SlashCommand::Compact => {
+        let _ = self.cokra.submit(Op::Interrupt).await?;
+        self.chat_widget.add_to_history(
+          crate::history_cell::PlainHistoryCell::new(vec![Line::from(
+            "• Context compacted".dim(),
+          )]),
+        );
+      }
+      SlashCommand::Quit | SlashCommand::Exit => {
+        self.exit_info = Some(self.build_exit_info(ExitReason::UserRequested));
+      }
+      SlashCommand::Status => {
+        let usage = self.chat_widget.token_usage();
+        let model = &self.chat_widget.model_name;
+        let lines = vec![
+          Line::from(format!("• Model: {model}")),
+          Line::from(format!(
+            "• Tokens: {} input, {} output, {} total",
+            usage.input_tokens, usage.output_tokens, usage.total_tokens
+          )),
+          Line::from(format!("• Task running: {}", self.task_running)),
+        ];
+        self.chat_widget.add_to_history(
+          crate::history_cell::PlainHistoryCell::new(lines),
+        );
+      }
+      SlashCommand::Diff => {
+        self.chat_widget.add_to_history(
+          crate::history_cell::PlainHistoryCell::new(vec![Line::from(
+            "• /diff is not yet implemented.".dim(),
+          )]),
+        );
+      }
+      // All other commands: show not-yet-implemented message.
+      _ => {
+        self.chat_widget.add_to_history(
+          crate::history_cell::PlainHistoryCell::new(vec![Line::from(
+            format!("• /{}  — not yet implemented.", cmd.command()).dim(),
+          )]),
+        );
+      }
+    }
+    Ok(())
+  }
+
+  async fn open_model_popup(&mut self) -> Result<()> {
+    use crate::bottom_pane::list_selection_view::SelectionAction;
+    use crate::bottom_pane::list_selection_view::SelectionItem;
+    use crate::bottom_pane::list_selection_view::SelectionViewParams;
+    use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+
+    let providers = self
+      .cokra
+      .model_client()
+      .registry()
+      .list_models_catalog()
+      .await;
+    if providers.is_empty() {
+      self.chat_widget.add_to_history(
+        crate::history_cell::PlainHistoryCell::new(vec![Line::from(vec![
+          ratatui::text::Span::from("No models found. ").red(),
+          ratatui::text::Span::from(
+            "models.dev database is empty or unavailable; try again later.",
+          ),
+        ])]),
+      );
+      return Ok(());
+    }
+
+    let current_model = self.chat_widget.model_name.clone();
+
+    let mut all_model_ids: std::collections::HashSet<String> =
+      std::collections::HashSet::new();
+    for provider in &providers {
+      for model in &provider.models {
+        let model_id = if model.starts_with(&format!("{}/", provider.id)) {
+          model.clone()
+        } else {
+          format!("{}/{}", provider.id, model)
+        };
+        all_model_ids.insert(model_id);
+      }
+    }
+
+    let find_candidate = |candidates: &[&str]| -> Option<String> {
+      candidates
+        .iter()
+        .find(|id| all_model_ids.contains(**id))
+        .map(|id| id.to_string())
+    };
+
+    let fast = find_candidate(&[
+      "openai/gpt-4o-mini",
+      "openrouter/openai/gpt-4o-mini",
+      "github/gpt-4o-mini",
+    ]);
+    let balanced = find_candidate(&[
+      "openai/gpt-4o",
+      "openrouter/openai/gpt-4o",
+      "github/gpt-4o",
+    ]);
+    let thorough = find_candidate(&[
+      "openai/o3",
+      "openai/o1",
+      "openrouter/openai/o1",
+      "github/o1-2024-12-17",
+    ]);
+
+    let mut items: Vec<SelectionItem> = Vec::new();
+    let mut push_auto = |label: &str, model_id: Option<String>| {
+      let Some(model_id) = model_id else {
+        return;
+      };
+      let model_for_action = model_id.clone();
+      let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+        tx.send(AppEvent::ApplyModelSelection {
+          model_id: model_for_action.clone(),
+          effort: None,
+        });
+      })];
+      items.push(SelectionItem {
+        name: label.to_string(),
+        description: Some(model_id.clone()),
+        is_current: model_id == current_model,
+        actions,
+        dismiss_on_select: true,
+        search_value: Some(model_id),
+        ..Default::default()
+      });
+    };
+
+    push_auto("Auto fast", fast);
+    push_auto("Auto balanced", balanced);
+    push_auto("Auto thorough", thorough);
+
+    let providers_for_popup = providers.clone();
+    let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+      tx.send(AppEvent::OpenAllModelsPopup {
+        providers: providers_for_popup.clone(),
+      });
+    })];
+    let is_current = !items.iter().any(|item| item.is_current);
+    items.push(SelectionItem {
+      name: "All models".to_string(),
+      description: Some(format!(
+        "Choose a specific model and reasoning level (current: {current_model})"
+      )),
+      is_current,
+      actions,
+      dismiss_on_select: true,
+      ..Default::default()
+    });
+
+    self.chat_widget.bottom_pane.show_selection_view(SelectionViewParams {
+      title: Some("Select Model".to_string()),
+      subtitle: Some("Pick a quick auto mode or browse all models.".to_string()),
+      footer_hint: Some(standard_popup_hint_line()),
+      items,
+      ..Default::default()
+    });
+    Ok(())
+  }
+
+  fn open_all_models_popup(&mut self, providers: Vec<cokra_core::model::ProviderInfo>) {
+    use crate::bottom_pane::list_selection_view::SelectionAction;
+    use crate::bottom_pane::list_selection_view::SelectionItem;
+    use crate::bottom_pane::list_selection_view::SelectionViewParams;
+    use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+
+    let current_model = self.chat_widget.model_name.clone();
+
+    let mut items: Vec<SelectionItem> = Vec::new();
+    for provider in &providers {
+      for (idx, model) in provider.models.iter().enumerate() {
+        let model_id = if model.starts_with(&format!("{}/", provider.id)) {
+          model.clone()
+        } else {
+          format!("{}/{}", provider.id, model)
+        };
+        let model_for_action = model_id.clone();
+        let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+          tx.send(AppEvent::OpenReasoningPopup {
+            model_id: model_for_action.clone(),
+          });
+        })];
+        items.push(SelectionItem {
+          name: model_id.clone(),
+          description: (idx == 0).then_some(provider.name.clone()),
+          is_current: model_id == current_model,
+          actions,
+          dismiss_on_select: true,
+          search_value: Some(model_id),
+          ..Default::default()
+        });
+      }
+    }
+
+    self.chat_widget.bottom_pane.show_selection_view(SelectionViewParams {
+      title: Some("Select Model and Effort".to_string()),
+      subtitle: Some("Type to search models.".to_string()),
+      footer_hint: Some(standard_popup_hint_line()),
+      items,
+      is_searchable: true,
+      search_placeholder: Some("Type to search models".to_string()),
+      ..Default::default()
+    });
+  }
+
+  fn open_reasoning_popup(&mut self, model_id: String) {
+    use crate::bottom_pane::list_selection_view::SelectionAction;
+    use crate::bottom_pane::list_selection_view::SelectionItem;
+    use crate::bottom_pane::list_selection_view::SelectionViewParams;
+    use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+
+    let mut items: Vec<SelectionItem> = Vec::new();
+    let push_effort = |items: &mut Vec<SelectionItem>,
+                       label: &str,
+                       effort: Option<cokra_protocol::ReasoningEffortConfig>| {
+      let model_for_action = model_id.clone();
+      let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+        tx.send(AppEvent::ApplyModelSelection {
+          model_id: model_for_action.clone(),
+          effort: effort.clone(),
+        });
+      })];
+      items.push(SelectionItem {
+        name: label.to_string(),
+        actions,
+        dismiss_on_select: true,
+        ..Default::default()
+      });
+    };
+
+    push_effort(&mut items, "Default", None);
+    push_effort(
+      &mut items,
+      "Minimal",
+      Some(cokra_protocol::ReasoningEffortConfig {
+        effort: cokra_protocol::ReasoningEffort::Minimal,
+      }),
+    );
+    push_effort(
+      &mut items,
+      "Low",
+      Some(cokra_protocol::ReasoningEffortConfig {
+        effort: cokra_protocol::ReasoningEffort::Low,
+      }),
+    );
+    push_effort(
+      &mut items,
+      "Medium",
+      Some(cokra_protocol::ReasoningEffortConfig {
+        effort: cokra_protocol::ReasoningEffort::Medium,
+      }),
+    );
+    push_effort(
+      &mut items,
+      "High",
+      Some(cokra_protocol::ReasoningEffortConfig {
+        effort: cokra_protocol::ReasoningEffort::High,
+      }),
+    );
+
+    self.chat_widget.bottom_pane.show_selection_view(SelectionViewParams {
+      title: Some("Select Reasoning Effort".to_string()),
+      subtitle: Some(model_id),
+      footer_hint: Some(standard_popup_hint_line()),
+      items,
+      ..Default::default()
+    });
+  }
+
+  // 1:1 codex: model_selection_actions sends OverrideTurnContext + UpdateModel +
+  // PersistModelSelection. We collapse into a single method that:
+  //   1. Submits Op::OverrideTurnContext to the core agent loop.
+  //   2. Updates ModelClient default provider (opencode-style persistence).
+  //   3. Updates the local model_name for immediate UI feedback.
+  //   4. Shows a confirmation message in chat history.
+  async fn apply_model_selection(&mut self, model_id: String) -> Result<()> {
+    // 1) Send OverrideTurnContext to switch the active model.
+    let _ = self
+      .cokra
+      .submit(Op::OverrideTurnContext {
+        cwd: None,
+        approval_policy: None,
+        sandbox_policy: None,
+        model: Some(model_id.clone()),
+        collaboration_mode: None,
+        personality: None,
+      })
+      .await?;
+
+    // 2) Persist selection: update ModelClient default provider.
+    //    The model_id may be "provider/model" — extract provider portion.
+    if let Some(provider_id) = model_id.split('/').next() {
+      let _ = self
+        .cokra
+        .model_client()
+        .set_default_provider(provider_id)
+        .await;
+    }
+
+    // 3) Update local model name so the UI reflects the change immediately.
+    self.chat_widget.model_name = model_id.clone();
+
+    // 4) Show confirmation in chat history.
+    self.chat_widget.add_to_history(
+      crate::history_cell::PlainHistoryCell::new(vec![Line::from(format!(
+        "• Model changed to {model_id}"
+      ))]),
+    );
     Ok(())
   }
 

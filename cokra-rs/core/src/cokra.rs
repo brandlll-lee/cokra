@@ -393,6 +393,11 @@ impl Cokra {
     self.session.thread_id()
   }
 
+  /// Access the model client (for listing providers/models in the TUI).
+  pub fn model_client(&self) -> &Arc<ModelClient> {
+    &self.model_client
+  }
+
   pub fn list_thread_ids(&self) -> Vec<cokra_protocol::ThreadId> {
     self.thread_manager.list_thread_ids()
   }
@@ -522,12 +527,17 @@ async fn submission_loop(
 
     match sub.op {
       Op::ConfigureSession {
-        cwd: _,
+        cwd,
         approval_policy,
         sandbox_policy,
         model,
       } => {
+        let approval_policy_str = format!("{approval_policy:?}");
+        let sandbox_mode_str = format!("{sandbox_policy:?}");
         turn_config.model = model.clone();
+        turn_config.approval_policy = approval_policy;
+        turn_config.sandbox_policy = sandbox_policy;
+        turn_config.cwd = cwd;
         agent_control.set_turn_config(turn_config.clone()).await;
         emit_event(
           &tx_event,
@@ -535,8 +545,42 @@ async fn submission_loop(
           EventMsg::SessionConfigured(SessionConfiguredEvent {
             thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
             model,
-            approval_policy: format!("{approval_policy:?}"),
-            sandbox_mode: format!("{sandbox_policy:?}"),
+            approval_policy: approval_policy_str,
+            sandbox_mode: sandbox_mode_str,
+          }),
+        )
+        .await;
+      }
+      Op::OverrideTurnContext {
+        cwd,
+        approval_policy,
+        sandbox_policy,
+        model,
+        collaboration_mode: _,
+        personality: _,
+      } => {
+        if let Some(model) = model {
+          turn_config.model = model;
+        }
+        if let Some(approval_policy) = approval_policy {
+          turn_config.approval_policy = approval_policy;
+        }
+        if let Some(sandbox_policy) = sandbox_policy {
+          turn_config.sandbox_policy = sandbox_policy;
+        }
+        if let Some(cwd) = cwd {
+          turn_config.cwd = cwd;
+        }
+
+        agent_control.set_turn_config(turn_config.clone()).await;
+        emit_event(
+          &tx_event,
+          &event_bus,
+          EventMsg::SessionConfigured(SessionConfiguredEvent {
+            thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
+            model: turn_config.model.clone(),
+            approval_policy: format!("{:?}", turn_config.approval_policy),
+            sandbox_mode: format!("{:?}", turn_config.sandbox_policy),
           }),
         )
         .await;

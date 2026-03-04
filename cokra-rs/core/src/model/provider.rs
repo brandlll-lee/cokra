@@ -200,6 +200,11 @@ pub struct ProviderInfo {
   /// Available models
   pub models: Vec<String>,
 
+  /// Whether models were fetched live from the provider API (true) or fell
+  /// back to the hardcoded default_models() list (false).
+  #[serde(default)]
+  pub is_live: bool,
+
   /// Provider-specific options
   #[serde(default)]
   pub options: serde_json::Value,
@@ -214,6 +219,7 @@ impl ProviderInfo {
       env_vars: Vec::new(),
       authenticated: false,
       models: Vec::new(),
+      is_live: false,
       options: serde_json::json!({}),
     }
   }
@@ -233,6 +239,12 @@ impl ProviderInfo {
   /// Set available models
   pub fn models(mut self, models: Vec<String>) -> Self {
     self.models = models;
+    self
+  }
+
+  /// Set whether models were fetched live
+  pub fn live(mut self, is_live: bool) -> Self {
+    self.is_live = is_live;
     self
   }
 }

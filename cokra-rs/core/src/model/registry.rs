@@ -10,6 +10,7 @@ use super::ModelProvider;
 use super::ProviderConfig;
 use super::error::ModelError;
 use super::error::Result;
+use super::models_dev::ModelsDevClient;
 use super::provider::ProviderInfo;
 
 /// Provider Registry
@@ -20,6 +21,8 @@ pub struct ProviderRegistry {
   providers: RwLock<HashMap<String, Arc<dyn ModelProvider>>>,
   default_provider: RwLock<Option<String>>,
   configs: RwLock<HashMap<String, ProviderConfig>>,
+  /// 1:1 opencode: models.dev client for fetching the complete provider+model database
+  models_dev: ModelsDevClient,
 }
 
 impl Default for ProviderRegistry {
@@ -35,6 +38,7 @@ impl ProviderRegistry {
       providers: RwLock::new(HashMap::new()),
       default_provider: RwLock::new(None),
       configs: RwLock::new(HashMap::new()),
+      models_dev: ModelsDevClient::new(),
     }
   }
 
@@ -144,6 +148,185 @@ impl ProviderRegistry {
           )
       })
       .collect()
+  }
+
+  /// List all providers with their **live** model lists.
+  ///
+  /// 1:1 opencode `Provider.list()` pattern:
+  /// 1. Fetch the models.dev database (all known providers + models)
+  /// 2. For each registered provider, try live `list_models()` API first
+  /// 3. Fall back to models.dev data, then static `default_models()`
+  /// 4. Also include models.dev providers that have env vars set but aren't
+  ///    registered (e.g. mistral, xai, groq, deepinfra, etc.)
+  pub async fn list_models_live(&self) -> Vec<ProviderInfo> {
+    // 1:1 opencode: fetch models.dev database
+    let models_dev_db = self.models_dev.get().await.unwrap_or_default();
+
+    // Snapshot registered providers under the lock, then release before I/O.
+    let snapshot: Vec<(String, Arc<dyn ModelProvider>, bool)> = {
+      let providers = self.providers.read().await;
+      let configs = self.configs.read().await;
+      providers
+        .iter()
+        .map(|(id, provider)| {
+          let authenticated = configs
+            .get(id)
+            .and_then(|c| c.api_key.as_ref())
+            .map(|k| !k.is_empty())
+            .unwrap_or(false);
+          (id.clone(), Arc::clone(provider), authenticated)
+        })
+        .collect()
+    };
+
+    let mut results = Vec::new();
+    let mut seen_provider_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Phase 1: registered providers — try live API, fall back to models.dev, then static
+    for (id, provider, authenticated) in &snapshot {
+      seen_provider_ids.insert(id.clone());
+
+      let (models, is_live): (Vec<String>, bool) = match provider.list_models().await {
+        Ok(response) if !response.data.is_empty() => {
+          (response.data.into_iter().map(|m| m.id).collect(), true)
+        }
+        _ => {
+          // Fall back to models.dev data for this provider
+          if let Some(mdev) = models_dev_db.get(id.as_str()) {
+            let mut models: Vec<String> = mdev.models.keys().cloned().collect();
+            models.sort();
+            if !models.is_empty() {
+              (models, false)
+            } else {
+              (
+                provider
+                  .default_models()
+                  .into_iter()
+                  .map(|s| s.to_string())
+                  .collect(),
+                false,
+              )
+            }
+          } else {
+            (
+              provider
+                .default_models()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+              false,
+            )
+          }
+        }
+      };
+
+      results.push(
+        ProviderInfo::new(provider.provider_id(), provider.provider_name())
+          .env_vars(
+            provider
+              .required_env_vars()
+              .into_iter()
+              .map(|s| s.to_string())
+              .collect(),
+          )
+          .authenticated(*authenticated)
+          .models(models)
+          .live(is_live),
+      );
+    }
+
+    // Phase 2: 1:1 opencode — include models.dev providers that have env vars
+    // set but aren't registered (e.g. mistral, xai, groq, deepinfra, cerebras,
+    // cohere, togetherai, perplexity, etc.)
+    for (provider_id, mdev_provider) in &models_dev_db {
+      if seen_provider_ids.contains(provider_id) {
+        continue;
+      }
+
+      // 1:1 opencode: only include if at least one env var is set
+      let has_auth = mdev_provider
+        .env
+        .iter()
+        .any(|var| std::env::var(var).is_ok());
+      if !has_auth {
+        continue;
+      }
+
+      let mut models: Vec<String> = mdev_provider.models.keys().cloned().collect();
+      models.sort();
+
+      // Filter out deprecated models (1:1 opencode)
+      models.retain(|model_id| {
+        mdev_provider
+          .models
+          .get(model_id)
+          .map(|m| m.status.as_deref() != Some("deprecated"))
+          .unwrap_or(true)
+      });
+
+      if models.is_empty() {
+        continue;
+      }
+
+      results.push(
+        ProviderInfo::new(provider_id.clone(), mdev_provider.name.clone())
+          .env_vars(mdev_provider.env.clone())
+          .authenticated(true)
+          .models(models)
+          .live(false),
+      );
+    }
+
+    // Sort results by provider name for consistent ordering
+    results.sort_by(|a, b| a.name.cmp(&b.name));
+    results
+  }
+
+  pub async fn list_models_catalog(&self) -> Vec<ProviderInfo> {
+    let models_dev_db = self.models_dev.get().await.unwrap_or_default();
+
+    let registered_ids: std::collections::HashSet<String> = {
+      let providers = self.providers.read().await;
+      providers.keys().cloned().collect()
+    };
+
+    let mut results = Vec::new();
+    for (provider_id, mdev_provider) in &models_dev_db {
+      let mut models: Vec<String> = mdev_provider.models.keys().cloned().collect();
+      models.sort();
+      models.retain(|model_id| {
+        mdev_provider
+          .models
+          .get(model_id)
+          .map(|m| m.status.as_deref() != Some("deprecated"))
+          .unwrap_or(true)
+      });
+      if models.is_empty() {
+        continue;
+      }
+
+      let has_env = mdev_provider
+        .env
+        .iter()
+        .any(|var| std::env::var(var).is_ok());
+      let authenticated = registered_ids.contains(provider_id) || has_env;
+
+      results.push(
+        ProviderInfo::new(provider_id.clone(), mdev_provider.name.clone())
+          .env_vars(mdev_provider.env.clone())
+          .authenticated(authenticated)
+          .models(models)
+          .live(false),
+      );
+    }
+
+    results.sort_by(|a, b| a.name.cmp(&b.name));
+    results
+  }
+
+  /// Trigger a background refresh of the models.dev database.
+  pub async fn refresh_models_dev(&self) {
+    let _ = self.models_dev.refresh().await;
   }
 
   /// Check if a provider exists

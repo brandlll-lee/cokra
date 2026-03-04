@@ -16,15 +16,19 @@ use crate::status_indicator_widget::StatusIndicatorWidget;
 use crate::tui::FrameRequester;
 use approval_overlay::ApprovalChoice;
 use approval_overlay::ApprovalOverlay;
+use bottom_pane_view::BottomPaneView;
 use chat_composer::ChatComposer;
 use chat_composer::ComposerAction;
 use chat_composer::ComposerSubmission;
 
 pub(crate) mod approval_overlay;
+pub(crate) mod api_key_entry_view;
+pub(crate) mod bottom_pane_view;
 pub(crate) mod chat_composer;
 pub(crate) mod chat_composer_history;
 pub(crate) mod command_popup;
 pub(crate) mod footer;
+pub(crate) mod list_selection_view;
 pub(crate) mod paste_burst;
 pub(crate) mod popup_consts;
 pub(crate) mod prompt_args;
@@ -52,11 +56,25 @@ pub(crate) enum BottomPaneAction {
   Interrupt,
   RequestQuit,
   ApprovalDecision(ApprovalChoice),
+  /// A slash command was selected from the command popup.
+  SlashCommand(crate::slash_command::SlashCommand),
 }
 
+/// 1:1 codex BottomPane: owns the ChatComposer and a view_stack.
+///
+/// When the view_stack is non-empty, the topmost view **replaces** the
+/// composer in both rendering and key handling. The composer state is
+/// retained underneath so it survives view dismissal.
 pub(crate) struct BottomPane {
+  /// Composer is retained even when a view is displayed.
   composer: ChatComposer,
+
+  /// 1:1 codex view_stack: views displayed instead of the composer.
+  view_stack: Vec<Box<dyn BottomPaneView>>,
+
+  /// Approval overlay renders on top of whatever is active.
   approval_overlay: Option<ApprovalOverlay>,
+
   /// Inline status indicator shown above the composer while a task is running.
   status: Option<StatusIndicatorWidget>,
   app_event_tx: AppEventSender,
@@ -72,6 +90,7 @@ impl BottomPane {
   ) -> Self {
     Self {
       composer: ChatComposer::new(),
+      view_stack: Vec::new(),
       approval_overlay: None,
       status: None,
       app_event_tx,
@@ -157,18 +176,42 @@ impl BottomPane {
     self.approval_overlay = Some(overlay);
   }
 
+  /// 1:1 codex: push a view onto the view_stack.
+  pub(crate) fn push_view(&mut self, view: Box<dyn BottomPaneView>) {
+    self.view_stack.push(view);
+  }
+
+  /// 1:1 codex show_selection_view: convenience to push a ListSelectionView.
+  pub(crate) fn show_selection_view(
+    &mut self,
+    params: list_selection_view::SelectionViewParams,
+  ) {
+    let view = list_selection_view::ListSelectionView::new(params, self.app_event_tx.clone());
+    self.push_view(Box::new(view));
+  }
+
+  /// 1:1 codex: active view is the top of the stack.
+  fn active_view(&self) -> Option<&dyn BottomPaneView> {
+    self.view_stack.last().map(|v| v.as_ref())
+  }
+
   pub(crate) fn desired_height(&self, width: u16) -> u16 {
     self.as_renderable().desired_height(width)
   }
 
   pub(crate) fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-    if self.approval_overlay.is_some() {
+    if self.approval_overlay.is_some() || !self.view_stack.is_empty() {
       return None;
     }
     self.as_renderable().cursor_pos(area)
   }
 
+  /// 1:1 codex: key event routing.
+  /// Layer 1: approval overlay (highest priority)
+  /// Layer 2: view_stack top (replaces composer)
+  /// Layer 3: composer (default)
   pub(crate) fn handle_key(&mut self, key: KeyEvent) -> BottomPaneAction {
+    // Layer 1: approval overlay intercepts everything.
     if let Some(overlay) = self.approval_overlay.as_mut() {
       match key.code {
         KeyCode::Left => overlay.move_left(),
@@ -187,6 +230,29 @@ impl BottomPane {
       return BottomPaneAction::None;
     }
 
+    // Layer 2: 1:1 codex view_stack routing.
+    if !self.view_stack.is_empty() {
+      let last_idx = self.view_stack.len() - 1;
+      let view = &mut self.view_stack[last_idx];
+
+      if key.code == KeyCode::Esc {
+        if view.on_cancel() {
+          self.view_stack.pop();
+          return BottomPaneAction::None;
+        }
+      }
+
+      view.handle_key_event(key);
+
+      if view.is_complete() {
+        self.view_stack.pop();
+        return BottomPaneAction::None;
+      }
+
+      return BottomPaneAction::None;
+    }
+
+    // Layer 3: composer (default).
     match self.composer.handle_key_event(key) {
       ComposerAction::None | ComposerAction::Queue => BottomPaneAction::None,
       ComposerAction::Interrupt => BottomPaneAction::Interrupt,
@@ -196,6 +262,9 @@ impl BottomPane {
         .prepare_submission()
         .map(BottomPaneAction::Submit)
         .unwrap_or(BottomPaneAction::None),
+      ComposerAction::SlashCommand(cmd) => {
+        BottomPaneAction::SlashCommand(cmd)
+      }
     }
   }
 
@@ -203,14 +272,21 @@ impl BottomPane {
     self.composer.handle_paste(text);
   }
 
-  // 1:1 codex: compose status (flex=0) + composer (flex=0) using FlexRenderable.
+  /// 1:1 codex as_renderable: when view_stack is non-empty, the topmost view
+  /// **replaces** the composer entirely. When empty, render status + composer.
   fn as_renderable(&self) -> RenderableItem<'_> {
-    let mut flex = FlexRenderable::new();
-    if let Some(status) = &self.status {
-      flex.push(0, RenderableItem::Borrowed(status as &dyn Renderable));
+    if let Some(view) = self.active_view() {
+      // 1:1 codex: view replaces composer.
+      RenderableItem::Borrowed(view as &dyn Renderable)
+    } else {
+      // 1:1 codex: compose status (flex=0) + composer (flex=0).
+      let mut flex = FlexRenderable::new();
+      if let Some(status) = &self.status {
+        flex.push(0, RenderableItem::Borrowed(status as &dyn Renderable));
+      }
+      flex.push(0, RenderableItem::Borrowed(&self.composer as &dyn Renderable));
+      RenderableItem::Owned(Box::new(flex))
     }
-    flex.push(0, RenderableItem::Borrowed(&self.composer as &dyn Renderable));
-    RenderableItem::Owned(Box::new(flex))
   }
 
   pub(crate) fn render(&self, area: Rect, buf: &mut Buffer, _task_running: bool) {
@@ -218,6 +294,7 @@ impl BottomPane {
       return;
     }
     self.as_renderable().render(area, buf);
+    // Approval overlay renders on top of whatever is active.
     if let Some(overlay) = &self.approval_overlay {
       overlay.render(area, buf);
     }

@@ -166,6 +166,13 @@ impl ConfigLoader {
           config.models.base_url = Some(value.to_string());
         }
       }
+      "models.api_key" => {
+        if value.is_empty() {
+          config.models.api_key = None;
+        } else {
+          config.models.api_key = Some(value.to_string());
+        }
+      }
       _ => {
         anyhow::bail!("Unknown config key: {}", key);
       }

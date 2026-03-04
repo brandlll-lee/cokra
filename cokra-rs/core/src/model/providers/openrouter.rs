@@ -196,13 +196,49 @@ impl ModelProvider for OpenRouterProvider {
 
     if response.status().is_success() {
       let body = response.text().await.map_err(ModelError::NetworkError)?;
-      let parsed = serde_json::from_str::<ListModelsResponse>(&body)
-        .map_err(|e| ModelError::InvalidResponse(format!("failed to parse models: {e}")));
-      if let Ok(models) = parsed {
-        return Ok(models);
+
+      // First try standard OpenAI list-models format
+      if let Ok(models) = serde_json::from_str::<ListModelsResponse>(&body) {
+        if !models.data.is_empty() {
+          return Ok(models);
+        }
+      }
+
+      // OpenRouter uses a slightly different format: { "data": [{ "id": "...", ... }] }
+      // where each item may have extra fields. Try to extract just the IDs.
+      #[derive(serde::Deserialize)]
+      struct OpenRouterModelsResponse {
+        data: Vec<OpenRouterModelEntry>,
+      }
+      #[derive(serde::Deserialize)]
+      struct OpenRouterModelEntry {
+        id: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        created: Option<u64>,
+      }
+
+      if let Ok(or_resp) = serde_json::from_str::<OpenRouterModelsResponse>(&body) {
+        if !or_resp.data.is_empty() {
+          return Ok(ListModelsResponse {
+            object_type: "list".to_string(),
+            data: or_resp
+              .data
+              .into_iter()
+              .map(|m| ModelInfo {
+                id: m.id,
+                object_type: "model".to_string(),
+                created: m.created.unwrap_or(0),
+                owned_by: Some("openrouter".to_string()),
+              })
+              .collect(),
+          });
+        }
       }
     }
 
+    // Fallback to static list
     Ok(ListModelsResponse {
       object_type: "list".to_string(),
       data: OPENROUTER_MODELS

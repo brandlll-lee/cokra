@@ -1,11 +1,10 @@
-use crossterm::event::KeyCode;
-use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use super::popup_consts::MAX_POPUP_ROWS;
 use super::scroll_state::ScrollState;
 use super::selection_popup_common::GenericDisplayRow;
+use super::selection_popup_common::measure_rows_height;
 use super::selection_popup_common::render_rows;
 use super::slash_commands;
 use crate::render::Insets;
@@ -20,13 +19,6 @@ pub(crate) struct CommandItem {
   pub command: SlashCommand,
   pub display_name: String,
   pub description: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CommandPopupAction {
-  None,
-  Dismiss,
-  Select(SlashCommand),
 }
 
 #[derive(Debug)]
@@ -55,7 +47,9 @@ impl CommandPopup {
     }
   }
 
-  pub(crate) fn update_filter(&mut self, text: &str) {
+  /// Update the filter string based on the current composer text.
+  /// 1:1 codex: `CommandPopup::on_composer_text_change`.
+  pub(crate) fn on_composer_text_change(&mut self, text: String) {
     let first_line = text.lines().next().unwrap_or("");
 
     if let Some(stripped) = first_line.strip_prefix('/') {
@@ -71,27 +65,39 @@ impl CommandPopup {
     self.scroll.ensure_visible(len, MAX_POPUP_ROWS.min(len));
   }
 
-  pub(crate) fn handle_key(&mut self, key: KeyEvent) -> CommandPopupAction {
-    match key.code {
-      KeyCode::Esc => CommandPopupAction::Dismiss,
-      KeyCode::Up => {
-        let len = self.filtered_commands().len();
-        self.scroll.move_up_wrap(len);
-        self.scroll.ensure_visible(len, MAX_POPUP_ROWS.min(len));
-        CommandPopupAction::None
-      }
-      KeyCode::Down => {
-        let len = self.filtered_commands().len();
-        self.scroll.move_down_wrap(len);
-        self.scroll.ensure_visible(len, MAX_POPUP_ROWS.min(len));
-        CommandPopupAction::None
-      }
-      KeyCode::Enter => self
-        .selected_command()
-        .map(CommandPopupAction::Select)
-        .unwrap_or(CommandPopupAction::Dismiss),
-      _ => CommandPopupAction::None,
+  /// Move the selection cursor one step up.
+  pub(crate) fn move_up(&mut self) {
+    let len = self.filtered_commands().len();
+    self.scroll.move_up_wrap(len);
+    self.scroll.ensure_visible(len, MAX_POPUP_ROWS.min(len));
+  }
+
+  /// Move the selection cursor one step down.
+  pub(crate) fn move_down(&mut self) {
+    let len = self.filtered_commands().len();
+    self.scroll.move_down_wrap(len);
+    self.scroll.ensure_visible(len, MAX_POPUP_ROWS.min(len));
+  }
+
+  /// Determine the preferred height of the popup for a given width.
+  /// 1:1 codex: CommandPopup::calculate_required_height.
+  pub(crate) fn calculate_required_height(&self, width: u16) -> u16 {
+    let rows = self.render_rows_data();
+    measure_rows_height(&rows, &self.scroll, MAX_POPUP_ROWS, width)
+  }
+
+  /// Return currently selected command, if any.
+  pub(crate) fn selected_command(&self) -> Option<SlashCommand> {
+    let filtered = self.filtered_commands();
+    if filtered.is_empty() {
+      return None;
     }
+    let idx = self
+      .scroll
+      .selected_idx
+      .unwrap_or(0)
+      .min(filtered.len() - 1);
+    filtered.get(idx).copied()
   }
 
   fn filtered(&self) -> Vec<(usize, Option<Vec<usize>>)> {
@@ -135,19 +141,6 @@ impl CommandPopup {
       .collect()
   }
 
-  fn selected_command(&self) -> Option<SlashCommand> {
-    let filtered = self.filtered_commands();
-    if filtered.is_empty() {
-      return None;
-    }
-    let idx = self
-      .scroll
-      .selected_idx
-      .unwrap_or(0)
-      .min(filtered.len() - 1);
-    filtered.get(idx).copied()
-  }
-
   fn render_rows_data(&self) -> Vec<GenericDisplayRow> {
     self
       .filtered()
@@ -186,7 +179,7 @@ mod tests {
   #[test]
   fn exact_match_ranks_first() {
     let mut popup = CommandPopup::new(true);
-    popup.update_filter("/model");
+    popup.on_composer_text_change("/model".to_string());
     assert_eq!(popup.selected_command(), Some(SlashCommand::Model));
   }
 

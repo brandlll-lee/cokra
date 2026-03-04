@@ -141,6 +141,78 @@ pub async fn register_all_providers(
   // Set default provider from config
   if !config.models.provider.is_empty() {
     let default_provider = &config.models.provider;
+
+    // 1:1 opencode: ensure the configured provider is registered even if
+    // the corresponding env var was not set. The user explicitly asked for
+    // this provider via `-c models.provider=<id>`, so we should honour it.
+    // The API key can come from the config, env, or even be absent (for
+    // providers like ollama/lmstudio that don't need auth).
+    if !registry.has_provider(default_provider).await {
+      let api_key = config.models.api_key.clone().unwrap_or_default();
+      let provider_config = ProviderConfig {
+        provider_id: default_provider.to_string(),
+        api_key: if api_key.is_empty() {
+          None
+        } else {
+          Some(api_key.clone())
+        },
+        base_url: provider_base_url(config, default_provider),
+        ..Default::default()
+      };
+      match default_provider.as_str() {
+        "openai" => {
+          let p = OpenAIProvider::new(api_key, provider_config);
+          registry
+            .register_with_config(p, config_to_provider_config(config, default_provider))
+            .await;
+        }
+        "anthropic" => {
+          let p = AnthropicProvider::new(api_key, provider_config);
+          registry
+            .register_with_config(p, config_to_provider_config(config, default_provider))
+            .await;
+        }
+        "openrouter" => {
+          let p = OpenRouterProvider::new(api_key, provider_config);
+          registry
+            .register_with_config(p, config_to_provider_config(config, default_provider))
+            .await;
+        }
+        "google" => {
+          let p = GoogleProvider::new(api_key, provider_config);
+          registry
+            .register_with_config(p, config_to_provider_config(config, default_provider))
+            .await;
+        }
+        "ollama" => {
+          let p = OllamaProvider::new(provider_base_url(config, default_provider));
+          registry
+            .register_with_config(p, config_to_provider_config(config, default_provider))
+            .await;
+        }
+        "lmstudio" => {
+          let p = LMStudioProvider::new(provider_base_url(config, default_provider));
+          registry
+            .register_with_config(p, config_to_provider_config(config, default_provider))
+            .await;
+        }
+        "github" => {
+          let p = GitHubCopilotProvider::new(api_key, provider_config);
+          registry
+            .register_with_config(p, config_to_provider_config(config, default_provider))
+            .await;
+        }
+        _ => {
+          // Unknown provider — treat as OpenAI-compatible (like opencode's
+          // createOpenAICompatible fallback).
+          let p = OpenAIProvider::new(api_key, provider_config);
+          registry
+            .register_with_config(p, config_to_provider_config(config, default_provider))
+            .await;
+        }
+      }
+    }
+
     registry.set_default(default_provider).await.ok();
   }
 

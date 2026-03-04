@@ -12,6 +12,7 @@
 pub mod client;
 pub mod error;
 pub mod metadata;
+pub mod models_dev;
 pub mod provider;
 pub mod registry;
 pub mod streaming;

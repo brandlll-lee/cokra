@@ -1,4 +1,7 @@
 use cokra_protocol::Op;
+use cokra_protocol::ReasoningEffortConfig;
+
+use cokra_core::model::ProviderInfo;
 
 use crate::history_cell::HistoryCell;
 
@@ -26,4 +29,22 @@ pub(crate) enum AppEvent {
   OpenResumePicker,
   NewSession,
   ForkCurrentSession,
+
+  OpenAllModelsPopup {
+    providers: Vec<ProviderInfo>,
+  },
+  OpenReasoningPopup {
+    model_id: String,
+  },
+  ApplyModelSelection {
+    model_id: String,
+    effort: Option<ReasoningEffortConfig>,
+  },
+
+  ApiKeySubmitted {
+    provider_id: String,
+    api_key: String,
+    model_id: String,
+    effort: Option<ReasoningEffortConfig>,
+  },
 }

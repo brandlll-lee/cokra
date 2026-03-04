@@ -70,7 +70,7 @@ pub(crate) struct ChatWidget {
   chunking_policy: AdaptiveChunkingPolicy,
   pub(crate) bottom_pane: BottomPane,
   token_usage: TokenUsage,
-  model_name: String,
+  pub(crate) model_name: String,
   agent_turn_running: bool,
   has_seen_session_configured: bool,
   pending_exec_calls: HashMap<String, ExecCall>,
@@ -149,6 +149,12 @@ impl ChatWidget {
 
   pub(crate) fn push_user_input_text(&mut self, text: String) {
     self.add_to_history(UserHistoryCell::from_text(text));
+  }
+
+  pub(crate) fn open_resume_picker(&mut self) {
+    self.add_to_history(PlainHistoryCell::new(vec![Line::from(
+      "• /resume is not yet implemented.".dim(),
+    )]));
   }
 
   pub(crate) fn handle_event(&mut self, event: &EventMsg) -> Option<ChatWidgetAction> {

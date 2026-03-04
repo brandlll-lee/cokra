@@ -246,6 +246,8 @@ pub struct ModelsConfig {
   pub model: String,
   /// Base URL for API
   pub base_url: Option<String>,
+  /// API key (optional — falls back to environment variable)
+  pub api_key: Option<String>,
 }
 
 impl Default for ModelsConfig {
@@ -254,6 +256,7 @@ impl Default for ModelsConfig {
       provider: "openai".to_string(),
       model: "gpt-5.2-codex".to_string(),
       base_url: None,
+      api_key: None,
     }
   }
 }

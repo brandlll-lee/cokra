@@ -23,7 +23,7 @@ use super::MentionBinding;
 use super::chat_composer_history::ChatComposerHistory;
 use super::chat_composer_history::HistoryEntry;
 use super::command_popup::CommandPopup;
-use super::command_popup::CommandPopupAction;
+use super::slash_commands;
 use super::footer;
 use super::footer::CollaborationModeIndicator;
 use super::footer::FooterMode;
@@ -55,6 +55,8 @@ pub(crate) enum ComposerAction {
   Queue,
   Interrupt,
   RequestQuit,
+  /// A slash command was selected and should be dispatched by the upper layer.
+  SlashCommand(SlashCommand),
 }
 
 #[derive(Debug)]
@@ -144,58 +146,93 @@ impl ChatComposer {
     Some(FOOTER_TRANSIENT_HINT_TIMEOUT.saturating_sub(elapsed))
   }
 
+  // 1:1 codex: handle_key_event is a clean dispatcher.
+  // When a popup is visible, ALL keys route to a popup-specific handler.
+  // When no popup, keys route to handle_key_event_without_popup.
+  // After every handled key, sync_command_popup() runs.
   pub(crate) fn handle_key_event(&mut self, key: KeyEvent) -> ComposerAction {
-    let now = Instant::now();
-    self.flush_burst_if_due(now);
-
-    if let Some(popup) = &mut self.command_popup {
-      match popup.handle_key(key) {
-        CommandPopupAction::Select(cmd) => {
-          self.apply_slash_command(cmd);
-          self.command_popup = None;
-          return ComposerAction::None;
-        }
-        CommandPopupAction::Dismiss => {
-          self.command_popup = None;
-          return ComposerAction::None;
-        }
-        CommandPopupAction::None => {}
-      }
-    }
-
-    if let KeyCode::Char(ch) = key.code
-      && !has_ctrl_or_alt(key.modifiers)
-      && !key.modifiers.contains(KeyModifiers::SHIFT)
-    {
-      let handled = if ch.is_ascii() {
-        self.handle_ascii_char(ch, now)
-      } else {
-        self.handle_non_ascii_char(ch, now)
-      };
-      if handled {
-        self.sync_command_popup();
-        self.footer_mode = footer::reset_mode_after_activity(self.footer_mode);
-        return ComposerAction::None;
-      }
-    }
-
     if !self.input_enabled {
       return ComposerAction::None;
     }
 
-    if let Some(flush_text) = self.paste_burst.flush_before_modified_input()
-      && !flush_text.is_empty()
-    {
-      self.handle_paste(flush_text);
-    }
+    let action = if self.command_popup.is_some() {
+      self.handle_key_event_with_slash_popup(key)
+    } else {
+      self.handle_key_event_without_popup(key)
+    };
 
-    let action = self.handle_key_event_without_popup(key, now);
-    self.paste_burst.clear_window_after_non_char();
+    // Update (or hide/show) popup after processing the key.
     self.sync_command_popup();
+
     action
   }
 
-  fn handle_key_event_without_popup(&mut self, key: KeyEvent, now: Instant) -> ComposerAction {
+  // 1:1 codex: handle_key_event_with_slash_popup.
+  // When the slash-command popup is visible, intercept Up/Down/Esc/Tab/Enter;
+  // everything else falls through to handle_input_basic.
+  fn handle_key_event_with_slash_popup(&mut self, key: KeyEvent) -> ComposerAction {
+    self.footer_mode = footer::reset_mode_after_activity(self.footer_mode);
+
+    match key {
+      KeyEvent { code: KeyCode::Up, .. }
+      | KeyEvent { code: KeyCode::Char('p'), modifiers: KeyModifiers::CONTROL, .. } => {
+        if let Some(popup) = &mut self.command_popup {
+          popup.move_up();
+        }
+        ComposerAction::None
+      }
+      KeyEvent { code: KeyCode::Down, .. }
+      | KeyEvent { code: KeyCode::Char('n'), modifiers: KeyModifiers::CONTROL, .. } => {
+        if let Some(popup) = &mut self.command_popup {
+          popup.move_down();
+        }
+        ComposerAction::None
+      }
+      KeyEvent { code: KeyCode::Esc, .. } => {
+        // Dismiss the slash popup; keep the current input untouched.
+        self.command_popup = None;
+        ComposerAction::None
+      }
+      KeyEvent { code: KeyCode::Tab, .. } => {
+        // Tab = autocomplete the selected command.
+        if let Some(popup) = &mut self.command_popup {
+          let first_line = self.textarea.text().lines().next().unwrap_or("").to_string();
+          popup.on_composer_text_change(first_line.clone());
+          if let Some(cmd) = popup.selected_command() {
+            let starts_with_cmd = first_line
+              .trim_start()
+              .starts_with(&format!("/{}", cmd.command()));
+            if !starts_with_cmd {
+              self.textarea
+                .set_text_clearing_elements(&format!("/{} ", cmd.command()));
+            }
+            if !self.textarea.text().is_empty() {
+              self.textarea.set_cursor(self.textarea.text().len());
+            }
+          }
+        }
+        ComposerAction::None
+      }
+      KeyEvent { code: KeyCode::Enter, modifiers: KeyModifiers::NONE, .. } => {
+        // Enter = execute the selected command.
+        if let Some(popup) = &self.command_popup {
+          if let Some(cmd) = popup.selected_command() {
+            self.command_popup = None;
+            return self.apply_slash_command(cmd);
+          }
+        }
+        // Fallback to default submit handling if no command selected.
+        self.command_popup = None;
+        self.handle_key_event_without_popup(key)
+      }
+      // All other keys: fall through to handle_input_basic (paste burst + char insert).
+      input => self.handle_input_basic(input)
+    }
+  }
+
+  // 1:1 codex: handle_key_event_without_popup.
+  fn handle_key_event_without_popup(&mut self, key: KeyEvent) -> ComposerAction {
+    let now = Instant::now();
     match (key.code, key.modifiers) {
       (KeyCode::Char('c'), mods) if mods.contains(KeyModifiers::CONTROL) => {
         if self.is_task_running {
@@ -215,7 +252,7 @@ impl ChatComposer {
         self.history.reset_navigation();
         self.footer_mode = FooterMode::ComposerEmpty;
         self.footer_timer = None;
-        return ComposerAction::None;
+        ComposerAction::None
       }
       (KeyCode::Enter, KeyModifiers::NONE) => {
         if self
@@ -228,13 +265,13 @@ impl ChatComposer {
         if self.is_task_running {
           return ComposerAction::Queue;
         }
-        return ComposerAction::Submit;
+        ComposerAction::Submit
       }
       (KeyCode::Enter, KeyModifiers::SHIFT) => {
         self.textarea.insert_str("\n");
         self.history.reset_navigation();
         self.footer_mode = FooterMode::ComposerHasDraft;
-        return ComposerAction::None;
+        ComposerAction::None
       }
       (KeyCode::Tab, KeyModifiers::NONE) => {
         if self.steer_enabled && self.is_task_running {
@@ -246,18 +283,18 @@ impl ChatComposer {
         self.textarea.insert_str("  ");
         self.history.reset_navigation();
         self.footer_mode = FooterMode::ComposerHasDraft;
-        return ComposerAction::None;
+        ComposerAction::None
       }
       (KeyCode::BackTab, _) => {
         self.collaboration_modes_enabled = !self.collaboration_modes_enabled;
         self.footer_mode = footer::reset_mode_after_activity(self.footer_mode);
-        return ComposerAction::None;
+        ComposerAction::None
       }
       (KeyCode::Char('?'), KeyModifiers::NONE) if self.textarea.is_empty() => {
         self.footer_mode =
           footer::toggle_shortcut_mode(self.footer_mode, false, self.textarea.is_empty());
         self.footer_timer = None;
-        return ComposerAction::None;
+        ComposerAction::None
       }
       (KeyCode::Esc, _) => {
         if self.textarea.is_empty() && self.footer_mode() == FooterMode::EscHint {
@@ -274,108 +311,196 @@ impl ChatComposer {
           return ComposerAction::None;
         }
         self.footer_mode = footer::reset_mode_after_activity(self.footer_mode);
-        return ComposerAction::None;
+        ComposerAction::None
       }
       (KeyCode::Char('k'), mods) if mods.contains(KeyModifiers::CONTROL) => {
         self.textarea.kill_to_end_of_line();
         self.history.reset_navigation();
-        return ComposerAction::None;
+        ComposerAction::None
       }
       (KeyCode::Char('y'), mods) if mods.contains(KeyModifiers::CONTROL) => {
         self.textarea.yank();
         self.history.reset_navigation();
-        return ComposerAction::None;
+        ComposerAction::None
       }
       (KeyCode::Char('w'), mods) if mods.contains(KeyModifiers::CONTROL) => {
         self.textarea.delete_backward_word();
         self.history.reset_navigation();
-        return ComposerAction::None;
+        ComposerAction::None
       }
-      (KeyCode::Up, mods) if mods.contains(KeyModifiers::CONTROL) => {
-        self.handle_up_key();
-        return ComposerAction::None;
+      // History navigation
+      (KeyCode::Up, _) | (KeyCode::Down, _) => {
+        if self
+          .history
+          .should_handle_navigation(self.textarea.text(), self.textarea.cursor())
+        {
+          match key.code {
+            KeyCode::Up => self.handle_up_key(),
+            KeyCode::Down => self.handle_down_key(),
+            _ => unreachable!(),
+          }
+          return ComposerAction::None;
+        }
+        self.handle_input_basic(key)
       }
-      (KeyCode::Down, mods) if mods.contains(KeyModifiers::CONTROL) => {
-        self.handle_down_key();
-        return ComposerAction::None;
-      }
-      (KeyCode::Char('/'), KeyModifiers::NONE) if self.textarea.is_empty() => {
-        self.textarea.insert_str("/");
-        self.command_popup = Some(CommandPopup::new(self.collaboration_modes_enabled));
-        self.sync_command_popup();
-        return ComposerAction::None;
-      }
-      _ => {}
+      // Everything else -> handle_input_basic (paste burst + char insert).
+      _ => self.handle_input_basic(key)
+    }
+  }
+
+  // 1:1 codex: handle_input_basic.
+  // Handles keys that mutate the textarea, including paste-burst detection.
+  // This is the lowest-level keypath for keys that mutate the textarea.
+  fn handle_input_basic(&mut self, input: KeyEvent) -> ComposerAction {
+    let now = Instant::now();
+
+    // Always flush any *due* paste burst first.
+    self.flush_burst_if_due(now);
+
+    if !matches!(input.code, KeyCode::Esc) {
+      self.footer_mode = footer::reset_mode_after_activity(self.footer_mode);
     }
 
-    self.textarea.input(key);
+    // If we're capturing a burst and receive Enter, accumulate it.
+    if matches!(input.code, KeyCode::Enter)
+      && self.paste_burst.is_active()
+      && self.paste_burst.append_newline_if_active(now)
+    {
+      return ComposerAction::None;
+    }
+
+    // Intercept plain Char inputs to optionally accumulate into a burst buffer.
+    if let KeyEvent { code: KeyCode::Char(ch), modifiers, .. } = input {
+      let has_ctrl_or_alt = has_ctrl_or_alt(modifiers);
+      if !has_ctrl_or_alt {
+        // Non-ASCII characters: handle via handle_non_ascii_char (IME path).
+        if !ch.is_ascii() {
+          return self.handle_non_ascii_char_action(ch, now);
+        }
+
+        // ASCII characters: paste burst detection.
+        match self.paste_burst.on_plain_char(ch, now) {
+          CharDecision::BufferAppend => {
+            self.paste_burst.append_char_to_buffer(ch, now);
+            return ComposerAction::None;
+          }
+          CharDecision::BeginBuffer { retro_chars } => {
+            let cursor = self.textarea.cursor();
+            let txt = self.textarea.text();
+            let safe_cur = Self::clamp_to_char_boundary(txt, cursor);
+            let before = &txt[..safe_cur];
+            if let Some(grab) = self
+              .paste_burst
+              .decide_begin_buffer(now, before, retro_chars as usize)
+            {
+              if !grab.grabbed.is_empty() {
+                self.textarea.replace_range(grab.start_byte..safe_cur, "");
+              }
+              self.paste_burst.append_char_to_buffer(ch, now);
+              return ComposerAction::None;
+            }
+            // Fall through to normal insertion below.
+          }
+          CharDecision::BeginBufferFromPending => {
+            self.paste_burst.append_char_to_buffer(ch, now);
+            return ComposerAction::None;
+          }
+          CharDecision::RetainFirstChar => {
+            return ComposerAction::None;
+          }
+        }
+      }
+      if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
+        self.handle_paste(pasted);
+      }
+    }
+
+    // Flush any buffered burst before applying a non-char input.
+    if !matches!(input.code, KeyCode::Char(_) | KeyCode::Enter) {
+      if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
+        self.handle_paste(pasted);
+      }
+    }
+
+    // For non-char inputs (or after flushing), handle normally.
+    self.textarea.input(input);
     self.history.reset_navigation();
-    self.footer_mode = footer::reset_mode_after_activity(self.footer_mode);
+
+    // Update paste-burst heuristic.
+    match input.code {
+      KeyCode::Char(_) => {
+        if has_ctrl_or_alt(input.modifiers) {
+          self.paste_burst.clear_window_after_non_char();
+        }
+      }
+      KeyCode::Enter => {
+        // Keep burst window alive (supports blank lines in paste).
+      }
+      _ => {
+        self.paste_burst.clear_window_after_non_char();
+      }
+    }
+
     ComposerAction::None
   }
 
-  fn handle_ascii_char(&mut self, ch: char, now: Instant) -> bool {
-    match self.paste_burst.on_plain_char(ch, now) {
-      CharDecision::RetainFirstChar => true,
-      CharDecision::BeginBufferFromPending => {
-        self.paste_burst.append_char_to_buffer(ch, now);
-        true
-      }
-      CharDecision::BufferAppend => {
-        self.paste_burst.append_char_to_buffer(ch, now);
-        true
-      }
-      CharDecision::BeginBuffer { retro_chars } => {
-        let cursor = self.textarea.cursor();
-        let before = &self.textarea.text()[..cursor];
-        if let Some(grab) = self
-          .paste_burst
-          .decide_begin_buffer(now, before, retro_chars as usize)
-        {
-          self.textarea.replace_range(grab.start_byte..cursor, "");
-          self.paste_burst.append_char_to_buffer(ch, now);
-          return true;
-        }
-        self.textarea.insert_str(&ch.to_string());
-        self.history.reset_navigation();
-        false
-      }
+  #[inline]
+  fn clamp_to_char_boundary(text: &str, pos: usize) -> usize {
+    let mut p = pos.min(text.len());
+    if p < text.len() && !text.is_char_boundary(p) {
+      p = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|&i| i <= p)
+        .last()
+        .unwrap_or(0);
     }
+    p
   }
 
-  fn handle_non_ascii_char(&mut self, ch: char, now: Instant) -> bool {
-    let Some(decision) = self.paste_burst.on_plain_char_no_hold(now) else {
-      self.textarea.insert_str(&ch.to_string());
-      self.history.reset_navigation();
-      return false;
-    };
-
-    match decision {
-      CharDecision::BufferAppend => {
-        self.paste_burst.append_char_to_buffer(ch, now);
-        true
-      }
-      CharDecision::BeginBuffer { retro_chars } => {
-        let cursor = self.textarea.cursor();
-        let before = &self.textarea.text()[..cursor];
-        if let Some(grab) = self
-          .paste_burst
-          .decide_begin_buffer(now, before, retro_chars as usize)
-        {
-          self.textarea.replace_range(grab.start_byte..cursor, "");
+  // 1:1 codex: handle_non_ascii_char (IME path).
+  // Non-ASCII input (e.g. Chinese) never holds the first char, but still
+  // supports paste-burst detection. Returns ComposerAction directly.
+  fn handle_non_ascii_char_action(&mut self, ch: char, now: Instant) -> ComposerAction {
+    if self.paste_burst.try_append_char_if_active(ch, now) {
+      return ComposerAction::None;
+    }
+    // Flush any existing burst buffer before applying non-ASCII input.
+    if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
+      self.handle_paste(pasted);
+    }
+    if let Some(decision) = self.paste_burst.on_plain_char_no_hold(now) {
+      match decision {
+        CharDecision::BufferAppend => {
           self.paste_burst.append_char_to_buffer(ch, now);
-          return true;
+          return ComposerAction::None;
         }
-        self.textarea.insert_str(&ch.to_string());
-        self.history.reset_navigation();
-        false
-      }
-      CharDecision::RetainFirstChar | CharDecision::BeginBufferFromPending => {
-        self.textarea.insert_str(&ch.to_string());
-        self.history.reset_navigation();
-        false
+        CharDecision::BeginBuffer { retro_chars } => {
+          let cur = self.textarea.cursor();
+          let txt = self.textarea.text();
+          let safe_cur = Self::clamp_to_char_boundary(txt, cur);
+          let before = &txt[..safe_cur];
+          if let Some(grab) = self
+            .paste_burst
+            .decide_begin_buffer(now, before, retro_chars as usize)
+          {
+            if !grab.grabbed.is_empty() {
+              self.textarea.replace_range(grab.start_byte..safe_cur, "");
+            }
+            self.paste_burst.append_char_to_buffer(ch, now);
+            return ComposerAction::None;
+          }
+          // Fall through to normal insertion.
+        }
+        _ => unreachable!("on_plain_char_no_hold returned unexpected variant"),
       }
     }
+    if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
+      self.handle_paste(pasted);
+    }
+    self.textarea.insert_str(&ch.to_string());
+    self.history.reset_navigation();
+    ComposerAction::None
   }
 
   /// Flush paste burst if the timeout has elapsed. Returns true if a char or paste was flushed.
@@ -384,6 +509,9 @@ impl ChatComposer {
       FlushResult::Typed(ch) => {
         self.textarea.insert_str(&ch.to_string());
         self.history.reset_navigation();
+        // Mirror codex: sync popups when a pending fast char flushes as
+        // normal typed input so slash-command popup appears for '/'.
+        self.sync_command_popup();
         true
       }
       FlushResult::Paste(text) => {
@@ -452,25 +580,72 @@ impl ChatComposer {
     self.textarea.move_cursor_down();
   }
 
+  // 1:1 codex: sync_command_popup (codex calls this sync_popups → sync_command_popup).
+  // Determines whether the caret is inside the initial '/name' token on the
+  // first line. If so, shows/updates the popup; otherwise hides it.
   fn sync_command_popup(&mut self) {
     let text = self.textarea.text();
-    if !text.starts_with('/') {
-      self.command_popup = None;
-      return;
-    }
-    if self.command_popup.is_none() {
-      self.command_popup = Some(CommandPopup::new(self.collaboration_modes_enabled));
-    }
-    if let Some(popup) = &mut self.command_popup {
-      popup.update_filter(text);
+    let first_line_end = text.find('\n').unwrap_or(text.len());
+    let first_line = &text[..first_line_end];
+    let cursor = self.textarea.cursor();
+    let caret_on_first_line = cursor <= first_line_end;
+
+    // Check if the cursor is currently within a slash command name.
+    let is_editing_slash_command = caret_on_first_line
+      && first_line.starts_with('/')
+      && self.looks_like_slash_prefix(first_line, cursor);
+
+    match &mut self.command_popup {
+      Some(popup) => {
+        if is_editing_slash_command {
+          popup.on_composer_text_change(first_line.to_string());
+        } else {
+          self.command_popup = None;
+        }
+      }
+      None => {
+        if is_editing_slash_command {
+          let mut popup = CommandPopup::new(self.collaboration_modes_enabled);
+          popup.on_composer_text_change(first_line.to_string());
+          self.command_popup = Some(popup);
+        }
+      }
     }
   }
 
-  fn apply_slash_command(&mut self, command: SlashCommand) {
-    let text = format!("/{} ", command.command());
-    self.textarea.set_text_clearing_elements(&text);
+  // 1:1 codex: looks_like_slash_prefix + slash_command_under_cursor.
+  // Checks if the cursor is positioned within the '/name' portion of a
+  // slash command and the name looks like a valid prefix.
+  fn looks_like_slash_prefix(&self, first_line: &str, cursor: usize) -> bool {
+    if !first_line.starts_with('/') {
+      return false;
+    }
+    let name_start = 1usize;
+    let name_end = first_line[name_start..]
+      .find(char::is_whitespace)
+      .map(|idx| name_start + idx)
+      .unwrap_or(first_line.len());
+
+    // Cursor must be within the /name token.
+    if cursor > name_end {
+      return false;
+    }
+
+    let name = &first_line[name_start..name_end];
+    // Empty name only valid when there is nothing else after '/'.
+    if name.is_empty() {
+      return name_end == first_line.len();
+    }
+
+    slash_commands::has_builtin_prefix(name, self.collaboration_modes_enabled, true, true, false)
+  }
+
+  fn apply_slash_command(&mut self, command: SlashCommand) -> ComposerAction {
+    // Clear the textarea and bubble the command up to the app layer.
+    self.textarea.set_text_clearing_elements("");
     self.footer_mode = footer::reset_mode_after_activity(self.footer_mode);
     self.history.reset_navigation();
+    ComposerAction::SlashCommand(command)
   }
 
   pub(crate) fn handle_paste(&mut self, text: String) {
@@ -522,20 +697,21 @@ impl ChatComposer {
     }
   }
 
-  pub(crate) fn cursor_pos(&self, composer_area: Rect) -> Option<(u16, u16)> {
+  // 1:1 codex: cursor_pos uses the same layout_areas logic as render.
+  pub(crate) fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
     let footer_h = footer::footer_height(&self.footer_props());
-    let input_height = composer_area.height.saturating_sub(footer_h);
-    let input_area = Rect {
-      x: composer_area.x,
-      y: composer_area.y,
-      width: composer_area.width,
-      height: input_height,
+    let popup_constraint = if let Some(popup) = &self.command_popup {
+      Constraint::Max(popup.calculate_required_height(area.width))
+    } else {
+      Constraint::Max(footer_h)
     };
+    let [composer_rect, _popup_rect] =
+      Layout::vertical([Constraint::Min(3), popup_constraint]).areas(area);
     let block = Block::default().borders(Borders::ALL);
-    let inner = block.inner(input_area);
+    let textarea_rect = block.inner(composer_rect);
     self
       .textarea
-      .cursor_pos_with_state(inner, *self.textarea_state.borrow())
+      .cursor_pos_with_state(textarea_rect, *self.textarea_state.borrow())
   }
 
   /// Returns whether the composer currently has any paste-burst transient state
@@ -585,118 +761,128 @@ impl ChatComposer {
 }
 
 impl Renderable for ChatComposer {
+  // 1:1 codex: layout_areas → render_with_mask.
+  // Layout: [composer_rect (border + textarea)] then [popup_rect (popup OR footer)].
+  // Popup and footer share the SAME slot below the composer.
   fn render(&self, area: Rect, buf: &mut Buffer) {
     if area.height == 0 || area.width == 0 {
       return;
     }
 
     let footer_props = self.footer_props();
-    let footer_h = footer::footer_height(&footer_props).min(area.height);
-    let chunks =
-      Layout::vertical([Constraint::Min(1), Constraint::Length(footer_h.max(1))]).split(area);
+    let footer_h = footer::footer_height(&footer_props);
 
+    // 1:1 codex layout_areas: popup and footer share the bottom slot.
+    let popup_constraint = if let Some(popup) = &self.command_popup {
+      Constraint::Max(popup.calculate_required_height(area.width))
+    } else {
+      Constraint::Max(footer_h)
+    };
+    let [composer_rect, popup_rect] =
+      Layout::vertical([Constraint::Min(3), popup_constraint]).areas(area);
+
+    // Render the input border and textarea.
     let border = if self.input_enabled {
       Block::default().title("Input").borders(Borders::ALL)
     } else {
       Block::default().title("Input".dim()).borders(Borders::ALL)
     };
-    let inner = border.inner(chunks[0]);
-    border.render(chunks[0], buf);
+    let textarea_rect = border.inner(composer_rect);
+    border.render(composer_rect, buf);
 
-    if inner.height > 0 {
+    if textarea_rect.height > 0 {
       StatefulWidgetRef::render_ref(
         &&self.textarea,
-        inner,
+        textarea_rect,
         buf,
         &mut self.textarea_state.borrow_mut(),
       );
     }
 
+    // Render popup OR footer in the shared bottom slot.
     if let Some(popup) = &self.command_popup {
-      let popup_h = inner.height.min(8);
-      if popup_h > 0 {
-        let popup_area = Rect {
-          x: inner.x,
-          y: inner.y.saturating_add(inner.height.saturating_sub(popup_h)),
-          width: inner.width,
-          height: popup_h,
-        };
-        popup.render(popup_area, buf);
-      }
-    }
-
-    let show_cycle_hint =
-      !footer_props.is_task_running && self.collaboration_mode_indicator.is_some();
-    let show_shortcuts_hint =
-      matches!(footer_props.mode, FooterMode::ComposerEmpty) && !self.is_in_paste_burst();
-    let show_queue_hint = matches!(footer_props.mode, FooterMode::ComposerHasDraft)
-      && footer_props.is_task_running
-      && footer_props.steer_enabled;
-
-    let right_line = Some(footer::context_window_line(
-      footer_props.context_window_percent,
-      footer_props.context_window_used_tokens,
-    ));
-    let right_width = right_line
-      .as_ref()
-      .map(|line| line.width() as u16)
-      .unwrap_or(0);
-
-    if matches!(
-      footer_props.mode,
-      FooterMode::ComposerEmpty | FooterMode::ComposerHasDraft
-    ) {
-      let (summary_left, show_context) = footer::single_line_footer_layout(
-        chunks[1],
-        right_width,
-        self.collaboration_mode_indicator,
-        show_cycle_hint,
-        show_shortcuts_hint,
-        show_queue_hint,
-      );
-
-      match summary_left {
-        footer::SummaryLeft::Default => {
-          footer::render_footer_from_props(
-            chunks[1],
-            buf,
-            &footer_props,
-            self.collaboration_mode_indicator,
-            show_cycle_hint,
-            show_shortcuts_hint,
-            show_queue_hint,
-          );
-        }
-        footer::SummaryLeft::Custom(line) => {
-          footer::render_footer_line(chunks[1], buf, line);
-        }
-        footer::SummaryLeft::None => {}
-      }
-
-      if show_context && let Some(line) = &right_line {
-        footer::render_context_right(chunks[1], buf, line);
-      }
+      popup.render(popup_rect, buf);
     } else {
-      footer::render_footer_from_props(
-        chunks[1],
-        buf,
-        &footer_props,
-        self.collaboration_mode_indicator,
-        show_cycle_hint,
-        show_shortcuts_hint,
-        show_queue_hint,
-      );
+      // Footer rendering.
+      let show_cycle_hint =
+        !footer_props.is_task_running && self.collaboration_mode_indicator.is_some();
+      let show_shortcuts_hint =
+        matches!(footer_props.mode, FooterMode::ComposerEmpty) && !self.is_in_paste_burst();
+      let show_queue_hint = matches!(footer_props.mode, FooterMode::ComposerHasDraft)
+        && footer_props.is_task_running
+        && footer_props.steer_enabled;
+
+      let right_line = Some(footer::context_window_line(
+        footer_props.context_window_percent,
+        footer_props.context_window_used_tokens,
+      ));
+      let right_width = right_line
+        .as_ref()
+        .map(|line| line.width() as u16)
+        .unwrap_or(0);
+
+      if matches!(
+        footer_props.mode,
+        FooterMode::ComposerEmpty | FooterMode::ComposerHasDraft
+      ) {
+        let (summary_left, show_context) = footer::single_line_footer_layout(
+          popup_rect,
+          right_width,
+          self.collaboration_mode_indicator,
+          show_cycle_hint,
+          show_shortcuts_hint,
+          show_queue_hint,
+        );
+
+        match summary_left {
+          footer::SummaryLeft::Default => {
+            footer::render_footer_from_props(
+              popup_rect,
+              buf,
+              &footer_props,
+              self.collaboration_mode_indicator,
+              show_cycle_hint,
+              show_shortcuts_hint,
+              show_queue_hint,
+            );
+          }
+          footer::SummaryLeft::Custom(line) => {
+            footer::render_footer_line(popup_rect, buf, line);
+          }
+          footer::SummaryLeft::None => {}
+        }
+
+        if show_context && let Some(line) = &right_line {
+          footer::render_context_right(popup_rect, buf, line);
+        }
+      } else {
+        footer::render_footer_from_props(
+          popup_rect,
+          buf,
+          &footer_props,
+          self.collaboration_mode_indicator,
+          show_cycle_hint,
+          show_shortcuts_hint,
+          show_queue_hint,
+        );
+      }
     }
   }
 
+  // 1:1 codex: desired_height includes popup height when popup is active.
   fn desired_height(&self, width: u16) -> u16 {
     let textarea_h = self
       .textarea
       .desired_height(width.saturating_sub(2).max(1))
       .clamp(1, 8);
+    let popup_or_footer_h = if let Some(popup) = &self.command_popup {
+      popup.calculate_required_height(width)
+    } else {
+      footer::footer_height(&self.footer_props())
+    };
     textarea_h
-      .saturating_add(2)
-      .saturating_add(footer::footer_height(&self.footer_props()))
+      .saturating_add(2) // border top + bottom
+      .saturating_add(popup_or_footer_h)
   }
 
   fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
