@@ -28,6 +28,7 @@ use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolCall;
 use crate::tools::router::ToolRouter;
 use crate::tools::router::ToolRunContext;
+use crate::truncate::truncate_text;
 
 use super::executor::TurnConfig;
 use super::executor::TurnError;
@@ -106,6 +107,11 @@ impl SseTurnExecutor {
       max_tokens: self.config.max_tokens,
       tools: if self.config.enable_tools {
         Some(self.tool_registry.model_tools())
+      } else {
+        None
+      },
+      tool_choice: if self.config.enable_tools {
+        Some("auto".to_string())
       } else {
         None
       },
@@ -349,6 +355,11 @@ impl SseTurnExecutor {
         ));
       }
 
+      // 1:1 codex: truncate tool output before recording to messages/history.
+      // codex applies a 1.2x budget multiplier to account for JSON
+      // serialization overhead.
+      let truncation_policy = self.config.tool_output_truncation * 1.2;
+
       while let Some(output_res) = in_flight.next().await {
         let (call_id, output) = output_res?;
         let output_call_id = if output.id.is_empty() {
@@ -357,9 +368,10 @@ impl SseTurnExecutor {
           output.id
         };
 
+        let truncated_content = truncate_text(&output.content, truncation_policy);
         let tool_msg = ModelMessage::Tool {
           tool_call_id: output_call_id,
-          content: output.content,
+          content: truncated_content,
         };
         messages.push(tool_msg.clone());
         self.session.append_message(tool_msg.clone()).await;
@@ -368,7 +380,7 @@ impl SseTurnExecutor {
           .append_response_item(ResponseItem::FunctionCallOutput {
             call_id,
             output: tool_msg.text().unwrap_or_default().to_string(),
-            is_error: false,
+            is_error: output.is_error,
           })
           .await;
       }
@@ -402,14 +414,26 @@ impl SseTurnExecutor {
     turn_id: &str,
     cancellation_token: CancellationToken,
   ) -> Result<(String, ToolOutput), TurnError> {
-    let args = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
-      .map_err(|err| TurnError::ToolError(format!("invalid tool arguments: {err}")))?;
+    // 1:1 codex: parse failures are non-fatal — send the error message back
+    // to the model as an error tool output so it can self-correct.
+    let args = match serde_json::from_str::<serde_json::Value>(&call.function.arguments) {
+      Ok(v) => v,
+      Err(err) => {
+        let output = ToolOutput {
+          id: call.id.clone(),
+          content: format!("invalid tool arguments: {err}"),
+          is_error: true,
+        };
+        return Ok((call.id, output));
+      }
+    };
 
     let tool_call = ToolCall {
       tool_name: call.function.name.clone(),
       call_id: call.id.clone(),
       args,
     };
+
     let mut run_ctx = ToolRunContext::new(
       Arc::clone(&self.session),
       thread_id.to_string(),
@@ -421,11 +445,23 @@ impl SseTurnExecutor {
     run_ctx.has_managed_network_requirements = self.config.has_managed_network_requirements;
     run_ctx.tx_event = Some(self.tx_event.clone());
 
-    let mut output = self
+    // 1:1 codex: only Fatal errors abort the turn. All other tool errors
+    // (InvalidArguments, Execution, ToolNotFound, Validation,
+    // PermissionDenied, RespondToModel, Other) are sent back to the model
+    // as an error tool output so it can see what went wrong and retry.
+    let mut output = match self
       .tool_runtime
       .handle_tool_call_with_cancellation(tool_call, run_ctx, cancellation_token)
       .await
-      .map_err(|err| TurnError::ToolError(err.to_string()))?;
+    {
+      Ok(output) => output,
+      Err(err) if err.is_fatal() => return Err(TurnError::Fatal(err.to_string())),
+      Err(err) => ToolOutput {
+        id: call.id.clone(),
+        content: err.to_string(),
+        is_error: true,
+      },
+    };
 
     if output.id.is_empty() {
       output.id = call.id.clone();
@@ -537,12 +573,23 @@ mod tests {
     End,
   }
 
-  #[derive(Debug)]
   struct MockResponsesProvider {
     client: Client,
     config: ProviderConfig,
     scripts: Arc<Mutex<Vec<Vec<MockStep>>>>,
     calls: Arc<Mutex<u32>>,
+    /// Optional validation closure for the 2nd call. When `None`, no
+    /// assertions are made on the request messages.
+    second_call_check: Option<Arc<dyn Fn(&[ModelMessage]) -> Result<(), String> + Send + Sync>>,
+  }
+
+  impl std::fmt::Debug for MockResponsesProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      f.debug_struct("MockResponsesProvider")
+        .field("config", &self.config)
+        .field("calls", &self.calls)
+        .finish_non_exhaustive()
+    }
   }
 
   impl MockResponsesProvider {
@@ -555,7 +602,16 @@ mod tests {
         },
         scripts: Arc::new(Mutex::new(scripts)),
         calls: Arc::new(Mutex::new(0)),
+        second_call_check: None,
       }
+    }
+
+    fn with_second_call_check(
+      mut self,
+      check: impl Fn(&[ModelMessage]) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+      self.second_call_check = Some(Arc::new(check));
+      self
     }
   }
 
@@ -590,15 +646,11 @@ mod tests {
       let mut calls = self.calls.lock().await;
       *calls += 1;
 
-      if *calls == 2 {
-        let saw_tool_output = request.messages.iter().any(|msg| {
-          matches!(msg, ModelMessage::Tool { tool_call_id, content } if tool_call_id == "read_1" && content.contains("hello from tool"))
-        });
-        if !saw_tool_output {
-          return Err(ModelError::InvalidRequest(
-            "missing function_call_output simulation".to_string(),
-          ));
-        }
+      if *calls == 2
+        && let Some(check) = &self.second_call_check
+        && let Err(msg) = check(&request.messages)
+      {
+        return Err(ModelError::InvalidRequest(msg));
       }
 
       let mut scripts = self.scripts.lock().await;
@@ -787,7 +839,17 @@ mod tests {
         MockStep::Delta("File content: hello from tool"),
         MockStep::End,
       ],
-    ]);
+    ])
+    .with_second_call_check(|messages| {
+      let saw_tool_output = messages.iter().any(|msg| {
+        matches!(msg, ModelMessage::Tool { tool_call_id, content } if tool_call_id == "read_1" && content.contains("hello from tool"))
+      });
+      if saw_tool_output {
+        Ok(())
+      } else {
+        Err("missing function_call_output simulation".to_string())
+      }
+    });
     let calls = provider.calls.clone();
 
     let model_client = build_client(provider).await;
@@ -916,5 +978,132 @@ mod tests {
       }
       _ => panic!("expected stream error from SSE response"),
     }
+  }
+
+  /// Handler that always returns an error — simulates a tool failure
+  /// (e.g. "failed to read file: Is a directory").
+  #[derive(Debug)]
+  struct FailingHandler;
+
+  #[async_trait]
+  impl ToolHandler for FailingHandler {
+    fn kind(&self) -> ToolKind {
+      ToolKind::Function
+    }
+
+    fn handle(&self, _invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+      Err(FunctionCallError::RespondToModel(
+        "failed to read file: Is a directory (os error 21)".to_string(),
+      ))
+    }
+  }
+
+  /// 1:1 codex: when a tool returns a non-fatal error, the error message
+  /// should be sent back to the LLM as a tool output (with is_error=true),
+  /// allowing the LLM to see the error and self-correct. The turn must NOT
+  /// abort.
+  #[tokio::test]
+  async fn test_tool_error_recovery_sends_error_to_model() {
+    // Round 1: LLM calls read_file → handler returns error →
+    //          error is sent back as tool output.
+    // Round 2: LLM sees the error and responds with a text message.
+    let provider = MockResponsesProvider::new(vec![
+      vec![
+        MockStep::Call {
+          id: "call_err",
+          name: "read_file",
+          arguments: r#"{"file_path":"/"}"#,
+        },
+        MockStep::End,
+      ],
+      vec![
+        MockStep::Delta("Sorry, that path is a directory."),
+        MockStep::End,
+      ],
+    ]);
+    let calls = provider.calls.clone();
+
+    let model_client = build_client(provider).await;
+    let mut registry = ToolRegistry::new();
+    registry.register_handler("read_file", Arc::new(FailingHandler));
+    let tool_registry = Arc::new(registry);
+    let tool_router = build_router(tool_registry.clone());
+    let session = Arc::new(Session::new());
+    let (tx_event, _rx_event) = mpsc::channel(64);
+
+    let executor = SseTurnExecutor::new(
+      model_client,
+      tool_registry,
+      tool_router,
+      session,
+      tx_event,
+      test_config(),
+    );
+
+    let result = executor
+      .run_sse_interaction(
+        vec![ModelMessage::User("read /".to_string())],
+        "thread-err".to_string(),
+        "turn-err".to_string(),
+      )
+      .await
+      .expect("turn should not abort on non-fatal tool error");
+
+    assert!(result.content.contains("Sorry, that path is a directory."));
+    // The LLM was called twice: once triggering the tool call, once after
+    // receiving the error tool output.
+    assert_eq!(*calls.lock().await, 2);
+  }
+
+  /// 1:1 codex: when a tool call has invalid JSON arguments, the parse
+  /// error should be sent back to the LLM rather than aborting the turn.
+  #[tokio::test]
+  async fn test_invalid_tool_arguments_recovery() {
+    // Round 1: LLM sends malformed arguments → parse error is sent back.
+    // Round 2: LLM responds with an apology.
+    let provider = MockResponsesProvider::new(vec![
+      vec![
+        MockStep::Call {
+          id: "call_bad",
+          name: "read_file",
+          arguments: "not valid json",
+        },
+        MockStep::End,
+      ],
+      vec![
+        MockStep::Delta("I sent bad arguments, let me fix that."),
+        MockStep::End,
+      ],
+    ]);
+    let calls = provider.calls.clone();
+
+    let model_client = build_client(provider).await;
+    let mut registry = ToolRegistry::new();
+    registry.register_handler("read_file", Arc::new(ReadFileLikeHandler));
+    let tool_registry = Arc::new(registry);
+    let tool_router = build_router(tool_registry.clone());
+    let session = Arc::new(Session::new());
+    let (tx_event, _rx_event) = mpsc::channel(64);
+
+    let executor = SseTurnExecutor::new(
+      model_client,
+      tool_registry,
+      tool_router,
+      session,
+      tx_event,
+      test_config(),
+    );
+
+    let result = executor
+      .run_sse_interaction(
+        vec![ModelMessage::User("read something".to_string())],
+        "thread-bad-args".to_string(),
+        "turn-bad-args".to_string(),
+      )
+      .await
+      .expect("turn should not abort on invalid tool arguments");
+
+    assert!(result.content.contains("I sent bad arguments"));
+    assert_eq!(*calls.lock().await, 2);
   }
 }

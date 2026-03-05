@@ -3,8 +3,31 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde::Serialize;
 
+/// Whether additional properties are allowed, and if so, any required schema.
+///
+/// Mirrors codex-rs `AdditionalProperties` — used in tool parameter schemas
+/// to tell the model that no extra keys are allowed (`false`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum AdditionalProperties {
+  Boolean(bool),
+  Schema(Box<JsonSchema>),
+}
+
+impl From<bool> for AdditionalProperties {
+  fn from(b: bool) -> Self {
+    Self::Boolean(b)
+  }
+}
+
+impl From<JsonSchema> for AdditionalProperties {
+  fn from(s: JsonSchema) -> Self {
+    Self::Schema(Box::new(s))
+  }
+}
+
 /// JSON schema representation for tool input/output contracts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum JsonSchema {
   String {
@@ -28,6 +51,11 @@ pub enum JsonSchema {
     properties: BTreeMap<String, JsonSchema>,
     #[serde(skip_serializing_if = "Option::is_none")]
     required: Option<Vec<String>>,
+    #[serde(
+      rename = "additionalProperties",
+      skip_serializing_if = "Option::is_none"
+    )]
+    additional_properties: Option<AdditionalProperties>,
   },
 }
 
@@ -110,6 +138,7 @@ fn obj(properties: BTreeMap<String, JsonSchema>, required: &[&str]) -> JsonSchem
   JsonSchema::Object {
     properties,
     required: Some(required.iter().map(|s| s.to_string()).collect()),
+    additional_properties: Some(false.into()),
   }
 }
 
@@ -145,12 +174,25 @@ fn mutating_permissions() -> ToolPermissions {
 
 fn shell_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
-  props.insert("command".to_string(), str_field("Shell command"));
-  props.insert("timeout_ms".to_string(), int_field("Timeout milliseconds"));
-  props.insert("workdir".to_string(), str_field("Working directory"));
+  props.insert(
+    "command".to_string(),
+    str_field(
+      "The command to execute. On Linux/macOS most commands should be prefixed with bash -lc.",
+    ),
+  );
+  props.insert(
+    "timeout_ms".to_string(),
+    int_field("The timeout for the command in milliseconds."),
+  );
+  props.insert(
+    "workdir".to_string(),
+    str_field(
+      "The working directory to execute the command in. Always set this instead of using cd.",
+    ),
+  );
   ToolSpec::new(
     "shell",
-    "Execute a shell command",
+    "Runs a shell command and returns its output. Use the dedicated read_file, list_dir, and grep_files tools instead of shell commands like cat, ls, find, or grep for reading files and exploring the filesystem.",
     obj(props, &["command"]),
     None,
     ToolHandlerType::Function,
@@ -160,10 +202,22 @@ fn shell_tool() -> ToolSpec {
 
 fn apply_patch_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
-  props.insert("patch".to_string(), str_field("Unified patch text"));
+  props.insert(
+    "patch".to_string(),
+    str_field(concat!(
+      "The patch to apply. Use a stripped-down diff format:\n",
+      "*** Begin Patch\n",
+      "*** Update File: path/to/file\n",
+      "@@ context_line\n",
+      "- removed_line\n",
+      "+ added_line\n",
+      "*** End Patch\n",
+      "Also supports *** Add File and *** Delete File headers."
+    )),
+  );
   ToolSpec::new(
     "apply_patch",
-    "Apply patch to files",
+    "Apply a patch to create, update, or delete files. Use this tool for all file edits. Do NOT use shell commands like cat with heredoc or echo redirection to write files.",
     obj(props, &["patch"]),
     None,
     ToolHandlerType::Function,
@@ -173,12 +227,21 @@ fn apply_patch_tool() -> ToolSpec {
 
 fn read_file_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
-  props.insert("file_path".to_string(), str_field("File path"));
-  props.insert("offset".to_string(), int_field("Start line offset"));
-  props.insert("limit".to_string(), int_field("Maximum lines"));
+  props.insert(
+    "file_path".to_string(),
+    str_field("Absolute path to the file to read."),
+  );
+  props.insert(
+    "offset".to_string(),
+    int_field("The 1-indexed line number to start reading from. Defaults to 1."),
+  );
+  props.insert(
+    "limit".to_string(),
+    int_field("The maximum number of lines to return. Defaults to 2000."),
+  );
   ToolSpec::new(
     "read_file",
-    "Read text file content",
+    "Reads a local file with 1-indexed line numbers. Use this instead of shell commands like cat, head, or tail.",
     obj(props, &["file_path"]),
     None,
     ToolHandlerType::Function,
@@ -188,11 +251,17 @@ fn read_file_tool() -> ToolSpec {
 
 fn write_file_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
-  props.insert("file_path".to_string(), str_field("File path"));
-  props.insert("content".to_string(), str_field("File content"));
+  props.insert(
+    "file_path".to_string(),
+    str_field("Absolute path to the file to write."),
+  );
+  props.insert(
+    "content".to_string(),
+    str_field("The full content to write to the file."),
+  );
   ToolSpec::new(
     "write_file",
-    "Write content to file",
+    "Write content to a file, creating it if it does not exist. Parent directories are created automatically. Prefer apply_patch for editing existing files.",
     obj(props, &["file_path", "content"]),
     None,
     ToolHandlerType::Function,
@@ -202,11 +271,25 @@ fn write_file_tool() -> ToolSpec {
 
 fn list_dir_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
-  props.insert("dir_path".to_string(), str_field("Directory path"));
-  props.insert("recursive".to_string(), bool_field("Recursive listing"));
+  props.insert(
+    "dir_path".to_string(),
+    str_field("Absolute path to the directory to list."),
+  );
+  props.insert(
+    "offset".to_string(),
+    int_field("The entry number to start listing from. Must be 1 or greater."),
+  );
+  props.insert(
+    "limit".to_string(),
+    int_field("The maximum number of entries to return."),
+  );
+  props.insert(
+    "depth".to_string(),
+    int_field("The maximum directory depth to traverse. Must be 1 or greater."),
+  );
   ToolSpec::new(
     "list_dir",
-    "List directory entries",
+    "Lists entries in a local directory with 1-indexed entry numbers and simple type labels. Use this instead of shell commands like ls or find.",
     obj(props, &["dir_path"]),
     None,
     ToolHandlerType::Function,
@@ -216,11 +299,17 @@ fn list_dir_tool() -> ToolSpec {
 
 fn grep_files_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
-  props.insert("pattern".to_string(), str_field("Regex pattern"));
-  props.insert("path".to_string(), str_field("Search root path"));
+  props.insert(
+    "pattern".to_string(),
+    str_field("The pattern to search for in file contents."),
+  );
+  props.insert(
+    "path".to_string(),
+    str_field("Directory or file path to search. Defaults to the working directory."),
+  );
   ToolSpec::new(
     "grep_files",
-    "Search files by pattern",
+    "Finds files whose contents match the pattern and lists them by modification time. Use this instead of shell commands like grep or rg for searching code.",
     obj(props, &["pattern"]),
     None,
     ToolHandlerType::Function,
@@ -250,6 +339,7 @@ fn mcp_tool() -> ToolSpec {
     JsonSchema::Object {
       properties: BTreeMap::new(),
       required: Some(Vec::new()),
+      additional_properties: None,
     },
   );
   ToolSpec::new(
@@ -304,10 +394,13 @@ fn request_user_input_tool() -> ToolSpec {
 
 fn view_image_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
-  props.insert("path".to_string(), str_field("Image path"));
+  props.insert(
+    "path".to_string(),
+    str_field("Local filesystem path to an image file."),
+  );
   ToolSpec::new(
     "view_image",
-    "View image from local filesystem",
+    "View a local image from the filesystem. Only use if given a full filepath by the user.",
     obj(props, &["path"]),
     None,
     ToolHandlerType::Function,
@@ -324,10 +417,24 @@ mod tests {
     let schema = JsonSchema::Object {
       properties: BTreeMap::new(),
       required: Some(Vec::new()),
+      additional_properties: None,
     };
     let value = schema.to_value();
 
     assert_eq!(value["type"], "object");
     assert_eq!(value["required"], serde_json::json!([]));
+  }
+
+  #[test]
+  fn object_schema_serializes_additional_properties_false() {
+    let schema = JsonSchema::Object {
+      properties: BTreeMap::new(),
+      required: Some(Vec::new()),
+      additional_properties: Some(false.into()),
+    };
+    let value = schema.to_value();
+
+    assert_eq!(value["type"], "object");
+    assert_eq!(value["additionalProperties"], serde_json::json!(false));
   }
 }

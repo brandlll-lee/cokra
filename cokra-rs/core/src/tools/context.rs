@@ -18,15 +18,18 @@ pub struct ToolInvocation {
 }
 
 impl ToolInvocation {
+  /// 1:1 codex: parse failures are `RespondToModel` so the LLM sees the
+  /// error message and can self-correct, rather than aborting the turn.
   pub fn parse_arguments<T: DeserializeOwned>(&self) -> Result<T, FunctionCallError> {
     serde_json::from_str(&self.arguments).map_err(|e| {
-      FunctionCallError::InvalidArguments(format!("invalid arguments for {}: {e}", self.name))
+      FunctionCallError::RespondToModel(format!("invalid arguments for {}: {e}", self.name))
     })
   }
 
+  /// 1:1 codex: same RespondToModel treatment for raw Value parsing.
   pub fn parse_arguments_value(&self) -> Result<serde_json::Value, FunctionCallError> {
     serde_json::from_str(&self.arguments).map_err(|e| {
-      FunctionCallError::InvalidArguments(format!("invalid arguments for {}: {e}", self.name))
+      FunctionCallError::RespondToModel(format!("invalid arguments for {}: {e}", self.name))
     })
   }
 
@@ -113,6 +116,14 @@ impl fmt::Display for FunctionCallError {
       | FunctionCallError::Execution(msg)
       | FunctionCallError::Other(msg) => write!(f, "{msg}"),
     }
+  }
+}
+
+impl FunctionCallError {
+  /// 1:1 codex: only `Fatal` aborts the turn. All other variants should be
+  /// sent back to the model as a tool output so it can self-correct.
+  pub fn is_fatal(&self) -> bool {
+    matches!(self, FunctionCallError::Fatal(_))
   }
 }
 

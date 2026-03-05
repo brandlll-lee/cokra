@@ -217,6 +217,7 @@ impl Session {
     thread_id: String,
     turn_id: String,
     approval_id: String,
+    tool_name: String,
     command: String,
     cwd: PathBuf,
     tx_event: Option<mpsc::Sender<EventMsg>>,
@@ -225,6 +226,7 @@ impl Session {
       thread_id,
       turn_id,
       id: approval_id,
+      tool_name,
       command,
       cwd,
     });
@@ -239,6 +241,7 @@ impl Session {
     thread_id: String,
     turn_id: String,
     approval_id: String,
+    tool_name: String,
     command: String,
     cwd: PathBuf,
     tx_event: Option<mpsc::Sender<EventMsg>>,
@@ -253,7 +256,15 @@ impl Session {
     }
 
     self
-      .emit_exec_approval_request(thread_id, turn_id, approval_id, command, cwd, tx_event)
+      .emit_exec_approval_request(
+        thread_id,
+        turn_id,
+        approval_id,
+        tool_name,
+        command,
+        cwd,
+        tx_event,
+      )
       .await;
 
     match rx.await {

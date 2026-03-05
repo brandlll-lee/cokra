@@ -15,6 +15,22 @@ pub enum TruncationPolicy {
 /// Phase-0 default budget for tool output sent back to model.
 pub const DEFAULT_TOOL_OUTPUT_TOKENS: usize = 16_384;
 
+impl std::ops::Mul<f64> for TruncationPolicy {
+  type Output = Self;
+
+  fn mul(self, multiplier: f64) -> Self::Output {
+    match self {
+      TruncationPolicy::Lines(lines) => {
+        TruncationPolicy::Lines((lines as f64 * multiplier).ceil() as usize)
+      }
+      TruncationPolicy::Tokens(tokens) => {
+        TruncationPolicy::Tokens((tokens as f64 * multiplier).ceil() as usize)
+      }
+      TruncationPolicy::None => TruncationPolicy::None,
+    }
+  }
+}
+
 /// Truncate text and include omission marker suitable for model consumption.
 pub fn formatted_truncate_text(text: &str, policy: TruncationPolicy) -> String {
   match policy {

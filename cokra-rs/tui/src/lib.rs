@@ -21,6 +21,8 @@ pub(crate) mod markdown;
 pub(crate) mod markdown_render;
 pub(crate) mod markdown_stream;
 pub(crate) mod multi_agents;
+pub(crate) mod path_utils;
+pub(crate) mod exec_command;
 pub(crate) mod render;
 pub(crate) mod shimmer;
 pub(crate) mod slash_command;

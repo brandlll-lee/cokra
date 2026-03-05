@@ -276,12 +276,13 @@ impl ChatWidget {
       EventMsg::ExecCommandBegin(e) => {
         self.flush_stream_controllers();
         if let Some(status) = self.bottom_pane.status_widget_mut() {
-          status.update_header("Running command".to_string());
+          status.update_header(format!("Running {}", e.tool_name));
           status.update_details(Some(e.command.clone()));
         }
 
         let call = ExecCall {
           command_id: e.command_id.clone(),
+          tool_name: e.tool_name.clone(),
           command: e.command.clone(),
           cwd: e.cwd.clone(),
           output: None,
@@ -307,6 +308,7 @@ impl ChatWidget {
           self.flush_active_cell();
           self.active_cell = Some(Box::new(new_active_exec_command(
             call.command_id.clone(),
+            call.tool_name.clone(),
             call.command.clone(),
             call.cwd.clone(),
             self.animations_enabled,
@@ -339,6 +341,7 @@ impl ChatWidget {
           .remove(&e.command_id)
           .unwrap_or(ExecCall {
             command_id: e.command_id.clone(),
+            tool_name: "shell".to_string(),
             command: "<unknown>".to_string(),
             cwd: PathBuf::from("."),
             output: None,

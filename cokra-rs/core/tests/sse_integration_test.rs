@@ -44,6 +44,7 @@ use cokra_protocol::ContentDeltaEvent;
 use cokra_protocol::EventMsg;
 use cokra_protocol::FunctionCall;
 use cokra_protocol::FunctionCallEvent;
+use cokra_protocol::ReviewDecision;
 use cokra_protocol::ResponseEvent;
 
 #[derive(Debug)]
@@ -402,10 +403,29 @@ async fn sse_turn_retries_after_sandbox_denied_when_policy_allows() {
     model_client,
     tool_registry,
     tool_router,
-    session,
+    Arc::clone(&session),
     tx_event,
     config,
   );
+
+  let approval_session = Arc::clone(&session);
+  let approval_task = tokio::spawn(async move {
+    let mut saw_approval = false;
+    while let Some(event) = rx_event.recv().await {
+      match event {
+        EventMsg::ExecApprovalRequest(ev) => {
+          saw_approval = true;
+          let _ = approval_session
+            .notify_exec_approval(&ev.id, ReviewDecision::Approved)
+            .await;
+        }
+        EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) | EventMsg::Error(_) => break,
+        _ => {}
+      }
+    }
+    saw_approval
+  });
+
   let result = executor
     .run_turn(UserInput {
       content: "write demo".to_string(),
@@ -418,12 +438,7 @@ async fn sse_turn_retries_after_sandbox_denied_when_policy_allows() {
   assert!(result.content.contains("write complete"));
   assert_eq!(write_calls.load(Ordering::SeqCst), 2);
 
-  let mut saw_approval = false;
-  while let Ok(event) = rx_event.try_recv() {
-    if matches!(event, EventMsg::ExecApprovalRequest(_)) {
-      saw_approval = true;
-    }
-  }
+  let saw_approval = approval_task.await.expect("approval task");
   assert!(saw_approval, "expected approval event for write_file");
 }
 

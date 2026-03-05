@@ -253,7 +253,12 @@ pub fn create_client(timeout: Option<u64>) -> Client {
     .unwrap_or_else(|_| Client::new())
 }
 
-/// Build OpenAI-compatible request body
+/// Build OpenAI-compatible request body.
+///
+/// Optional fields (`temperature`, `max_tokens`, `tools`, etc.) are omitted
+/// entirely when `None` instead of being serialized as JSON `null`. Some
+/// providers (notably OpenRouter) reject requests that contain explicit
+/// `null` values for these fields.
 pub fn build_openai_request(request: ChatRequest, model: &str) -> serde_json::Value {
   let messages: Vec<Value> = request
     .messages
@@ -261,18 +266,70 @@ pub fn build_openai_request(request: ChatRequest, model: &str) -> serde_json::Va
     .map(openai_compatible_message)
     .collect();
 
-  json!({
-      "model": model,
-      "messages": messages,
-      "temperature": request.temperature,
-      "max_tokens": request.max_tokens,
-      "stream": request.stream,
-      "tools": request.tools,
-      "stop": request.stop,
-      "presence_penalty": request.presence_penalty,
-      "frequency_penalty": request.frequency_penalty,
-      "top_p": request.top_p,
-  })
+  let mut body = serde_json::Map::new();
+  body.insert("model".to_string(), json!(model));
+  body.insert("messages".to_string(), json!(messages));
+  body.insert("stream".to_string(), json!(request.stream));
+
+  if let Some(temperature) = request.temperature {
+    body.insert("temperature".to_string(), json!(temperature));
+  }
+  if let Some(max_tokens) = request.max_tokens {
+    body.insert("max_tokens".to_string(), json!(max_tokens));
+  }
+  if let Some(tools) = &request.tools {
+    body.insert("tools".to_string(), json!(tools));
+  }
+  if let Some(tool_choice) = &request.tool_choice {
+    body.insert("tool_choice".to_string(), json!(tool_choice));
+  }
+  if let Some(stop) = &request.stop {
+    body.insert("stop".to_string(), json!(stop));
+  }
+  if let Some(presence_penalty) = request.presence_penalty {
+    body.insert("presence_penalty".to_string(), json!(presence_penalty));
+  }
+  if let Some(frequency_penalty) = request.frequency_penalty {
+    body.insert("frequency_penalty".to_string(), json!(frequency_penalty));
+  }
+  if let Some(top_p) = request.top_p {
+    body.insert("top_p".to_string(), json!(top_p));
+  }
+
+  Value::Object(body)
+}
+
+/// Log a summary of the outbound request for debugging tool-call issues.
+/// Emits tool names and tool_choice at DEBUG level to avoid overwhelming output.
+fn log_request_summary(body: &Value) {
+  if tracing::enabled!(tracing::Level::DEBUG) {
+    let tool_choice = body.get("tool_choice");
+    let tool_names: Vec<&str> = body
+      .get("tools")
+      .and_then(|t| t.as_array())
+      .map(|arr| {
+        arr
+          .iter()
+          .filter_map(|t| {
+            t.get("function")
+              .and_then(|f| f.get("name"))
+              .and_then(|n| n.as_str())
+          })
+          .collect()
+      })
+      .unwrap_or_default();
+    let msg_count = body
+      .get("messages")
+      .and_then(|m| m.as_array())
+      .map(|a| a.len())
+      .unwrap_or(0);
+    tracing::debug!(
+      tool_choice = ?tool_choice,
+      tools = ?tool_names,
+      messages = msg_count,
+      "outbound chat request summary"
+    );
+  }
 }
 
 fn openai_compatible_message(message: &Message) -> Value {

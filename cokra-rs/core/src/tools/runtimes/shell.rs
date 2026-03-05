@@ -154,6 +154,7 @@ impl Approvable<ShellCommandRequest> for ShellRuntime {
         ctx.turn.thread_id.clone(),
         ctx.turn.turn_id.clone(),
         ctx.call_id.to_string(),
+        "shell".to_string(),
         req.command.clone(),
         ctx.turn.cwd.clone(),
         ctx.turn.tx_event.clone(),

@@ -12,6 +12,9 @@ pub(crate) struct CommandOutput {
 #[derive(Debug, Clone)]
 pub(crate) struct ExecCall {
   pub(crate) command_id: String,
+  /// The actual tool name (e.g. "shell", "read_file", "list_dir").
+  pub(crate) tool_name: String,
+  /// For shell: the raw command string. For other tools: same as tool_name.
   pub(crate) command: String,
   pub(crate) cwd: PathBuf,
   pub(crate) output: Option<CommandOutput>,

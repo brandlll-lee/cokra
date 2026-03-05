@@ -326,6 +326,7 @@ impl Approvable<ToolCall> for RegistryToolRuntime {
         ctx.turn.thread_id.clone(),
         ctx.turn.turn_id.clone(),
         ctx.call_id.to_string(),
+        req.tool_name.clone(),
         display_command,
         ctx.turn.cwd.clone(),
         ctx.turn.tx_event.clone(),

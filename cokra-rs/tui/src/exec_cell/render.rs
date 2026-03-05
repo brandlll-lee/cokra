@@ -33,6 +33,7 @@ pub(crate) struct OutputLines {
 
 pub(crate) fn new_active_exec_command(
   command_id: String,
+  tool_name: String,
   command: String,
   cwd: std::path::PathBuf,
   animations_enabled: bool,
@@ -40,6 +41,7 @@ pub(crate) fn new_active_exec_command(
   ExecCell::new(
     ExecCall {
       command_id,
+      tool_name,
       command,
       cwd,
       output: None,
@@ -134,19 +136,46 @@ impl HistoryCell for ExecCell {
         lines.push(Line::from(""));
       }
 
-      let mut header = Line::from(vec!["• ".dim()]);
-      header.push_span("shell".bold());
-      header.push_span(format!("  {}", call.cwd.display()).dim());
+      let header_icon: Span<'static> = match (&call.output, call.duration) {
+        (Some(output), Some(_)) => {
+          if output.exit_code == 0 {
+            "✓ ".green().bold()
+          } else {
+            "✗ ".red().bold()
+          }
+        }
+        _ => {
+          let mut s = crate::exec_cell::spinner(call.start_time, self.animations_enabled());
+          s.content = format!("{} ", s.content).into();
+          s
+        }
+      };
+      let mut header = Line::from(vec![header_icon]);
+      header.push_span(call.tool_name.clone().bold());
+      // 1:1 codex: Do NOT display cwd in header - this was causing "unstable" display
       lines.push(header);
 
-      let highlighted = highlight_bash_to_lines(&call.command);
-      let wrapped_cmd = word_wrap_lines(
-        &highlighted,
-        RtOptions::new(width.max(1) as usize)
-          .initial_indent("  $ ".magenta().into())
-          .subsequent_indent("    ".into()),
-      );
-      lines.extend(wrapped_cmd);
+      // Shell tool: render command with "$ " prefix and bash highlighting.
+      // Non-shell tools: render the command/args with "› " prefix, no bash highlighting.
+      if call.tool_name == "shell" {
+        let highlighted = highlight_bash_to_lines(&call.command);
+        let wrapped_cmd = word_wrap_lines(
+          &highlighted,
+          RtOptions::new(width.max(1) as usize)
+            .initial_indent("  $ ".magenta().into())
+            .subsequent_indent("    ".into()),
+        );
+        lines.extend(wrapped_cmd);
+      } else {
+        let cmd_line = Line::from(call.command.clone().dim());
+        let wrapped_cmd = word_wrap_lines(
+          &[cmd_line],
+          RtOptions::new(width.max(1) as usize)
+            .initial_indent("  › ".cyan().into())
+            .subsequent_indent("    ".into()),
+        );
+        lines.extend(wrapped_cmd);
+      }
 
       let rendered = output_lines(
         call.output.as_ref(),
@@ -191,14 +220,25 @@ impl HistoryCell for ExecCell {
         lines.push(Line::from(""));
       }
 
-      let highlighted = highlight_bash_to_lines(&call.command);
-      let wrapped_cmd = word_wrap_lines(
-        &highlighted,
-        RtOptions::new(width.max(1) as usize)
-          .initial_indent("$ ".magenta().into())
-          .subsequent_indent("  ".into()),
-      );
-      lines.extend(wrapped_cmd);
+      if call.tool_name == "shell" {
+        let highlighted = highlight_bash_to_lines(&call.command);
+        let wrapped_cmd = word_wrap_lines(
+          &highlighted,
+          RtOptions::new(width.max(1) as usize)
+            .initial_indent("$ ".magenta().into())
+            .subsequent_indent("  ".into()),
+        );
+        lines.extend(wrapped_cmd);
+      } else {
+        let cmd_line = Line::from(call.command.clone().dim());
+        let wrapped_cmd = word_wrap_lines(
+          &[cmd_line],
+          RtOptions::new(width.max(1) as usize)
+            .initial_indent("› ".cyan().into())
+            .subsequent_indent("  ".into()),
+        );
+        lines.extend(wrapped_cmd);
+      }
 
       if let Some(output) = call.output.as_ref() {
         for raw in output.output.lines() {
@@ -209,5 +249,120 @@ impl HistoryCell for ExecCell {
       }
     }
     lines
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use ratatui::Terminal;
+  use ratatui::backend::TestBackend;
+  use ratatui::widgets::Paragraph;
+  use ratatui::widgets::Widget;
+  use std::path::PathBuf;
+  use std::time::Duration;
+
+  /// Helper: render an ExecCell into a test terminal and return the backend string.
+  fn render_exec_cell(cell: &ExecCell, width: u16, height: u16) -> String {
+    let lines = cell.display_lines(width);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    terminal
+      .draw(|f| Paragraph::new(lines).render(f.area(), f.buffer_mut()))
+      .expect("draw");
+    format!("{}", terminal.backend())
+  }
+
+  fn completed_shell_call() -> ExecCall {
+    ExecCall {
+      command_id: "call-1".to_string(),
+      tool_name: "shell".to_string(),
+      command: "ls -la /tmp".to_string(),
+      cwd: PathBuf::from("/home/user/project"),
+      output: Some(CommandOutput {
+        exit_code: 0,
+        output: "total 8\ndrwxrwxrwt 2 root root 40 Jan  1 00:00 .\n".to_string(),
+      }),
+      start_time: None,
+      duration: Some(Duration::from_millis(42)),
+    }
+  }
+
+  fn completed_read_file_call() -> ExecCall {
+    ExecCall {
+      command_id: "call-2".to_string(),
+      tool_name: "read_file".to_string(),
+      command: "read_file".to_string(),
+      cwd: PathBuf::from("/home/user/project"),
+      output: Some(CommandOutput {
+        exit_code: 0,
+        output: "1: fn main() {\n2:   println!(\"hello\");\n3: }\n".to_string(),
+      }),
+      start_time: None,
+      duration: Some(Duration::from_millis(5)),
+    }
+  }
+
+  fn completed_list_dir_call() -> ExecCall {
+    ExecCall {
+      command_id: "call-3".to_string(),
+      tool_name: "list_dir".to_string(),
+      command: "list_dir".to_string(),
+      cwd: PathBuf::from("/home/user/project"),
+      output: Some(CommandOutput {
+        exit_code: 0,
+        output: "src/\nCargo.toml\nREADME.md\n".to_string(),
+      }),
+      start_time: None,
+      duration: Some(Duration::from_millis(3)),
+    }
+  }
+
+  #[test]
+  fn snapshot_shell_tool_completed() {
+    let cell = ExecCell::new(completed_shell_call(), false);
+    let rendered = render_exec_cell(&cell, 60, 10);
+    insta::assert_snapshot!(rendered);
+  }
+
+  #[test]
+  fn snapshot_read_file_tool_completed() {
+    let cell = ExecCell::new(completed_read_file_call(), false);
+    let rendered = render_exec_cell(&cell, 60, 10);
+    insta::assert_snapshot!(rendered);
+  }
+
+  #[test]
+  fn snapshot_list_dir_tool_completed() {
+    let cell = ExecCell::new(completed_list_dir_call(), false);
+    let rendered = render_exec_cell(&cell, 60, 10);
+    insta::assert_snapshot!(rendered);
+  }
+
+  #[test]
+  fn snapshot_mixed_tools_in_one_cell() {
+    let mut cell = ExecCell::new(completed_shell_call(), false);
+    cell.push_call(completed_read_file_call());
+    cell.push_call(completed_list_dir_call());
+    let rendered = render_exec_cell(&cell, 60, 25);
+    insta::assert_snapshot!(rendered);
+  }
+
+  #[test]
+  fn snapshot_failed_shell_tool() {
+    let call = ExecCall {
+      command_id: "call-err".to_string(),
+      tool_name: "shell".to_string(),
+      command: "cat /nonexistent".to_string(),
+      cwd: PathBuf::from("/home/user"),
+      output: Some(CommandOutput {
+        exit_code: 1,
+        output: "cat: /nonexistent: No such file or directory\n".to_string(),
+      }),
+      start_time: None,
+      duration: Some(Duration::from_millis(10)),
+    };
+    let cell = ExecCell::new(call, false);
+    let rendered = render_exec_cell(&cell, 60, 8);
+    insta::assert_snapshot!(rendered);
   }
 }

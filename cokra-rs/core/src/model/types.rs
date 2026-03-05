@@ -27,6 +27,10 @@ pub struct ChatRequest {
   #[serde(default)]
   pub tools: Option<Vec<Tool>>,
 
+  /// Tool choice strategy (e.g., "auto", "none", "required")
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub tool_choice: Option<String>,
+
   /// Whether to stream responses
   #[serde(default)]
   pub stream: bool,

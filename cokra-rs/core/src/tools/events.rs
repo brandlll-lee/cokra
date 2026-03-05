@@ -70,6 +70,7 @@ impl ToolEmitter {
             thread_id: ctx.thread_id.to_string(),
             turn_id: ctx.turn_id.to_string(),
             command_id: ctx.call_id.to_string(),
+            tool_name: self.tool_name.clone(),
             command: self
               .display_command
               .clone()

@@ -404,6 +404,7 @@ pub(crate) struct ExecHistoryCell {
 impl ExecHistoryCell {
   pub(crate) fn from_completed_call(
     command_id: String,
+    tool_name: String,
     command: String,
     cwd: std::path::PathBuf,
     exit_code: i32,
@@ -411,7 +412,7 @@ impl ExecHistoryCell {
     duration: std::time::Duration,
     animations_enabled: bool,
   ) -> Self {
-    let mut cell = new_active_exec_command(command_id, command, cwd, animations_enabled);
+    let mut cell = new_active_exec_command(command_id, tool_name, command, cwd, animations_enabled);
     let last_id = cell
       .calls
       .last()

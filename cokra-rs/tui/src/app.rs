@@ -663,7 +663,7 @@ impl App {
             .bottom_pane
             .open_approval(ApprovalOverlay::new(ApprovalRequest {
               call_id: req.id,
-              tool_name: "shell".to_string(),
+              tool_name: req.tool_name,
               command: format!("{}  (cwd: {})", req.command, req.cwd.display()),
             }));
         }

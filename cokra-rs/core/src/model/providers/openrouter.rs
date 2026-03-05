@@ -157,6 +157,8 @@ impl ModelProvider for OpenRouterProvider {
       body["site_name"] = serde_json::json!(site_name);
     }
 
+    super::log_request_summary(&body);
+
     let response = self
       .client
       .post(&url)

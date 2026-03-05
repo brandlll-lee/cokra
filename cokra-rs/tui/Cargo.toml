@@ -37,6 +37,9 @@ itertools = { workspace = true }
 serde_json = { workspace = true }
 pulldown-cmark = "0.13"
 derive_more = { workspace = true, features = ["is_variant"] }
+dirs = { workspace = true }
+pathdiff = { workspace = true }
+shlex = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

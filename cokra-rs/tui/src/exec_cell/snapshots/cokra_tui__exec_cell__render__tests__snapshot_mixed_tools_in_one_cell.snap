@@ -1,0 +1,30 @@
+---
+source: tui/src/exec_cell/render.rs
+assertion_line: 347
+expression: rendered
+---
+"✓ shell                                                     "
+"  $ ls -la /tmp                                             "
+"  └ total 8                                                 "
+"    drwxrwxrwt 2 root root 40 Jan  1 00:00 .                "
+"  ✓ • 0s                                                    "
+"                                                            "
+"✓ read_file                                                 "
+"  › read_file                                               "
+"  └ 1: fn main() {                                          "
+"    2:   println!("hello");                                 "
+"    3: }                                                    "
+"  ✓ • 0s                                                    "
+"                                                            "
+"✓ list_dir                                                  "
+"  › list_dir                                                "
+"  └ src/                                                    "
+"    Cargo.toml                                              "
+"    README.md                                               "
+"  ✓ • 0s                                                    "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "

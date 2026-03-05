@@ -1,0 +1,13 @@
+---
+source: tui/src/exec_cell/render.rs
+assertion_line: 366
+expression: rendered
+---
+"✗ shell                                                     "
+"  $ cat /nonexistent                                        "
+"  └ cat: /nonexistent: No such file or directory            "
+"  ✗ (1) • 0s                                                "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "

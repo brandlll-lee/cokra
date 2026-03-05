@@ -410,6 +410,9 @@ pub struct ExecCommandBeginEvent {
   pub thread_id: String,
   pub turn_id: String,
   pub command_id: String,
+  /// The actual tool name (e.g. "shell", "read_file", "list_dir").
+  pub tool_name: String,
+  /// For shell: the raw command string. For other tools: same as tool_name.
   pub command: String,
   pub cwd: PathBuf,
 }
@@ -439,6 +442,8 @@ pub struct ExecApprovalRequestEvent {
   pub thread_id: String,
   pub turn_id: String,
   pub id: String,
+  /// The actual tool name (e.g. "shell", "read_file", "list_dir").
+  pub tool_name: String,
   pub command: String,
   pub cwd: PathBuf,
 }

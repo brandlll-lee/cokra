@@ -1,0 +1,15 @@
+---
+source: tui/src/exec_cell/render.rs
+assertion_line: 338
+expression: rendered
+---
+"✓ list_dir                                                  "
+"  › list_dir                                                "
+"  └ src/                                                    "
+"    Cargo.toml                                              "
+"    README.md                                               "
+"  ✓ • 0s                                                    "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "

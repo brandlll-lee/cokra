@@ -40,3 +40,7 @@ tokio-util = { workspace = true }
 default = []
 tui = ["ratatui"]
 mcp = ["rmcp"]
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tempfile = "3.26.0"
