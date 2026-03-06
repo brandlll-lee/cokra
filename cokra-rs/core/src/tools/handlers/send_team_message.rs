@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 use cokra_protocol::CollabMessagePostedEvent;
 use cokra_protocol::EventMsg;
+use cokra_protocol::TeamMessageKind;
 
 use crate::agent::team_runtime::runtime_for_thread;
 use crate::tools::context::FunctionCallError;
@@ -17,6 +18,8 @@ pub struct SendTeamMessageHandler;
 struct SendTeamMessageArgs {
   message: String,
   recipient_thread_id: Option<String>,
+  channel: Option<String>,
+  queue_name: Option<String>,
 }
 
 #[async_trait]
@@ -36,11 +39,38 @@ impl ToolHandler for SendTeamMessageHandler {
     let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
       FunctionCallError::Execution("send_team_message runtime is not configured".to_string())
     })?;
-    let message = team_runtime.post_message(
-      runtime.thread_id.clone(),
-      args.recipient_thread_id.clone(),
-      args.message.clone(),
-    );
+    let direct = args.recipient_thread_id.clone();
+    let channel = args
+      .channel
+      .clone()
+      .filter(|value| !value.trim().is_empty());
+    let queue_name = args
+      .queue_name
+      .clone()
+      .filter(|value| !value.trim().is_empty());
+    let kind = if queue_name.is_some() {
+      TeamMessageKind::Queue
+    } else if channel.is_some() {
+      TeamMessageKind::Channel
+    } else if direct.is_some() {
+      TeamMessageKind::Direct
+    } else {
+      TeamMessageKind::Broadcast
+    };
+    let route_key = if queue_name.is_some() {
+      queue_name.clone()
+    } else {
+      channel.clone()
+    };
+    let message = team_runtime
+      .post_message(
+        runtime.thread_id.clone(),
+        direct,
+        kind,
+        route_key,
+        args.message.clone(),
+      )
+      .await;
 
     if let Some(tx_event) = &runtime.tx_event {
       let _ = tx_event

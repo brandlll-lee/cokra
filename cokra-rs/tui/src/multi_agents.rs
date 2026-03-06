@@ -11,7 +11,10 @@ use cokra_protocol::CollabCloseBeginEvent;
 use cokra_protocol::CollabCloseEndEvent;
 use cokra_protocol::CollabMessagePostedEvent;
 use cokra_protocol::CollabMessagesReadEvent;
+use cokra_protocol::CollabPlanDecisionEvent;
+use cokra_protocol::CollabPlanSubmittedEvent;
 use cokra_protocol::CollabTaskUpdatedEvent;
+use cokra_protocol::CollabTeamSnapshotEvent;
 use cokra_protocol::CollabWaitingBeginEvent;
 use cokra_protocol::CollabWaitingEndEvent;
 
@@ -120,6 +123,87 @@ pub(crate) fn task_updated(ev: CollabTaskUpdatedEvent) -> PlainHistoryCell {
   ])
 }
 
+pub(crate) fn team_snapshot(ev: CollabTeamSnapshotEvent) -> PlainHistoryCell {
+  let mut lines = vec![Line::from(vec!["• ".dim(), "Team dashboard".bold()])];
+  lines.push(Line::from(
+    format!("  └ lead: {}", ev.actor_thread_id).dim(),
+  ));
+
+  if ev.snapshot.members.is_empty() {
+    lines.push(Line::from("  └ members: none".dim()));
+  } else {
+    lines.push(Line::from("  └ members:".dim()));
+    for member in ev.snapshot.members {
+      lines.push(Line::from(format!(
+        "    - {} [{}] task={} unread={} status={}",
+        member.thread_id,
+        member.role,
+        member.task,
+        ev.snapshot
+          .unread_counts
+          .get(&member.thread_id)
+          .copied()
+          .unwrap_or(0),
+        short_status_label(&member.status),
+      )));
+    }
+  }
+
+  if ev.snapshot.tasks.is_empty() {
+    lines.push(Line::from("  └ tasks: none".dim()));
+  } else {
+    lines.push(Line::from("  └ tasks:".dim()));
+    for task in ev.snapshot.tasks {
+      let assignee = task
+        .assignee_thread_id
+        .unwrap_or_else(|| "unassigned".to_string());
+      lines.push(Line::from(format!(
+        "    - {} :: {} -> {}",
+        task.id, task.title, assignee
+      )));
+      lines.push(Line::from(vec![
+        "      status: ".dim(),
+        task_status_span(&task.status),
+      ]));
+    }
+  }
+
+  if ev.snapshot.plans.is_empty() {
+    lines.push(Line::from("  └ plans: none".dim()));
+  } else {
+    lines.push(Line::from("  └ plans:".dim()));
+    for plan in ev.snapshot.plans {
+      lines.push(Line::from(format!(
+        "    - {} by {} [{}] {}",
+        plan.id,
+        plan.author_thread_id,
+        short_plan_status(&plan.status),
+        plan.summary
+      )));
+    }
+  }
+
+  PlainHistoryCell::new(lines)
+}
+
+pub(crate) fn plan_submitted(ev: CollabPlanSubmittedEvent) -> PlainHistoryCell {
+  PlainHistoryCell::new(vec![
+    Line::from(vec!["• ".dim(), "Team plan submitted".bold()]),
+    Line::from(format!("  └ actor: {}", ev.actor_thread_id).dim()),
+    Line::from(format!("  └ summary: {}", ev.plan.summary).dim()),
+    Line::from(format!("  └ status: {}", short_plan_status(&ev.plan.status)).dim()),
+  ])
+}
+
+pub(crate) fn plan_decision(ev: CollabPlanDecisionEvent) -> PlainHistoryCell {
+  PlainHistoryCell::new(vec![
+    Line::from(vec!["• ".dim(), "Team plan reviewed".bold()]),
+    Line::from(format!("  └ actor: {}", ev.actor_thread_id).dim()),
+    Line::from(format!("  └ summary: {}", ev.plan.summary).dim()),
+    Line::from(format!("  └ status: {}", short_plan_status(&ev.plan.status)).dim()),
+  ])
+}
+
 fn status_span(status: &AgentStatus) -> Span<'static> {
   match status {
     AgentStatus::PendingInit => "pending".dim(),
@@ -138,8 +222,29 @@ fn task_status_span(status: &cokra_protocol::TeamTaskStatus) -> Span<'static> {
   match status {
     cokra_protocol::TeamTaskStatus::Pending => "pending".dim(),
     cokra_protocol::TeamTaskStatus::InProgress => "in_progress".yellow(),
+    cokra_protocol::TeamTaskStatus::Review => "review".cyan(),
     cokra_protocol::TeamTaskStatus::Completed => "completed".green(),
     cokra_protocol::TeamTaskStatus::Failed => "failed".red(),
     cokra_protocol::TeamTaskStatus::Canceled => "canceled".dim(),
+  }
+}
+
+fn short_status_label(status: &AgentStatus) -> &'static str {
+  match status {
+    AgentStatus::PendingInit => "pending",
+    AgentStatus::Running => "running",
+    AgentStatus::Completed(_) => "completed",
+    AgentStatus::Errored(_) => "errored",
+    AgentStatus::Shutdown => "shutdown",
+    AgentStatus::NotFound => "not_found",
+  }
+}
+
+fn short_plan_status(status: &cokra_protocol::TeamPlanStatus) -> &'static str {
+  match status {
+    cokra_protocol::TeamPlanStatus::Draft => "draft",
+    cokra_protocol::TeamPlanStatus::PendingApproval => "pending_approval",
+    cokra_protocol::TeamPlanStatus::Approved => "approved",
+    cokra_protocol::TeamPlanStatus::Rejected => "rejected",
   }
 }

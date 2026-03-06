@@ -1,8 +1,15 @@
 pub mod apply_patch;
+pub mod approve_team_plan;
+pub mod assign_team_task;
+pub mod claim_next_team_task;
+pub mod claim_team_messages;
+pub mod claim_team_task;
+pub mod cleanup_team;
 pub mod close_agent;
 pub mod create_team_task;
 pub mod dynamic;
 pub mod grep_files;
+pub mod handoff_team_task;
 pub mod list_dir;
 pub mod mcp;
 pub mod plan;
@@ -13,6 +20,7 @@ pub mod send_input;
 pub mod send_team_message;
 pub mod shell;
 pub mod spawn_agent;
+pub mod submit_team_plan;
 pub mod team_status;
 pub mod update_team_task;
 pub mod view_image;
@@ -36,6 +44,35 @@ pub fn register_builtin_handlers(registry: &mut ToolRegistry) {
   registry.register_handler("send_input", Arc::new(send_input::SendInputHandler));
   registry.register_handler("wait", Arc::new(wait::WaitHandler));
   registry.register_handler("close_agent", Arc::new(close_agent::CloseAgentHandler));
+  registry.register_handler(
+    "claim_team_task",
+    Arc::new(claim_team_task::ClaimTeamTaskHandler),
+  );
+  registry.register_handler(
+    "claim_team_messages",
+    Arc::new(claim_team_messages::ClaimTeamMessagesHandler),
+  );
+  registry.register_handler(
+    "claim_next_team_task",
+    Arc::new(claim_next_team_task::ClaimNextTeamTaskHandler),
+  );
+  registry.register_handler(
+    "assign_team_task",
+    Arc::new(assign_team_task::AssignTeamTaskHandler),
+  );
+  registry.register_handler(
+    "handoff_team_task",
+    Arc::new(handoff_team_task::HandoffTeamTaskHandler),
+  );
+  registry.register_handler("cleanup_team", Arc::new(cleanup_team::CleanupTeamHandler));
+  registry.register_handler(
+    "submit_team_plan",
+    Arc::new(submit_team_plan::SubmitTeamPlanHandler),
+  );
+  registry.register_handler(
+    "approve_team_plan",
+    Arc::new(approve_team_plan::ApproveTeamPlanHandler),
+  );
   registry.register_handler("team_status", Arc::new(team_status::TeamStatusHandler));
   registry.register_handler(
     "send_team_message",

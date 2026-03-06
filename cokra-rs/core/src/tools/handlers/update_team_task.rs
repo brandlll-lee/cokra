@@ -47,6 +47,7 @@ impl ToolHandler for UpdateTeamTaskHandler {
     };
     let task = team_runtime
       .update_task(&args.task_id, args.status, assignee_thread_id, args.note)
+      .await
       .ok_or_else(|| {
         FunctionCallError::RespondToModel(format!("unknown task id: {}", args.task_id))
       })?;

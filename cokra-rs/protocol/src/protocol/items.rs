@@ -38,6 +38,7 @@ pub enum AgentStatus {
 pub enum TeamTaskStatus {
   Pending,
   InProgress,
+  Review,
   Completed,
   Failed,
   Canceled,
@@ -55,11 +56,23 @@ pub struct TeamTask {
   pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum TeamMessageKind {
+  #[default]
+  Direct,
+  Broadcast,
+  Channel,
+  Queue,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TeamMessage {
   pub id: String,
   pub sender_thread_id: String,
   pub recipient_thread_id: Option<String>,
+  pub kind: TeamMessageKind,
+  pub route_key: Option<String>,
+  pub claimed_by_thread_id: Option<String>,
   pub message: String,
   pub created_at: i64,
   pub unread: bool,
@@ -79,7 +92,30 @@ pub struct TeamSnapshot {
   pub root_thread_id: String,
   pub members: Vec<TeamMember>,
   pub tasks: Vec<TeamTask>,
+  pub plans: Vec<TeamPlan>,
   pub unread_counts: HashMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TeamPlanStatus {
+  Draft,
+  PendingApproval,
+  Approved,
+  Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TeamPlan {
+  pub id: String,
+  pub author_thread_id: String,
+  pub summary: String,
+  pub steps: Vec<String>,
+  pub status: TeamPlanStatus,
+  pub requires_approval: bool,
+  pub reviewer_thread_id: Option<String>,
+  pub review_note: Option<String>,
+  pub created_at: i64,
+  pub updated_at: i64,
 }
 
 /// Token usage tracking

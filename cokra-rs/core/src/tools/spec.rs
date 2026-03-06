@@ -131,6 +131,14 @@ pub fn build_specs() -> Vec<ToolSpec> {
     send_input_tool(),
     wait_tool(),
     close_agent_tool(),
+    assign_team_task_tool(),
+    claim_team_task_tool(),
+    claim_next_team_task_tool(),
+    claim_team_messages_tool(),
+    handoff_team_task_tool(),
+    cleanup_team_tool(),
+    submit_team_plan_tool(),
+    approve_team_plan_tool(),
     team_status_tool(),
     send_team_message_tool(),
     read_team_messages_tool(),
@@ -448,6 +456,153 @@ fn close_agent_tool() -> ToolSpec {
     "close_agent",
     "Close and clean up a spawned agent when it is no longer needed.",
     obj(props, &["agent_id"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn assign_team_task_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert("task_id".to_string(), str_field("Task id to assign."));
+  props.insert(
+    "assignee_thread_id".to_string(),
+    str_field("Thread id of the teammate who should own the task."),
+  );
+  props.insert("note".to_string(), str_field("Optional assignment note."));
+  ToolSpec::new(
+    "assign_team_task",
+    "Assign a shared team task to a specific teammate.",
+    obj(props, &["task_id", "assignee_thread_id"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn claim_team_task_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert("task_id".to_string(), str_field("Task id to claim."));
+  props.insert(
+    "note".to_string(),
+    str_field("Optional claim note to append to the task history."),
+  );
+  ToolSpec::new(
+    "claim_team_task",
+    "Claim a shared team task for the current teammate and mark it in progress.",
+    obj(props, &["task_id"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn claim_team_messages_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "queue_name".to_string(),
+    str_field("Queue name to claim messages from."),
+  );
+  props.insert(
+    "limit".to_string(),
+    int_field("Maximum number of queue messages to claim."),
+  );
+  ToolSpec::new(
+    "claim_team_messages",
+    "Claim work items from a shared team mailbox queue.",
+    obj(props, &["queue_name"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn claim_next_team_task_tool() -> ToolSpec {
+  ToolSpec::new(
+    "claim_next_team_task",
+    "Claim the next available team workflow task assigned to you or unassigned.",
+    obj(BTreeMap::new(), &[]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn handoff_team_task_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert("task_id".to_string(), str_field("Task id to hand off."));
+  props.insert(
+    "to_thread_id".to_string(),
+    str_field("Teammate thread id receiving the task."),
+  );
+  props.insert("note".to_string(), str_field("Optional handoff note."));
+  props.insert(
+    "review_mode".to_string(),
+    bool_field("When true, hand off the task in review mode instead of pending mode."),
+  );
+  ToolSpec::new(
+    "handoff_team_task",
+    "Hand off a task to another teammate, optionally marking it ready for review.",
+    obj(props, &["task_id", "to_thread_id"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn cleanup_team_tool() -> ToolSpec {
+  ToolSpec::new(
+    "cleanup_team",
+    "Close all spawned agents and clear persisted team mailbox/task state for this workspace.",
+    obj(BTreeMap::new(), &[]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn submit_team_plan_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "summary".to_string(),
+    str_field("Short summary of the proposed plan."),
+  );
+  props.insert(
+    "steps".to_string(),
+    JsonSchema::Array {
+      items: Box::new(str_field("Plan step.")),
+      description: Some("Ordered plan steps.".to_string()),
+    },
+  );
+  props.insert(
+    "requires_approval".to_string(),
+    bool_field("Whether this teammate must wait for approval before mutating work."),
+  );
+  ToolSpec::new(
+    "submit_team_plan",
+    "Submit a teammate work plan for approval before making mutating changes.",
+    obj(props, &["summary", "steps"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn approve_team_plan_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "plan_id".to_string(),
+    str_field("Plan id to approve or reject."),
+  );
+  props.insert(
+    "approved".to_string(),
+    bool_field("Whether to approve the plan."),
+  );
+  props.insert("note".to_string(), str_field("Optional reviewer note."));
+  ToolSpec::new(
+    "approve_team_plan",
+    "Approve or reject a teammate's submitted work plan.",
+    obj(props, &["plan_id", "approved"]),
     None,
     ToolHandlerType::Function,
     default_permissions(),

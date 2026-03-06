@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,7 +23,9 @@ use tokio_stream::StreamExt;
 use cokra_core::Cokra;
 use cokra_protocol::Event;
 use cokra_protocol::EventMsg;
+use cokra_protocol::ExecApprovalRequestEvent;
 use cokra_protocol::Op;
+use cokra_protocol::RequestUserInputEvent;
 use cokra_protocol::ReviewDecision;
 use cokra_protocol::UserInput;
 
@@ -41,6 +44,7 @@ use crate::chatwidget::ChatWidgetAction;
 use crate::chatwidget::TokenUsage;
 use crate::custom_terminal::Frame;
 use crate::history_cell::HistoryCell;
+use crate::history_cell::PlainHistoryCell;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::tui::FrameRequester;
@@ -78,12 +82,21 @@ pub struct App {
   backtrack_render_pending: bool,
   status_line_mode: StatusLineMode,
   queued_submissions: VecDeque<ComposerSubmission>,
+  background_pending_threads: HashMap<String, BackgroundPending>,
+  background_approval_requests: HashMap<String, Vec<ExecApprovalRequestEvent>>,
+  background_user_input_requests: HashMap<String, Vec<RequestUserInputEvent>>,
 }
 
 #[derive(Debug, Clone)]
 struct PendingApproval {
   id: String,
   turn_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct BackgroundPending {
+  approval_count: usize,
+  user_input_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +140,9 @@ impl App {
       backtrack_render_pending: false,
       status_line_mode: StatusLineMode::Default,
       queued_submissions: VecDeque::new(),
+      background_pending_threads: HashMap::new(),
+      background_approval_requests: HashMap::new(),
+      background_user_input_requests: HashMap::new(),
     };
 
     // 1:1 codex: status line is enabled by default.
@@ -324,6 +340,12 @@ impl App {
         self
           .apply_model_selection_or_connect(model_id, effort)
           .await?;
+      }
+      AppEvent::OpenBackgroundApproval(req) => {
+        self.open_background_approval(req);
+      }
+      AppEvent::OpenBackgroundUserInput(req) => {
+        self.open_background_user_input(req);
       }
       AppEvent::ApiKeySubmitted {
         provider_id,
@@ -694,6 +716,7 @@ impl App {
   }
 
   async fn handle_cokra_event(&mut self, event: Event) -> Result<()> {
+    let root_thread_id = self.cokra.thread_id().map(ToString::to_string);
     let turn_finished = matches!(
       event.msg,
       EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)
@@ -702,6 +725,20 @@ impl App {
     if let Some(action) = self.chat_widget.handle_event(&event.msg) {
       match action {
         ChatWidgetAction::ShowApproval(req) => {
+          if root_thread_id.as_deref() != Some(req.thread_id.as_str()) {
+            let pending = self
+              .background_pending_threads
+              .entry(req.thread_id.clone())
+              .or_default();
+            pending.approval_count += 1;
+            self
+              .background_approval_requests
+              .entry(req.thread_id.clone())
+              .or_default()
+              .push(req.clone());
+            self.sync_bottom_pane_context();
+            return Ok(());
+          }
           self.pending_approval = Some(PendingApproval {
             id: req.id.clone(),
             turn_id: Some(req.turn_id.clone()),
@@ -717,6 +754,20 @@ impl App {
             }));
         }
         ChatWidgetAction::ShowRequestUserInput(req) => {
+          if root_thread_id.as_deref() != Some(req.thread_id.as_str()) {
+            let pending = self
+              .background_pending_threads
+              .entry(req.thread_id.clone())
+              .or_default();
+            pending.user_input_count += 1;
+            self
+              .background_user_input_requests
+              .entry(req.thread_id.clone())
+              .or_default()
+              .push(req.clone());
+            self.sync_bottom_pane_context();
+            return Ok(());
+          }
           self.chat_widget.bottom_pane.push_user_input_request(req);
         }
       }
@@ -725,6 +776,13 @@ impl App {
     self.sync_bottom_pane_context();
 
     if turn_finished {
+      if let Some(thread_id) = event_thread_id(&event.msg)
+        && root_thread_id.as_deref() != Some(thread_id.as_str())
+      {
+        self.background_pending_threads.remove(&thread_id);
+        self.background_approval_requests.remove(&thread_id);
+        self.background_user_input_requests.remove(&thread_id);
+      }
       self.task_running = false;
       self.chat_widget.set_agent_turn_running(false);
       self.pending_approval = None;
@@ -857,12 +915,24 @@ impl App {
       SlashCommand::Statusline => {
         self.open_statusline_popup();
       }
+      SlashCommand::Approvals => {
+        self.open_background_approvals_picker();
+      }
       SlashCommand::Diff => {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
             Line::from("• /diff is not yet implemented.".dim()),
           ]));
+      }
+      SlashCommand::Agent => {
+        self.open_agent_picker();
+      }
+      SlashCommand::Collab => {
+        self.show_team_dashboard();
+      }
+      SlashCommand::Clean => {
+        self.cleanup_team().await?;
       }
       // All other commands: show not-yet-implemented message.
       _ => {
@@ -1223,6 +1293,14 @@ impl App {
     self.refresh_status_line();
   }
 
+  fn background_pending_count(&self) -> usize {
+    self
+      .background_pending_threads
+      .values()
+      .map(|pending| pending.approval_count + pending.user_input_count)
+      .sum()
+  }
+
   fn refresh_status_line(&mut self) {
     let enabled = !matches!(self.status_line_mode, StatusLineMode::Off);
     self
@@ -1241,6 +1319,7 @@ impl App {
       .unwrap_or_else(|| self.cokra.cwd());
     let model = self.chat_widget.model_name().to_string();
     let usage = self.chat_widget.token_usage();
+    let team_snapshot = self.cokra.team_snapshot();
 
     let line = match self.status_line_mode {
       StatusLineMode::Minimal => Line::from(vec![
@@ -1260,6 +1339,23 @@ impl App {
           usage.input_tokens, usage.output_tokens, usage.total_tokens
         )));
         spans.push(ratatui::text::Span::from("  •  ").dim());
+        if let Some(snapshot) = &team_snapshot {
+          let unread_total: usize = snapshot.unread_counts.values().copied().sum();
+          let pending_plans = snapshot
+            .plans
+            .iter()
+            .filter(|plan| matches!(plan.status, cokra_protocol::TeamPlanStatus::PendingApproval))
+            .count();
+          spans.push(ratatui::text::Span::from("team: ").dim());
+          spans.push(ratatui::text::Span::from(format!(
+            "{} members, {} unread, {} bg approvals, {} pending plans",
+            snapshot.members.len(),
+            unread_total,
+            self.background_pending_count(),
+            pending_plans
+          )));
+          spans.push(ratatui::text::Span::from("  •  ").dim());
+        }
         spans.push(ratatui::text::Span::from("cwd: ").dim());
         spans.push(ratatui::text::Span::from(cwd.display().to_string()));
         Line::from(spans)
@@ -1312,6 +1408,251 @@ impl App {
           frame.set_cursor_position((x, y));
         }
       }
+    }
+  }
+
+  fn show_team_dashboard(&mut self) {
+    let Some(root_thread_id) = self.cokra.thread_id().map(ToString::to_string) else {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          "• No active team runtime".dim(),
+        )]));
+      return;
+    };
+    let Some(snapshot) = self.cokra.team_snapshot() else {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          "• No active team runtime".dim(),
+        )]));
+      return;
+    };
+    let cell = crate::multi_agents::team_snapshot(cokra_protocol::CollabTeamSnapshotEvent {
+      actor_thread_id: root_thread_id,
+      snapshot,
+    });
+    self.chat_widget.add_to_history(cell);
+  }
+
+  fn open_agent_picker(&mut self) {
+    use crate::bottom_pane::list_selection_view::SelectionAction;
+    use crate::bottom_pane::list_selection_view::SelectionItem;
+    use crate::bottom_pane::list_selection_view::SelectionViewParams;
+    use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+
+    let Some(root_thread_id) = self.cokra.thread_id().map(ToString::to_string) else {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          "• No active team runtime".dim(),
+        )]));
+      return;
+    };
+    let Some(snapshot) = self.cokra.team_snapshot() else {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          "• No active team runtime".dim(),
+        )]));
+      return;
+    };
+    let pending_map = self.background_pending_threads.clone();
+
+    let items = snapshot
+      .members
+      .into_iter()
+      .map(|member| {
+        let thread_id = member.thread_id.clone();
+        let unread = snapshot
+          .unread_counts
+          .get(&member.thread_id)
+          .copied()
+          .unwrap_or(0);
+        let pending = pending_map
+          .get(&member.thread_id)
+          .map(|item| item.approval_count + item.user_input_count)
+          .unwrap_or(0);
+        let role = member.role.clone();
+        let task = member.task.clone();
+        let status = format!("{:?}", member.status);
+        let description = Some(format!("role={role} • unread={unread} • pending={pending}"));
+        let lines = vec![
+          Line::from(format!("• Thread: {}", thread_id)),
+          Line::from(format!("• Role: {}", role)),
+          Line::from(format!("• Task: {}", task)),
+          Line::from(format!("• Status: {}", status)),
+          Line::from(format!("• Unread mailbox: {}", unread)),
+          Line::from(format!("• Background approvals: {}", pending)),
+        ];
+        let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+          tx.insert_history_cell(PlainHistoryCell::new(lines.clone()));
+        })];
+        SelectionItem {
+          name: member.thread_id,
+          description,
+          is_current: thread_id == root_thread_id,
+          actions,
+          dismiss_on_select: true,
+          ..Default::default()
+        }
+      })
+      .collect();
+
+    self
+      .chat_widget
+      .bottom_pane
+      .show_selection_view(SelectionViewParams {
+        title: Some("Team Agents".to_string()),
+        subtitle: Some(
+          "Inspect team members, unread mailbox, and background approvals.".to_string(),
+        ),
+        footer_hint: Some(standard_popup_hint_line()),
+        items,
+        is_searchable: true,
+        search_placeholder: Some("Filter agents".to_string()),
+        ..Default::default()
+      });
+  }
+
+  async fn cleanup_team(&mut self) -> Result<()> {
+    let _ = self.cokra.cleanup_team_runtime().await;
+    self.background_pending_threads.clear();
+    self.background_approval_requests.clear();
+    self.background_user_input_requests.clear();
+    self.show_team_dashboard();
+    self.sync_bottom_pane_context();
+    Ok(())
+  }
+
+  fn open_background_approval(&mut self, req: ExecApprovalRequestEvent) {
+    decrement_background_approval(&mut self.background_pending_threads, &req.thread_id);
+    if let Some(requests) = self.background_approval_requests.get_mut(&req.thread_id) {
+      requests.retain(|item| item.id != req.id);
+    }
+    self.pending_approval = Some(PendingApproval {
+      id: req.id.clone(),
+      turn_id: Some(req.turn_id.clone()),
+    });
+    self
+      .chat_widget
+      .bottom_pane
+      .open_approval(ApprovalOverlay::new(ApprovalRequest {
+        call_id: req.id,
+        tool_name: req.tool_name,
+        command: format!("{}  (cwd: {})", req.command, req.cwd.display()),
+      }));
+    self.sync_bottom_pane_context();
+  }
+
+  fn open_background_user_input(&mut self, req: RequestUserInputEvent) {
+    decrement_background_user_input(&mut self.background_pending_threads, &req.thread_id);
+    if let Some(requests) = self.background_user_input_requests.get_mut(&req.thread_id) {
+      requests.retain(|item| item.turn_id != req.turn_id);
+    }
+    self.chat_widget.bottom_pane.push_user_input_request(req);
+    self.sync_bottom_pane_context();
+  }
+
+  fn open_background_approvals_picker(&mut self) {
+    use crate::bottom_pane::list_selection_view::SelectionAction;
+    use crate::bottom_pane::list_selection_view::SelectionItem;
+    use crate::bottom_pane::list_selection_view::SelectionViewParams;
+    use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+
+    let mut items = Vec::new();
+    for requests in self.background_approval_requests.values() {
+      for req in requests {
+        let req_clone = req.clone();
+        let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+          tx.send(AppEvent::OpenBackgroundApproval(req_clone.clone()));
+        })];
+        items.push(SelectionItem {
+          name: format!("approval {}", req.id),
+          description: Some(format!("thread={} • tool={}", req.thread_id, req.tool_name)),
+          actions,
+          dismiss_on_select: true,
+          ..Default::default()
+        });
+      }
+    }
+    for requests in self.background_user_input_requests.values() {
+      for req in requests {
+        let req_clone = req.clone();
+        let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+          tx.send(AppEvent::OpenBackgroundUserInput(req_clone.clone()));
+        })];
+        items.push(SelectionItem {
+          name: format!("user input {}", req.turn_id),
+          description: Some(format!(
+            "thread={} • questions={}",
+            req.thread_id,
+            req.questions.len()
+          )),
+          actions,
+          dismiss_on_select: true,
+          ..Default::default()
+        });
+      }
+    }
+
+    if items.is_empty() {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          "• No background approvals pending".dim(),
+        )]));
+      return;
+    }
+
+    self
+      .chat_widget
+      .bottom_pane
+      .show_selection_view(SelectionViewParams {
+        title: Some("Background Approvals".to_string()),
+        subtitle: Some(
+          "Review pending approvals and input requests from background teammates.".to_string(),
+        ),
+        footer_hint: Some(standard_popup_hint_line()),
+        items,
+        is_searchable: true,
+        search_placeholder: Some("Filter pending items".to_string()),
+        ..Default::default()
+      });
+  }
+}
+
+fn event_thread_id(event: &EventMsg) -> Option<String> {
+  match event {
+    EventMsg::ExecApprovalRequest(e) => Some(e.thread_id.clone()),
+    EventMsg::RequestUserInput(e) => Some(e.thread_id.clone()),
+    EventMsg::TurnComplete(e) => Some(e.thread_id.clone()),
+    EventMsg::TurnAborted(e) => Some(e.thread_id.clone()),
+    EventMsg::TurnStarted(e) => Some(e.thread_id.clone()),
+    _ => None,
+  }
+}
+
+fn decrement_background_approval(
+  pending_threads: &mut HashMap<String, BackgroundPending>,
+  thread_id: &str,
+) {
+  if let Some(pending) = pending_threads.get_mut(thread_id) {
+    pending.approval_count = pending.approval_count.saturating_sub(1);
+    if pending.approval_count == 0 && pending.user_input_count == 0 {
+      pending_threads.remove(thread_id);
+    }
+  }
+}
+
+fn decrement_background_user_input(
+  pending_threads: &mut HashMap<String, BackgroundPending>,
+  thread_id: &str,
+) {
+  if let Some(pending) = pending_threads.get_mut(thread_id) {
+    pending.user_input_count = pending.user_input_count.saturating_sub(1);
+    if pending.approval_count == 0 && pending.user_input_count == 0 {
+      pending_threads.remove(thread_id);
     }
   }
 }

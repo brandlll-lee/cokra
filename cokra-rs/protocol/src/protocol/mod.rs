@@ -138,6 +138,9 @@ pub enum EventMsg {
   CollabMessagePosted(CollabMessagePostedEvent),
   CollabMessagesRead(CollabMessagesReadEvent),
   CollabTaskUpdated(CollabTaskUpdatedEvent),
+  CollabTeamSnapshot(CollabTeamSnapshotEvent),
+  CollabPlanSubmitted(CollabPlanSubmittedEvent),
+  CollabPlanDecision(CollabPlanDecisionEvent),
 }
 
 // ============================================================================
@@ -1201,6 +1204,25 @@ pub struct CollabMessagesReadEvent {
 pub struct CollabTaskUpdatedEvent {
   pub actor_thread_id: String,
   pub task: TeamTask,
+}
+
+/// Collab team snapshot event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabTeamSnapshotEvent {
+  pub actor_thread_id: String,
+  pub snapshot: TeamSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabPlanSubmittedEvent {
+  pub actor_thread_id: String,
+  pub plan: TeamPlan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabPlanDecisionEvent {
+  pub actor_thread_id: String,
+  pub plan: TeamPlan,
 }
 
 // ---------- Error Info ----------

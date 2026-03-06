@@ -751,6 +751,8 @@ name = "cokra-state"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "dirs 6.0.0",
  "serde",
  "serde_json",
  "sqlx",

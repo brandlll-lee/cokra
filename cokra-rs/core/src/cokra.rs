@@ -32,6 +32,7 @@ use crate::agent::AgentStatus;
 use crate::agent::Turn;
 use crate::agent::team_runtime::clear_team_runtime;
 use crate::agent::team_runtime::register_team_runtime;
+use crate::agent::team_runtime::runtime_for_thread;
 use crate::model::ChatResponse;
 use crate::model::ModelClient;
 use crate::model::ToolCall;
@@ -164,7 +165,7 @@ impl Cokra {
       tool_router.clone(),
       session.clone(),
       turn_config,
-      tx_raw_event,
+      tx_raw_event.clone(),
       thread_manager.downgrade_state(),
       guards,
       root_thread_id.clone(),
@@ -175,8 +176,10 @@ impl Cokra {
       agent_control.clone(),
       agent_control.guards(),
       thread_manager.state(),
+      tx_raw_event.clone(),
       root_thread_id,
-    );
+    )
+    .await?;
     agent_control.start().await?;
     let agent_status = agent_control.subscribe_status();
 
@@ -423,6 +426,26 @@ impl Cokra {
     self.thread_manager.list_thread_ids()
   }
 
+  pub fn team_snapshot(&self) -> Option<cokra_protocol::TeamSnapshot> {
+    let thread_id = self.thread_id()?.to_string();
+    let runtime = runtime_for_thread(&thread_id)?;
+    Some(runtime.snapshot())
+  }
+
+  pub async fn cleanup_team_runtime(&self) -> anyhow::Result<()> {
+    let Some(thread_id) = self.thread_id().map(ToString::to_string) else {
+      return Ok(());
+    };
+    let Some(runtime) = runtime_for_thread(&thread_id) else {
+      return Ok(());
+    };
+    for agent_id in runtime.list_spawned_agent_ids() {
+      let _ = runtime.close_agent(&agent_id).await;
+    }
+    runtime.clear_state().await;
+    Ok(())
+  }
+
   pub async fn shutdown(self) -> anyhow::Result<()> {
     let _ = self.submit(Op::Shutdown).await?;
     self.agent_control.stop().await?;
@@ -553,6 +576,14 @@ fn build_system_prompt() -> String {
     "- **send_input**: Send follow-up instructions to a spawned agent.\n",
     "- **wait**: Wait for spawned agents before you summarize or finish.\n",
     "- **close_agent**: Clean up spawned agents when they are no longer needed.\n",
+    "- **assign_team_task**: Assign a workflow task to a specific teammate.\n",
+    "- **claim_team_task**: Claim a shared task for yourself and mark it in progress.\n",
+    "- **claim_next_team_task**: Claim the next available task assigned to you or left unassigned.\n",
+    "- **claim_team_messages**: Claim work items from a shared team queue.\n",
+    "- **handoff_team_task**: Hand off a task to another teammate, optionally for review.\n",
+    "- **cleanup_team**: Close all spawned agents and clear persisted team coordination state.\n",
+    "- **submit_team_plan**: Submit a teammate plan that must be approved before mutating work.\n",
+    "- **approve_team_plan**: Approve or reject a teammate's submitted plan.\n",
     "- **team_status**: Inspect the shared team snapshot, including members, tasks, and unread mailbox counts.\n",
     "- **send_team_message**: Send a direct or broadcast mailbox message to teammates.\n",
     "- **read_team_messages**: Read your mailbox messages and mark them as seen.\n",
@@ -560,7 +591,7 @@ fn build_system_prompt() -> String {
     "- **update_team_task**: Update a shared team task status, assignee, or notes.\n",
     "\n",
     "If you spawn agents for research or parallel analysis, call `wait` before delivering the final answer.\n",
-    "When coordinating a team, use `team_status` to inspect the shared state, use the mailbox tools for teammate-to-teammate communication, and keep the shared task board up to date.\n",
+    "When coordinating a team, use `team_status` to inspect the shared state, use the mailbox tools for teammate-to-teammate communication, assign or claim tasks before working on them, hand tasks off between teammates when workflow stages change, submit plans before mutating work when approval is required, keep the shared task board up to date, and use `cleanup_team` when the team should be torn down.\n",
     "\n",
     "## Shell commands\n",
     "\n",
@@ -840,7 +871,13 @@ async fn submission_loop(
         turn_id,
         decision,
       } => {
-        let notified = session.notify_exec_approval(&id, decision).await;
+        let mut notified = session.notify_exec_approval(&id, decision.clone()).await;
+        if !notified
+          && let Some(root_thread_id) = session.thread_id().map(ToString::to_string)
+          && let Some(team_runtime) = runtime_for_thread(&root_thread_id)
+        {
+          notified = team_runtime.notify_exec_approval(&id, decision).await;
+        }
         if !notified {
           emit_event(
             &tx_event,
@@ -855,7 +892,13 @@ async fn submission_loop(
         }
       }
       Op::UserInputAnswer { id, response } => {
-        let notified = session.notify_user_input(&id, response).await;
+        let mut notified = session.notify_user_input(&id, response.clone()).await;
+        if !notified
+          && let Some(root_thread_id) = session.thread_id().map(ToString::to_string)
+          && let Some(team_runtime) = runtime_for_thread(&root_thread_id)
+        {
+          notified = team_runtime.notify_user_input(&id, response).await;
+        }
         if !notified {
           emit_event(
             &tx_event,
@@ -950,7 +993,13 @@ async fn run_turn_with_interrupt(
             turn_id: op_turn_id,
             decision,
           } => {
-            let notified = session.notify_exec_approval(&id, decision).await;
+            let mut notified = session.notify_exec_approval(&id, decision.clone()).await;
+            if !notified
+              && let Some(root_thread_id) = session.thread_id().map(ToString::to_string)
+              && let Some(team_runtime) = runtime_for_thread(&root_thread_id)
+            {
+              notified = team_runtime.notify_exec_approval(&id, decision).await;
+            }
             if !notified {
               emit_event(
                 tx_event,
@@ -964,7 +1013,13 @@ async fn run_turn_with_interrupt(
             }
           }
           Op::UserInputAnswer { id, response } => {
-            let notified = session.notify_user_input(&id, response).await;
+            let mut notified = session.notify_user_input(&id, response.clone()).await;
+            if !notified
+              && let Some(root_thread_id) = session.thread_id().map(ToString::to_string)
+              && let Some(team_runtime) = runtime_for_thread(&root_thread_id)
+            {
+              notified = team_runtime.notify_user_input(&id, response).await;
+            }
             if !notified {
               emit_event(
                 tx_event,
@@ -1024,7 +1079,6 @@ mod tests {
   use uuid::Uuid;
 
   use super::Cokra;
-  use super::map_approval_policy;
   use super::map_sandbox_policy;
   use super::resolve_model_id;
   use crate::model::ChatRequest;
@@ -1044,9 +1098,11 @@ mod tests {
   use crate::model::ToolCallFunction;
   use crate::model::Usage;
   use crate::model::provider::ModelProvider;
+  use crate::tools::context::FunctionCallError;
   use crate::tools::context::ToolOutput;
   use crate::tools::router::ToolRunContext;
   use cokra_config::ApprovalMode;
+  use cokra_protocol::AskForApproval;
   use cokra_protocol::CompletionStatus;
   use cokra_protocol::EventMsg;
   use cokra_protocol::Op;
@@ -1924,7 +1980,7 @@ mod tests {
       thread_id,
       Uuid::new_v4().to_string(),
       cokra.config.cwd.clone(),
-      map_approval_policy(&cokra.config),
+      AskForApproval::OnFailure,
       map_sandbox_policy(&cokra.config),
     );
     run_ctx.has_managed_network_requirements = cokra.config.sandbox.network_access;
@@ -1934,6 +1990,25 @@ mod tests {
       .route_tool_call(name, args, run_ctx)
       .await
       .expect("tool call should succeed")
+  }
+
+  async fn execute_tool_as_thread_result(
+    cokra: &Cokra,
+    thread_id: String,
+    name: &str,
+    args: serde_json::Value,
+  ) -> Result<ToolOutput, FunctionCallError> {
+    let mut run_ctx = ToolRunContext::new(
+      cokra.session.clone(),
+      thread_id,
+      Uuid::new_v4().to_string(),
+      cokra.config.cwd.clone(),
+      AskForApproval::OnFailure,
+      map_sandbox_policy(&cokra.config),
+    );
+    run_ctx.has_managed_network_requirements = cokra.config.sandbox.network_access;
+
+    cokra.tool_router.route_tool_call(name, args, run_ctx).await
   }
 
   #[tokio::test]
@@ -2223,12 +2298,14 @@ mod tests {
 
   #[tokio::test]
   async fn test_team_mailbox_and_task_board_round_trip() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
     let mut config = cokra_config::ConfigLoader::default()
       .load_with_cli_overrides(vec![])
       .expect("load config");
     config.models.provider = "mock".to_string();
     config.models.model = "mock/default".to_string();
     config.approval.policy = ApprovalMode::Auto;
+    config.cwd = tmpdir.path().to_path_buf();
 
     let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
       .await
@@ -2354,6 +2431,515 @@ mod tests {
         .any(|item| item.status == TeamTaskStatus::Completed)
     );
     assert_eq!(snapshot.unread_counts.get(&agent_id), Some(&0usize));
+  }
+
+  #[tokio::test]
+  async fn test_team_state_restores_after_restart() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "mock".to_string();
+    config.models.model = "mock/default".to_string();
+    config.approval.policy = ApprovalMode::Auto;
+    config.cwd = tmpdir.path().to_path_buf();
+
+    let cokra = Cokra::new_with_model_client(config.clone(), build_mock_client().await)
+      .await
+      .expect("create cokra");
+
+    let created = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "persist-task-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "create_team_task".to_string(),
+          arguments: serde_json::json!({
+            "title": "Persistent task",
+            "details": "Should survive restart"
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("create task");
+    let task: TeamTask = serde_json::from_str(&created.content).expect("task json");
+    assert_eq!(task.title, "Persistent task");
+
+    let _ = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "persist-mail-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "send_team_message".to_string(),
+          arguments: serde_json::json!({
+            "message": "Persistent mail"
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("send message");
+
+    cokra.shutdown().await.expect("shutdown first runtime");
+
+    let restored = Cokra::new_with_model_client(config, build_mock_client().await)
+      .await
+      .expect("recreate cokra");
+    let status = restored
+      .execute_tool(crate::model::ToolCall {
+        id: "persist-status-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "team_status".to_string(),
+          arguments: "{}".to_string(),
+        },
+      })
+      .await
+      .expect("team status");
+    let snapshot: TeamSnapshot = serde_json::from_str(&status.content).expect("snapshot json");
+    assert!(
+      snapshot
+        .tasks
+        .iter()
+        .any(|item| item.title == "Persistent task")
+    );
+    let current_root = restored.thread_id().expect("thread id").to_string();
+    assert_eq!(snapshot.unread_counts.get(&current_root), Some(&1usize));
+  }
+
+  #[tokio::test]
+  async fn test_cleanup_team_clears_persisted_state() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "mock".to_string();
+    config.models.model = "mock/default".to_string();
+    config.approval.policy = ApprovalMode::Auto;
+    config.cwd = tmpdir.path().to_path_buf();
+
+    let cokra = Cokra::new_with_model_client(config.clone(), build_mock_client().await)
+      .await
+      .expect("create cokra");
+    let _ = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "cleanup-task-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "create_team_task".to_string(),
+          arguments: serde_json::json!({
+            "title": "Temporary task"
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("create temp task");
+    let _ = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "cleanup-team-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "cleanup_team".to_string(),
+          arguments: "{}".to_string(),
+        },
+      })
+      .await
+      .expect("cleanup team");
+    cokra.shutdown().await.expect("shutdown runtime");
+
+    let restored = Cokra::new_with_model_client(config, build_mock_client().await)
+      .await
+      .expect("recreate cokra");
+    let status = restored
+      .execute_tool(crate::model::ToolCall {
+        id: "cleanup-status-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "team_status".to_string(),
+          arguments: "{}".to_string(),
+        },
+      })
+      .await
+      .expect("team status");
+    let snapshot: TeamSnapshot = serde_json::from_str(&status.content).expect("snapshot json");
+    assert!(snapshot.tasks.is_empty());
+    let unread_total: usize = snapshot.unread_counts.values().copied().sum();
+    assert_eq!(unread_total, 0);
+  }
+
+  #[tokio::test]
+  async fn test_claim_team_task_marks_in_progress_for_current_thread() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "mock".to_string();
+    config.models.model = "mock/default".to_string();
+    config.approval.policy = ApprovalMode::Auto;
+    config.cwd = tmpdir.path().to_path_buf();
+
+    let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
+      .await
+      .expect("create cokra");
+
+    let created = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "claim-task-create".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "create_team_task".to_string(),
+          arguments: serde_json::json!({
+            "title": "Claim me"
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("create task");
+    let task: TeamTask = serde_json::from_str(&created.content).expect("task json");
+
+    let claimed = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "claim-task-run".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "claim_team_task".to_string(),
+          arguments: serde_json::json!({
+            "task_id": task.id,
+            "note": "Starting work now"
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("claim task");
+    let claimed_task: TeamTask = serde_json::from_str(&claimed.content).expect("claimed json");
+    assert_eq!(claimed_task.status, TeamTaskStatus::InProgress);
+    assert_eq!(
+      claimed_task.assignee_thread_id,
+      cokra.thread_id().map(ToString::to_string)
+    );
+    assert!(
+      claimed_task
+        .notes
+        .iter()
+        .any(|note| note == "Starting work now")
+    );
+  }
+
+  #[tokio::test]
+  async fn test_team_plan_gate_blocks_mutation_until_approved() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "mock".to_string();
+    config.models.model = "mock/default".to_string();
+    config.approval.policy = ApprovalMode::Auto;
+    config.cwd = tmpdir.path().to_path_buf();
+
+    let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
+      .await
+      .expect("create cokra");
+
+    let spawn = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "plan-gate-spawn".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "spawn_agent".to_string(),
+          arguments: serde_json::json!({
+            "task": "You are teammate leex. Wait for plan review."
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("spawn");
+    let spawned: serde_json::Value = serde_json::from_str(&spawn.content).expect("spawn json");
+    let agent_id = spawned["agent_id"].as_str().expect("agent id").to_string();
+    let _ = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "plan-gate-wait".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "wait".to_string(),
+          arguments: serde_json::json!({
+            "agent_ids": [agent_id.clone()],
+            "timeout_ms": 10000
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("wait");
+
+    let submitted = execute_tool_as_thread(
+      &cokra,
+      agent_id.clone(),
+      "submit_team_plan",
+      serde_json::json!({
+        "summary": "Refactor module safely",
+        "steps": ["Inspect files", "Edit target module", "Run focused tests"],
+        "requires_approval": true
+      }),
+    )
+    .await;
+    let plan: cokra_protocol::TeamPlan =
+      serde_json::from_str(&submitted.content).expect("plan json");
+
+    let target = tmpdir.path().join("plan-gated.txt");
+    let blocked = execute_tool_as_thread_result(
+      &cokra,
+      agent_id.clone(),
+      "write_file",
+      serde_json::json!({
+        "file_path": target.display().to_string(),
+        "content": "blocked until approved"
+      }),
+    )
+    .await;
+    let err = blocked.expect_err("mutation should be blocked before approval");
+    assert!(err.to_string().contains("plan approval required"));
+
+    let _ = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "plan-gate-approve".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "approve_team_plan".to_string(),
+          arguments: serde_json::json!({
+            "plan_id": plan.id,
+            "approved": true,
+            "note": "Proceed"
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("approve plan");
+
+    let write = execute_tool_as_thread_result(
+      &cokra,
+      agent_id,
+      "write_file",
+      serde_json::json!({
+        "file_path": target.display().to_string(),
+        "content": "approved now"
+      }),
+    )
+    .await;
+    assert!(write.is_ok(), "mutation should succeed after approval");
+  }
+
+  #[tokio::test]
+  async fn test_team_channel_and_queue_mailbox_round_trip() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "mock".to_string();
+    config.models.model = "mock/default".to_string();
+    config.approval.policy = ApprovalMode::Auto;
+    config.cwd = tmpdir.path().to_path_buf();
+
+    let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
+      .await
+      .expect("create cokra");
+
+    let spawn = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "queue-spawn".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "spawn_agent".to_string(),
+          arguments: serde_json::json!({"task": "You are teammate alex."}).to_string(),
+        },
+      })
+      .await
+      .expect("spawn");
+    let spawned: serde_json::Value = serde_json::from_str(&spawn.content).expect("spawn json");
+    let agent_id = spawned["agent_id"].as_str().expect("agent id").to_string();
+    let _ = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "queue-wait".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "wait".to_string(),
+          arguments: serde_json::json!({"agent_ids": [agent_id.clone()], "timeout_ms": 10000})
+            .to_string(),
+        },
+      })
+      .await
+      .expect("wait");
+
+    let _ = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "channel-send".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "send_team_message".to_string(),
+          arguments: serde_json::json!({
+            "channel": "research",
+            "message": "Shared finding"
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("channel send");
+
+    let channel_messages = execute_tool_as_thread(
+      &cokra,
+      agent_id.clone(),
+      "read_team_messages",
+      serde_json::json!({"unread_only": true}),
+    )
+    .await;
+    let channel_messages: Vec<cokra_protocol::TeamMessage> =
+      serde_json::from_str(&channel_messages.content).expect("channel messages json");
+    assert!(channel_messages.iter().any(|message| {
+      message.kind == cokra_protocol::TeamMessageKind::Channel
+        && message.route_key.as_deref() == Some("research")
+    }));
+
+    let _ = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "queue-send".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "send_team_message".to_string(),
+          arguments: serde_json::json!({
+            "queue_name": "review",
+            "message": "Take review item #1"
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("queue send");
+
+    let claimed = execute_tool_as_thread(
+      &cokra,
+      agent_id,
+      "claim_team_messages",
+      serde_json::json!({"queue_name": "review", "limit": 1}),
+    )
+    .await;
+    let claimed: Vec<cokra_protocol::TeamMessage> =
+      serde_json::from_str(&claimed.content).expect("claimed json");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].kind, cokra_protocol::TeamMessageKind::Queue);
+    assert_eq!(claimed[0].route_key.as_deref(), Some("review"));
+    assert!(claimed[0].claimed_by_thread_id.is_some());
+  }
+
+  #[tokio::test]
+  async fn test_team_task_handoff_and_claim_next_workflow() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "mock".to_string();
+    config.models.model = "mock/default".to_string();
+    config.approval.policy = ApprovalMode::Auto;
+    config.cwd = tmpdir.path().to_path_buf();
+
+    let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
+      .await
+      .expect("create cokra");
+
+    let spawn = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "workflow-spawn".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "spawn_agent".to_string(),
+          arguments: serde_json::json!({"task": "You are teammate alex."}).to_string(),
+        },
+      })
+      .await
+      .expect("spawn");
+    let spawned: serde_json::Value = serde_json::from_str(&spawn.content).expect("spawn json");
+    let alex_id = spawned["agent_id"].as_str().expect("agent id").to_string();
+    let _ = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "workflow-wait".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "wait".to_string(),
+          arguments: serde_json::json!({"agent_ids": [alex_id.clone()], "timeout_ms": 10000})
+            .to_string(),
+        },
+      })
+      .await
+      .expect("wait");
+
+    let created = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "workflow-create".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "create_team_task".to_string(),
+          arguments: serde_json::json!({"title": "Implement feature"}).to_string(),
+        },
+      })
+      .await
+      .expect("create");
+    let task: TeamTask = serde_json::from_str(&created.content).expect("task json");
+
+    let _ = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "workflow-assign".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "assign_team_task".to_string(),
+          arguments: serde_json::json!({
+            "task_id": task.id,
+            "assignee_thread_id": cokra.thread_id().map(ToString::to_string).expect("thread")
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("assign");
+
+    let handed = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "workflow-handoff".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "handoff_team_task".to_string(),
+          arguments: serde_json::json!({
+            "task_id": task.id,
+            "to_thread_id": alex_id.clone(),
+            "review_mode": true,
+            "note": "Ready for review"
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("handoff");
+    let handed_task: TeamTask = serde_json::from_str(&handed.content).expect("handoff json");
+    assert_eq!(handed_task.status, TeamTaskStatus::Review);
+    assert_eq!(
+      handed_task.assignee_thread_id.as_deref(),
+      Some(alex_id.as_str())
+    );
+
+    let claimed = execute_tool_as_thread(
+      &cokra,
+      alex_id,
+      "claim_next_team_task",
+      serde_json::json!({}),
+    )
+    .await;
+    let claimed_task: TeamTask = serde_json::from_str(&claimed.content).expect("claimed json");
+    assert_eq!(claimed_task.status, TeamTaskStatus::InProgress);
+    assert_eq!(claimed_task.title, "Implement feature");
   }
 
   #[tokio::test]

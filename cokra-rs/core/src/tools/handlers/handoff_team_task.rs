@@ -11,17 +11,18 @@ use crate::tools::context::ToolOutput;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 
-pub struct CreateTeamTaskHandler;
+pub struct HandoffTeamTaskHandler;
 
 #[derive(Debug, Deserialize)]
-struct CreateTeamTaskArgs {
-  title: String,
-  details: Option<String>,
-  assignee_thread_id: Option<String>,
+struct HandoffTeamTaskArgs {
+  task_id: String,
+  to_thread_id: String,
+  note: Option<String>,
+  review_mode: Option<bool>,
 }
 
 #[async_trait]
-impl ToolHandler for CreateTeamTaskHandler {
+impl ToolHandler for HandoffTeamTaskHandler {
   fn kind(&self) -> ToolKind {
     ToolKind::Function
   }
@@ -30,16 +31,24 @@ impl ToolHandler for CreateTeamTaskHandler {
     &self,
     invocation: ToolInvocation,
   ) -> Result<ToolOutput, FunctionCallError> {
-    let args: CreateTeamTaskArgs = invocation.parse_arguments()?;
+    let args: HandoffTeamTaskArgs = invocation.parse_arguments()?;
     let runtime = invocation.runtime.ok_or_else(|| {
-      FunctionCallError::Fatal("create_team_task missing runtime context".to_string())
+      FunctionCallError::Fatal("handoff_team_task missing runtime context".to_string())
     })?;
     let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
-      FunctionCallError::Execution("create_team_task runtime is not configured".to_string())
+      FunctionCallError::Execution("handoff_team_task runtime is not configured".to_string())
     })?;
     let task = team_runtime
-      .create_task(args.title, args.details, args.assignee_thread_id)
-      .await;
+      .handoff_task(
+        &args.task_id,
+        args.to_thread_id,
+        args.note,
+        args.review_mode.unwrap_or(true),
+      )
+      .await
+      .ok_or_else(|| {
+        FunctionCallError::RespondToModel(format!("unknown task id: {}", args.task_id))
+      })?;
 
     if let Some(tx_event) = &runtime.tx_event {
       let _ = tx_event
@@ -50,10 +59,9 @@ impl ToolHandler for CreateTeamTaskHandler {
         .await;
     }
 
-    let mut out =
-      ToolOutput::success(serde_json::to_string(&task).map_err(|err| {
-        FunctionCallError::Fatal(format!("failed to serialize team task: {err}"))
-      })?);
+    let mut out = ToolOutput::success(serde_json::to_string(&task).map_err(|err| {
+      FunctionCallError::Fatal(format!("failed to serialize handed off task: {err}"))
+    })?);
     out.id = invocation.id;
     Ok(out)
   }

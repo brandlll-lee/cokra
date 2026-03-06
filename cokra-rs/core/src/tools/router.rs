@@ -37,6 +37,7 @@ use cokra_protocol::EventMsg;
 use cokra_protocol::ReviewDecision;
 use cokra_protocol::SandboxPolicy;
 
+use crate::agent::team_runtime::runtime_for_thread;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -453,6 +454,32 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
         })
       }),
     };
+
+    let is_mutating = self.registry.is_mutating(&invocation).unwrap_or(false);
+    if is_mutating
+      && let Some(runtime) = &invocation.runtime
+      && let Some(team_runtime) = runtime_for_thread(&runtime.thread_id)
+      && team_runtime.requires_plan_approval(&runtime.thread_id)
+      && !matches!(
+        invocation.name.as_str(),
+        "approve_team_plan"
+          | "submit_team_plan"
+          | "team_status"
+          | "read_team_messages"
+          | "send_team_message"
+          | "create_team_task"
+          | "update_team_task"
+          | "claim_team_task"
+          | "cleanup_team"
+          | "wait"
+          | "close_agent"
+      )
+    {
+      return Err(ToolError::Execution(
+        "team plan approval required before mutating work; submit a plan and wait for approval"
+          .to_string(),
+      ));
+    }
 
     // 1:1 codex: use dispatch_async to support async handlers (e.g. shell).
     match self.registry.dispatch_async(invocation).await {

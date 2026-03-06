@@ -1,5 +1,7 @@
+use cokra_protocol::ExecApprovalRequestEvent;
 use cokra_protocol::Op;
 use cokra_protocol::ReasoningEffortConfig;
+use cokra_protocol::RequestUserInputEvent;
 
 use cokra_core::model::ProviderInfo;
 
@@ -37,6 +39,8 @@ pub(crate) enum AppEvent {
   NewSession,
   ForkCurrentSession,
   SetStatusLineMode(StatusLineMode),
+  OpenBackgroundApproval(ExecApprovalRequestEvent),
+  OpenBackgroundUserInput(RequestUserInputEvent),
 
   OpenAllModelsPopup {
     providers: Vec<ProviderInfo>,

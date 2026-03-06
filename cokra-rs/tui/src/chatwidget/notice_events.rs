@@ -226,6 +226,15 @@ impl ChatWidget {
       EventMsg::CollabTaskUpdated(e) => {
         self.add_to_history(multi_agents::task_updated(e.clone()));
       }
+      EventMsg::CollabTeamSnapshot(e) => {
+        self.add_to_history(multi_agents::team_snapshot(e.clone()));
+      }
+      EventMsg::CollabPlanSubmitted(e) => {
+        self.add_to_history(multi_agents::plan_submitted(e.clone()));
+      }
+      EventMsg::CollabPlanDecision(e) => {
+        self.add_to_history(multi_agents::plan_decision(e.clone()));
+      }
       EventMsg::CollabResumeBegin(_) | EventMsg::CollabResumeEnd(_) => {}
       _ => return false,
     }
