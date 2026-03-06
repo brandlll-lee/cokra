@@ -121,6 +121,29 @@ impl ChatWidget {
     self.bottom_pane.set_task_running(running);
   }
 
+  fn run_commit_tick_with_scope(&mut self, scope: crate::streaming::commit_tick::CommitTickScope) {
+    let output = self.transcript.on_commit_tick(scope, Instant::now());
+
+    for cell in output.cells {
+      self.add_boxed_history(cell);
+    }
+
+    if output.has_controller && output.all_idle {
+      self.app_event_tx.send(AppEvent::StopCommitAnimation);
+    }
+
+    if output.all_idle
+      && !self.session.agent_turn_running
+      && let Some(status) = self.bottom_pane.status_widget_mut()
+    {
+      status.pause_timer();
+    }
+  }
+
+  fn run_catch_up_commit_tick(&mut self) {
+    self.run_commit_tick_with_scope(crate::streaming::commit_tick::CommitTickScope::CatchUpOnly);
+  }
+
   pub(crate) fn push_user_input_text(&mut self, text: String) {
     self.add_to_history(UserHistoryCell::from_text(text));
   }

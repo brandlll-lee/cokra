@@ -45,8 +45,14 @@ impl ChatWidget {
     self.flush_stream_controllers();
     self.flush_active_cell();
 
+    let elapsed_seconds = self
+      .bottom_pane
+      .status_widget()
+      .map(|status| self.session.worked_elapsed_from(status.elapsed_seconds()));
+
     self.app_event_tx.send(AppEvent::StopCommitAnimation);
     self.add_to_history(TurnCompleteHistoryCell {
+      elapsed_seconds,
       input_tokens: self.session.token_usage.input_tokens,
       output_tokens: self.session.token_usage.output_tokens,
     });

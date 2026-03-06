@@ -17,6 +17,7 @@ use ratatui::widgets::Wrap;
 use cokra_protocol::RequestUserInputAnswer;
 use cokra_protocol::RequestUserInputQuestion;
 use cokra_protocol::TextElement;
+use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use crate::exec_cell::ExecCall;
@@ -24,6 +25,7 @@ use crate::exec_cell::ExecCell;
 use crate::exec_cell::model::CommandOutput;
 use crate::exec_cell::new_active_exec_command;
 use crate::render::renderable::Renderable;
+use crate::status_indicator_widget::fmt_elapsed_compact;
 use crate::style::user_message_style;
 use crate::welcome::WelcomeWidget;
 use crate::wrapping::RtOptions;
@@ -372,6 +374,28 @@ fn split_request_user_input_answer(
   (options, note)
 }
 
+fn take_prefix_by_width(text: &str, max_cols: usize) -> (String, &str, usize) {
+  if max_cols == 0 || text.is_empty() {
+    return (String::new(), text, 0);
+  }
+
+  let mut cols = 0usize;
+  let mut end_idx = 0usize;
+  for (i, ch) in text.char_indices() {
+    let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+    if cols.saturating_add(ch_width) > max_cols {
+      break;
+    }
+    cols += ch_width;
+    end_idx = i + ch.len_utf8();
+    if cols == max_cols {
+      break;
+    }
+  }
+
+  (text[..end_idx].to_string(), &text[end_idx..], cols)
+}
+
 impl HistoryCell for UserHistoryCell {
   fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
     let wrap_width = width.saturating_sub(3).max(1); // "› " prefix = 2 cols + 1 margin
@@ -689,26 +713,32 @@ impl HistoryCell for ApprovalRequestedHistoryCell {
 
 #[derive(Debug)]
 pub(crate) struct TurnCompleteHistoryCell {
+  pub(crate) elapsed_seconds: Option<u64>,
   pub(crate) input_tokens: i64,
   pub(crate) output_tokens: i64,
 }
 
 impl HistoryCell for TurnCompleteHistoryCell {
   fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-    // 1:1 codex FinalMessageSeparator: visual divider with optional token summary.
-    let label = if self.input_tokens > 0 || self.output_tokens > 0 {
-      format!("─ {} in / {} out ─", self.input_tokens, self.output_tokens)
-    } else {
-      String::new()
-    };
+    let mut label_parts = Vec::new();
+    if let Some(elapsed_seconds) = self
+      .elapsed_seconds
+      .filter(|seconds| *seconds > 60)
+      .map(fmt_elapsed_compact)
+    {
+      label_parts.push(format!("Worked for {elapsed_seconds}"));
+    }
+    if self.input_tokens > 0 || self.output_tokens > 0 {
+      label_parts.push(format!("{} in / {} out", self.input_tokens, self.output_tokens));
+    }
 
-    if label.is_empty() {
+    if label_parts.is_empty() {
       return vec![Line::from("─".repeat(width as usize)).dim()];
     }
 
-    let label_width = label.chars().count();
-    let remaining = (width as usize).saturating_sub(label_width);
-    vec![Line::from(vec![label.dim(), "─".repeat(remaining).dim()])]
+    let label = format!("─ {} ─", label_parts.join(" • "));
+    let (label, _suffix, label_width) = take_prefix_by_width(&label, width as usize);
+    vec![Line::from(vec![label.dim(), "─".repeat((width as usize).saturating_sub(label_width)).dim()])]
   }
 }
 
@@ -836,5 +866,31 @@ mod tests {
     assert!(rendered.contains("immediately"));
     assert!(rendered.contains("••••••"));
     assert!(rendered.contains("submitted early"));
+  }
+
+  #[test]
+  fn turn_complete_history_cell_includes_elapsed_when_over_a_minute() {
+    let cell = TurnCompleteHistoryCell {
+      elapsed_seconds: Some(125),
+      input_tokens: 321,
+      output_tokens: 654,
+    };
+
+    let rendered = lines_to_string(&cell.display_lines(80));
+    assert!(rendered.contains("Worked for 2m 05s"));
+    assert!(rendered.contains("321 in / 654 out"));
+  }
+
+  #[test]
+  fn turn_complete_history_cell_omits_short_elapsed_labels() {
+    let cell = TurnCompleteHistoryCell {
+      elapsed_seconds: Some(42),
+      input_tokens: 1,
+      output_tokens: 2,
+    };
+
+    let rendered = lines_to_string(&cell.display_lines(80));
+    assert!(!rendered.contains("Worked for"));
+    assert!(rendered.contains("1 in / 2 out"));
   }
 }

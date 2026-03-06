@@ -14,9 +14,12 @@ impl ChatWidget {
       .transcript
       .stream_controller
       .get_or_insert_with(|| crate::streaming::controller::StreamController::new(None));
-    let _ = controller.push(delta);
-    if is_new {
+    let committed = controller.push(delta);
+    if is_new || committed {
       self.app_event_tx.send(AppEvent::StartCommitAnimation);
+    }
+    if committed {
+      self.run_catch_up_commit_tick();
     }
   }
 
@@ -46,26 +49,43 @@ impl ChatWidget {
       .transcript
       .plan_stream_controller
       .get_or_insert_with(|| crate::streaming::controller::PlanStreamController::new(None));
-    let _ = controller.push(delta);
-    if is_new {
+    let committed = controller.push(delta);
+    if is_new || committed {
       self.app_event_tx.send(AppEvent::StartCommitAnimation);
+    }
+    if committed {
+      self.run_catch_up_commit_tick();
     }
   }
 
   pub(crate) fn on_commit_tick(&mut self) {
-    let output = self
-      .transcript
-      .on_commit_tick(CommitTickScope::AnyMode, Instant::now());
+    self.run_commit_tick_with_scope(CommitTickScope::AnyMode);
+  }
+}
 
-    for cell in output.cells {
-      self.add_boxed_history(cell);
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::app_event::AppEvent;
+  use crate::app_event_sender::AppEventSender;
+  use crate::tui::FrameRequester;
+  use tokio::sync::mpsc::unbounded_channel;
+
+  #[test]
+  fn newline_delta_starts_commit_animation_immediately() {
+    let (tx, mut rx) = unbounded_channel();
+    let sender = AppEventSender::new(tx);
+    let mut widget = ChatWidget::new(sender, FrameRequester::test_dummy(), false);
+
+    widget.on_agent_message_delta("item-1", "hello\n");
+
+    let mut saw_start = false;
+    while let Ok(event) = rx.try_recv() {
+      if matches!(event, AppEvent::StartCommitAnimation) {
+        saw_start = true;
+      }
     }
 
-    if output.all_idle
-      && !self.session.agent_turn_running
-      && let Some(status) = self.bottom_pane.status_widget_mut()
-    {
-      status.pause_timer();
-    }
+    assert!(saw_start);
   }
 }
