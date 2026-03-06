@@ -108,3 +108,7 @@ cokra-rs/.tmp/
 
 # TUI manual test captures
 cokra-rs/cokra_tui_*capture*.txt
+
+# Local persisted Cokra runtime state
+cokra-rs/.cokra/
+cokra-rs/core/.cokra/
