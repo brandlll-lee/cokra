@@ -132,36 +132,27 @@ impl App {
         return Ok(exit_info);
       }
 
-      if self.task_running {
-        tokio::select! {
-          Some(event) = events.next() => {
-            self.handle_tui_event(event, tui).await?;
-          }
-          core_event = self.cokra.next_event() => {
-            match core_event {
-              Ok(event) => {
-                self.handle_cokra_event(event).await?;
-                // Status changes (TurnStarted, etc.) need a frame even if no
-                // InsertHistoryCell was sent.
-                tui.frame_requester().schedule_frame();
-              }
-              Err(err) => {
-                self.exit_info = Some(self.build_exit_info(ExitReason::Fatal(err.to_string())));
-              }
+      tokio::select! {
+        Some(event) = events.next() => {
+          self.handle_tui_event(event, tui).await?;
+        }
+        core_event = self.cokra.next_event() => {
+          match core_event {
+            Ok(event) => {
+              self.handle_cokra_event(event).await?;
+              // SessionConfigured arrives before the first user turn starts, so
+              // the app must keep polling core events even while idle. Always
+              // schedule a frame after handling core events to surface startup
+              // history cells and status changes immediately.
+              tui.frame_requester().schedule_frame();
+            }
+            Err(err) => {
+              self.exit_info = Some(self.build_exit_info(ExitReason::Fatal(err.to_string())));
             }
           }
-          Some(app_event) = self.app_event_rx.recv() => {
-            self.handle_app_event(app_event, tui).await?;
-          }
         }
-      } else {
-        tokio::select! {
-          Some(event) = events.next() => {
-            self.handle_tui_event(event, tui).await?;
-          }
-          Some(app_event) = self.app_event_rx.recv() => {
-            self.handle_app_event(app_event, tui).await?;
-          }
+        Some(app_event) = self.app_event_rx.recv() => {
+          self.handle_app_event(app_event, tui).await?;
         }
       }
     }
@@ -1202,8 +1193,10 @@ impl App {
 
     match self.ui_mode {
       UiMode::Inline => {
-        // 1:1 codex: ChatWidget.as_renderable() composes active_cell + bottom_pane
-        // via FlexRenderable. App only calls render and sets cursor.
+        // 1:1 codex: inline viewport only renders the live chat surface.
+        // Committed history is written into normal scrollback via
+        // Tui::insert_history_lines and must not be re-rendered here, or
+        // resize/turn redraws will duplicate separators and footer borders.
         self.chat_widget.render(area, frame.buffer_mut());
         if let Some((x, y)) = self.chat_widget.cursor_pos(area) {
           frame.set_cursor_position((x, y));

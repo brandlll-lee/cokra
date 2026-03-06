@@ -11,6 +11,7 @@ use super::model::ExecCell;
 use crate::history_cell::HistoryCell;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::line_utils::push_owned_lines;
+use crate::terminal_palette::light_blue;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
 use crate::wrapping::word_wrap_lines;
@@ -136,23 +137,28 @@ impl HistoryCell for ExecCell {
         lines.push(Line::from(""));
       }
 
-      let header_icon: Span<'static> = match (&call.output, call.duration) {
+      // 1:1 codex: Show spinner during execution, ✓/✗ after completion
+      // Also add "Running" text during execution
+      let (header_icon, status_text): (Span<'static>, &str) = match (&call.output, call.duration) {
         (Some(output), Some(_)) => {
           if output.exit_code == 0 {
-            "✓ ".green().bold()
+            ("✓ ".green().bold(), "")
           } else {
-            "✗ ".red().bold()
+            ("✗ ".red().bold(), "")
           }
         }
         _ => {
           let mut s = crate::exec_cell::spinner(call.start_time, self.animations_enabled());
           s.content = format!("{} ", s.content).into();
-          s
+          (s, "Running")
         }
       };
       let mut header = Line::from(vec![header_icon]);
       header.push_span(call.tool_name.clone().bold());
-      // 1:1 codex: Do NOT display cwd in header - this was causing "unstable" display
+      // 1:1 codex: Show "Running" during execution
+      if !status_text.is_empty() {
+        header.push_span(format!(" {}", status_text).dim());
+      }
       lines.push(header);
 
       // Shell tool: render command with "$ " prefix and bash highlighting.
@@ -167,11 +173,11 @@ impl HistoryCell for ExecCell {
         );
         lines.extend(wrapped_cmd);
       } else {
-        let cmd_line = Line::from(call.command.clone().dim());
+        let cmd_line = Line::from(Span::from(call.command.clone()).style(light_blue()));
         let wrapped_cmd = word_wrap_lines(
           &[cmd_line],
           RtOptions::new(width.max(1) as usize)
-            .initial_indent("  › ".cyan().into())
+            .initial_indent("  › ".into())
             .subsequent_indent("    ".into()),
         );
         lines.extend(wrapped_cmd);
@@ -188,26 +194,7 @@ impl HistoryCell for ExecCell {
       );
       lines.extend(rendered.lines);
 
-      match (&call.output, call.duration) {
-        (Some(output), Some(duration)) => {
-          let mut end = if output.exit_code == 0 {
-            Line::from("  ✓".green().bold())
-          } else {
-            Line::from(vec![
-              "  ✗".red().bold(),
-              format!(" ({})", output.exit_code).into(),
-            ])
-          };
-          end.push_span(format!(" • {}", format_duration_human(duration)).dim());
-          lines.push(end);
-        }
-        _ => {
-          lines.push(Line::from(vec![
-            crate::exec_cell::spinner(call.start_time, self.animations_enabled()),
-            " running".dim(),
-          ]));
-        }
-      }
+      // 1:1 codex: Don't show trailing "✓ • Xs" - redundant and not in codex
     }
 
     lines
@@ -230,11 +217,11 @@ impl HistoryCell for ExecCell {
         );
         lines.extend(wrapped_cmd);
       } else {
-        let cmd_line = Line::from(call.command.clone().dim());
+        let cmd_line = Line::from(Span::from(call.command.clone()).style(light_blue()));
         let wrapped_cmd = word_wrap_lines(
           &[cmd_line],
           RtOptions::new(width.max(1) as usize)
-            .initial_indent("› ".cyan().into())
+            .initial_indent("› ".into())
             .subsequent_indent("  ".into()),
         );
         lines.extend(wrapped_cmd);

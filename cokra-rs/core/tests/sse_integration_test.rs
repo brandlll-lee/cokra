@@ -44,8 +44,8 @@ use cokra_protocol::ContentDeltaEvent;
 use cokra_protocol::EventMsg;
 use cokra_protocol::FunctionCall;
 use cokra_protocol::FunctionCallEvent;
-use cokra_protocol::ReviewDecision;
 use cokra_protocol::ResponseEvent;
+use cokra_protocol::ReviewDecision;
 
 #[derive(Debug)]
 enum MockStep {

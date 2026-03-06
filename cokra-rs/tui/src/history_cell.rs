@@ -20,6 +20,7 @@ use crate::exec_cell::model::CommandOutput;
 use crate::exec_cell::new_active_exec_command;
 use crate::render::renderable::Renderable;
 use crate::style::user_message_style;
+use crate::welcome::WelcomeWidget;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_lines;
 
@@ -296,31 +297,92 @@ impl HistoryCell for UserHistoryCell {
 }
 
 #[derive(Debug)]
-pub(crate) struct SessionConfiguredCell {
-  pub(crate) model: String,
-  pub(crate) approval_policy: String,
-  pub(crate) sandbox_mode: String,
-  pub(crate) cwd: Option<String>,
-  pub(crate) is_first_session: bool,
+pub(crate) struct CompositeHistoryCell {
+  parts: Vec<Box<dyn HistoryCell>>,
 }
 
-impl HistoryCell for SessionConfiguredCell {
+impl CompositeHistoryCell {
+  pub(crate) fn new(parts: Vec<Box<dyn HistoryCell>>) -> Self {
+    Self { parts }
+  }
+}
+
+impl HistoryCell for CompositeHistoryCell {
+  fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    let mut first = true;
+    for part in &self.parts {
+      let mut lines = part.display_lines(width);
+      if lines.is_empty() {
+        continue;
+      }
+      if !first {
+        out.push(Line::from(""));
+      }
+      out.append(&mut lines);
+      first = false;
+    }
+    out
+  }
+}
+
+#[derive(Debug)]
+pub(crate) struct SessionInfoCell(CompositeHistoryCell);
+
+impl HistoryCell for SessionInfoCell {
+  fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    self.0.display_lines(width)
+  }
+
+  fn desired_height(&self, width: u16) -> u16 {
+    self.0.desired_height(width)
+  }
+
+  fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
+    self.0.transcript_lines(width)
+  }
+}
+
+#[derive(Debug)]
+pub(crate) struct SessionHeaderHistoryCell {
+  model: String,
+  approval_policy: String,
+  sandbox_mode: String,
+  cwd: Option<String>,
+}
+
+impl SessionHeaderHistoryCell {
+  pub(crate) fn new(
+    model: String,
+    approval_policy: String,
+    sandbox_mode: String,
+    cwd: Option<String>,
+  ) -> Self {
+    Self {
+      model,
+      approval_policy,
+      sandbox_mode,
+      cwd,
+    }
+  }
+}
+
+impl HistoryCell for SessionHeaderHistoryCell {
   fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
-    let mut lines = vec![
-      Line::from(vec![
-        "┌─ ".dim(),
-        "cokra".bold(),
-        " ─ ".dim(),
-        self.model.clone().into(),
-      ]),
-      Line::from(vec![
-        "│  ".dim(),
-        "sandbox: ".dim(),
-        self.sandbox_mode.clone().into(),
-        " │ approval: ".dim(),
-        self.approval_policy.clone().into(),
-      ]),
-    ];
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+      "┌─ ".dim(),
+      "cokra".bold(),
+      " ─ ".dim(),
+      self.model.clone().into(),
+    ]));
+    lines.push(Line::from(vec![
+      "│  ".dim(),
+      "sandbox: ".dim(),
+      self.sandbox_mode.clone().into(),
+      " │ approval: ".dim(),
+      self.approval_policy.clone().into(),
+    ]));
 
     if let Some(cwd) = &self.cwd {
       lines.push(Line::from(vec![
@@ -331,31 +393,53 @@ impl HistoryCell for SessionConfiguredCell {
     }
 
     lines.push(Line::from("└──".dim()));
+    lines
+  }
+}
 
-    if self.is_first_session {
-      lines.push(Line::from(""));
-      lines
-        .push(Line::from("  To get started, describe a task or try one of these commands:").dim());
-      lines.push(Line::from(""));
-      lines.push(Line::from(vec![
+pub(crate) fn new_session_info(
+  model: String,
+  approval_policy: String,
+  sandbox_mode: String,
+  cwd: Option<String>,
+  is_first_session: bool,
+) -> SessionInfoCell {
+  let mut parts: Vec<Box<dyn HistoryCell>> = Vec::new();
+
+  if is_first_session {
+    parts.push(WelcomeWidget::into_history_cell());
+  }
+
+  parts.push(Box::new(SessionHeaderHistoryCell::new(
+    model,
+    approval_policy,
+    sandbox_mode,
+    cwd,
+  )));
+
+  if is_first_session {
+    parts.push(Box::new(PlainHistoryCell::new(vec![
+      Line::from("  To get started, describe a task or try one of these commands:").dim(),
+      Line::from(""),
+      Line::from(vec![
         "  ".into(),
         "/help".into(),
         " - show available commands".dim(),
-      ]));
-      lines.push(Line::from(vec![
+      ]),
+      Line::from(vec![
         "  ".into(),
         "/model".into(),
         " - choose model and reasoning effort".dim(),
-      ]));
-      lines.push(Line::from(vec![
+      ]),
+      Line::from(vec![
         "  ".into(),
         "/status".into(),
         " - show current session configuration".dim(),
-      ]));
-    }
-
-    lines
+      ]),
+    ])));
   }
+
+  SessionInfoCell(CompositeHistoryCell::new(parts))
 }
 
 #[derive(Debug)]
@@ -503,5 +587,56 @@ pub(crate) fn new_proposed_plan_stream(
   ProposedPlanStreamCell {
     lines,
     is_stream_continuation,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn lines_to_string(lines: &[Line<'static>]) -> String {
+    lines
+      .iter()
+      .map(|line| {
+        line
+          .spans
+          .iter()
+          .map(|span| span.content.as_ref())
+          .collect::<String>()
+      })
+      .collect::<Vec<_>>()
+      .join("\n")
+  }
+
+  #[test]
+  fn first_session_info_includes_welcome_header_and_help() {
+    let cell = new_session_info(
+      "openrouter/anthropic/claude-haiku-4.5".to_string(),
+      "Ask".to_string(),
+      "Permissive".to_string(),
+      None,
+      true,
+    );
+
+    let rendered = lines_to_string(&cell.display_lines(80));
+    assert!(rendered.contains("Welcome to Cokra, AI Agent Team CLI Environment"));
+    assert!(rendered.contains("┌─ cokra ─ openrouter/anthropic/claude-haiku-4.5"));
+    assert!(rendered.contains("/help - show available commands"));
+  }
+
+  #[test]
+  fn non_first_session_info_only_renders_header() {
+    let cell = new_session_info(
+      "openrouter/anthropic/claude-haiku-4.5".to_string(),
+      "Ask".to_string(),
+      "Permissive".to_string(),
+      Some("/tmp/project".to_string()),
+      false,
+    );
+
+    let rendered = lines_to_string(&cell.display_lines(80));
+    assert!(!rendered.contains("Welcome to Cokra"));
+    assert!(!rendered.contains("/help - show available commands"));
+    assert!(rendered.contains("cwd: /tmp/project"));
   }
 }

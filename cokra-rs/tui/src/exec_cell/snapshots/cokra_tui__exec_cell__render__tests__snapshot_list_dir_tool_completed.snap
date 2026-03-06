@@ -1,6 +1,5 @@
 ---
 source: tui/src/exec_cell/render.rs
-assertion_line: 338
 expression: rendered
 ---
 "✓ list_dir                                                  "
@@ -8,7 +7,7 @@ expression: rendered
 "  └ src/                                                    "
 "    Cargo.toml                                              "
 "    README.md                                               "
-"  ✓ • 0s                                                    "
+"                                                            "
 "                                                            "
 "                                                            "
 "                                                            "

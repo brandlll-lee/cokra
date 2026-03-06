@@ -29,9 +29,9 @@ use crate::history_cell::ApprovalRequestedHistoryCell;
 use crate::history_cell::ExecHistoryCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
-use crate::history_cell::SessionConfiguredCell;
 use crate::history_cell::TurnCompleteHistoryCell;
 use crate::history_cell::UserHistoryCell;
+use crate::history_cell::new_session_info;
 use crate::multi_agents;
 use crate::render::Insets;
 use crate::render::renderable::FlexRenderable;
@@ -43,6 +43,7 @@ use crate::streaming::commit_tick::CommitTickScope;
 use crate::streaming::commit_tick::run_commit_tick;
 use crate::streaming::controller::PlanStreamController;
 use crate::streaming::controller::StreamController;
+use crate::terminal_palette::light_blue;
 use crate::tui::FrameRequester;
 
 #[derive(Debug)]
@@ -112,6 +113,10 @@ impl ChatWidget {
 
   pub(crate) fn cwd(&self) -> Option<&std::path::PathBuf> {
     self.cwd.as_ref()
+  }
+
+  pub(crate) fn animations_enabled(&self) -> bool {
+    self.animations_enabled
   }
 
   fn flush_active_cell(&mut self) {
@@ -259,13 +264,13 @@ impl ChatWidget {
         let is_first = !self.has_seen_session_configured;
         self.has_seen_session_configured = true;
         self.model_name = e.model.clone();
-        self.add_to_history(SessionConfiguredCell {
-          model: e.model.clone(),
-          approval_policy: e.approval_policy.clone(),
-          sandbox_mode: e.sandbox_mode.clone(),
-          cwd: None,
-          is_first_session: is_first,
-        });
+        self.add_to_history(new_session_info(
+          e.model.clone(),
+          e.approval_policy.clone(),
+          e.sandbox_mode.clone(),
+          None,
+          is_first,
+        ));
       }
       EventMsg::ThreadNameUpdated(e) => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
@@ -648,7 +653,7 @@ impl ChatWidget {
       }
       EventMsg::SkillsUpdateAvailable => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "• Skills update available".cyan(),
+          Span::from("• Skills update available").style(light_blue()),
         )]));
       }
 
@@ -676,7 +681,7 @@ impl ChatWidget {
           .as_deref()
           .unwrap_or("Entered review mode");
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(
-          hint.to_string().cyan(),
+          Span::from(hint.to_string()).style(light_blue()),
         )]));
       }
       EventMsg::ExitedReviewMode(_) => {

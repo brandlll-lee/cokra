@@ -5,6 +5,20 @@ use std::sync::atomic::Ordering;
 
 static DEFAULT_PALETTE_VERSION: AtomicU64 = AtomicU64::new(0);
 
+// Target color: #59a4f9 (light blue)
+const LIGHT_BLUE_TARGET: (u8, u8, u8) = (0x59, 0xa4, 0xf9);
+
+/// Returns the light blue accent color for the current terminal.
+/// This adapts to the terminal's color capabilities:
+/// - 16M colors: uses RGB #59a4f9 directly
+/// - 256 colors: finds the closest Xterm color
+/// - Otherwise: falls back to default color
+///
+/// This provides consistent theming across different terminal themes.
+pub fn light_blue() -> Color {
+  best_color(LIGHT_BLUE_TARGET)
+}
+
 fn bump_palette_version() {
   DEFAULT_PALETTE_VERSION.fetch_add(1, Ordering::Relaxed);
 }

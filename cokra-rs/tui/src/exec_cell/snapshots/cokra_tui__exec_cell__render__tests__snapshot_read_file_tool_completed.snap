@@ -1,6 +1,5 @@
 ---
 source: tui/src/exec_cell/render.rs
-assertion_line: 331
 expression: rendered
 ---
 "✓ read_file                                                 "
@@ -8,7 +7,7 @@ expression: rendered
 "  └ 1: fn main() {                                          "
 "    2:   println!("hello");                                 "
 "    3: }                                                    "
-"  ✓ • 0s                                                    "
+"                                                            "
 "                                                            "
 "                                                            "
 "                                                            "

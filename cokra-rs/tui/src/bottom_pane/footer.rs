@@ -6,6 +6,7 @@
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::render::line_utils::prefix_lines;
+use crate::terminal_palette::light_blue;
 use crate::ui_consts::FOOTER_INDENT_COLS;
 use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
@@ -79,7 +80,7 @@ impl CollaborationModeIndicator {
     let label = self.label(show_cycle_hint);
     match self {
       CollaborationModeIndicator::Plan => Span::from(label).magenta(),
-      CollaborationModeIndicator::PairProgramming => Span::from(label).cyan(),
+      CollaborationModeIndicator::PairProgramming => Span::from(label).style(light_blue()),
       CollaborationModeIndicator::Execute => Span::from(label).dim(),
     }
   }

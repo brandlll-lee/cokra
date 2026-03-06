@@ -205,7 +205,7 @@ mod tests {
     let has_light_blue = line
       .spans
       .iter()
-      .any(|s| s.style.fg == Some(ratatui::style::Color::LightBlue));
+      .any(|s| s.style.fg == Some(crate::terminal_palette::light_blue()));
     assert!(
       has_light_blue,
       "expected an ordered-list marker span with light blue fg on: {line:?}"
@@ -449,7 +449,7 @@ mod tests {
     let marker_span = &line.spans[0];
     assert_eq!(
       marker_span.style.fg,
-      Some(Color::LightBlue),
+      Some(crate::terminal_palette::light_blue()),
       "expected LightBlue 3rd-level ordered marker, got {:?}",
       marker_span.style.fg
     );
