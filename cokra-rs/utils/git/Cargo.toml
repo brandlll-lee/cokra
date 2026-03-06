@@ -7,6 +7,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-git2 = "0.19"
+git2 = "0.20"
 anyhow = { workspace = true }
 tracing = { workspace = true }
