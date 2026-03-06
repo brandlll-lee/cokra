@@ -144,7 +144,10 @@ mod tests {
     let first = state.active_cell_transcript_key().expect("key");
     assert_eq!(first.revision, 0);
     assert!(!first.is_stream_continuation);
-    assert_eq!(state.active_cell_transcript_lines(80), Some(vec![Line::from("hello")]));
+    assert_eq!(
+      state.active_cell_transcript_lines(80),
+      Some(vec![Line::from("hello")])
+    );
 
     state.bump_active_cell_revision();
     let second = state.active_cell_transcript_key().expect("key");

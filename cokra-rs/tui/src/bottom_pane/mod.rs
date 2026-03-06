@@ -20,9 +20,9 @@ use bottom_pane_view::BottomPaneView;
 use chat_composer::ChatComposer;
 use chat_composer::ComposerAction;
 use chat_composer::ComposerSubmission;
+use cokra_protocol::RequestUserInputEvent;
 use queued_user_messages::QueuedUserMessages;
 use request_user_input::RequestUserInputView;
-use cokra_protocol::RequestUserInputEvent;
 
 pub(crate) mod api_key_entry_view;
 pub(crate) mod approval_overlay;
@@ -308,9 +308,12 @@ impl BottomPane {
       let mut header = FlexRenderable::new();
       if let Some(status) = &self.status {
         header.push(0, RenderableItem::Borrowed(status as &dyn Renderable));
+      } else {
+        // Keep inline viewport height stable when the task-status row appears.
+        header.push(0, RenderableItem::Owned("".into()));
       }
       let has_queued_messages = !self.queued_user_messages.messages.is_empty();
-      let has_status = self.status.is_some();
+      let has_status = true;
       if has_queued_messages && has_status {
         header.push(0, RenderableItem::Owned("".into()));
       }

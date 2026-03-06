@@ -128,6 +128,14 @@ pub fn build_specs() -> Vec<ToolSpec> {
     search_tool(),
     mcp_tool(),
     spawn_agent_tool(),
+    send_input_tool(),
+    wait_tool(),
+    close_agent_tool(),
+    team_status_tool(),
+    send_team_message_tool(),
+    read_team_messages_tool(),
+    create_team_task_tool(),
+    update_team_task_tool(),
     plan_tool(),
     request_user_input_tool(),
     view_image_tool(),
@@ -304,8 +312,16 @@ fn grep_files_tool() -> ToolSpec {
     str_field("The pattern to search for in file contents."),
   );
   props.insert(
+    "include".to_string(),
+    str_field("Optional glob filter to limit which files are searched."),
+  );
+  props.insert(
     "path".to_string(),
     str_field("Directory or file path to search. Defaults to the working directory."),
+  );
+  props.insert(
+    "limit".to_string(),
+    int_field("The maximum number of matching file paths to return."),
   );
   ToolSpec::new(
     "grep_files",
@@ -354,12 +370,183 @@ fn mcp_tool() -> ToolSpec {
 
 fn spawn_agent_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
-  props.insert("task".to_string(), str_field("Task text"));
-  props.insert("role".to_string(), str_field("Agent role"));
+  props.insert(
+    "task".to_string(),
+    str_field("Initial task text for the spawned agent."),
+  );
+  props.insert(
+    "message".to_string(),
+    str_field("Alias of `task` for Codex-style compatibility."),
+  );
+  props.insert("role".to_string(), str_field("Agent role."));
+  props.insert(
+    "agent_type".to_string(),
+    str_field("Alias of `role` for Codex-style compatibility."),
+  );
   ToolSpec::new(
     "spawn_agent",
-    "Spawn sub-agent",
-    obj(props, &["task"]),
+    "Spawn a sub-agent and immediately start it on an initial task.",
+    obj(props, &[]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn send_input_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "agent_id".to_string(),
+    str_field("Target spawned agent id."),
+  );
+  props.insert(
+    "message".to_string(),
+    str_field("New message to send to the spawned agent."),
+  );
+  ToolSpec::new(
+    "send_input",
+    "Send another message to a running or completed spawned agent.",
+    obj(props, &["agent_id", "message"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn wait_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "agent_ids".to_string(),
+    JsonSchema::Array {
+      items: Box::new(str_field("Spawned agent id.")),
+      description: Some(
+        "Optional spawned agent ids to wait on. Defaults to all known spawned agents.".to_string(),
+      ),
+    },
+  );
+  props.insert(
+    "timeout_ms".to_string(),
+    int_field("Optional wait timeout in milliseconds."),
+  );
+  ToolSpec::new(
+    "wait",
+    "Wait for spawned agents to finish before continuing.",
+    obj(props, &[]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn close_agent_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "agent_id".to_string(),
+    str_field("Target spawned agent id."),
+  );
+  ToolSpec::new(
+    "close_agent",
+    "Close and clean up a spawned agent when it is no longer needed.",
+    obj(props, &["agent_id"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn team_status_tool() -> ToolSpec {
+  ToolSpec::new(
+    "team_status",
+    "Return the shared team snapshot, including members, tasks, and unread mailbox counts.",
+    obj(BTreeMap::new(), &[]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn send_team_message_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert("message".to_string(), str_field("Message body to send."));
+  props.insert(
+    "recipient_thread_id".to_string(),
+    str_field("Optional teammate thread id. Omit to broadcast to the whole team."),
+  );
+  ToolSpec::new(
+    "send_team_message",
+    "Send a direct or broadcast team mailbox message.",
+    obj(props, &["message"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn read_team_messages_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "unread_only".to_string(),
+    bool_field("When true, only return unread mailbox messages."),
+  );
+  ToolSpec::new(
+    "read_team_messages",
+    "Read your team mailbox messages and mark them as seen.",
+    obj(props, &[]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn create_team_task_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert("title".to_string(), str_field("Short team task title."));
+  props.insert(
+    "details".to_string(),
+    str_field("Optional detailed task description."),
+  );
+  props.insert(
+    "assignee_thread_id".to_string(),
+    str_field("Optional teammate thread id to assign immediately."),
+  );
+  ToolSpec::new(
+    "create_team_task",
+    "Create a shared team task on the common task board.",
+    obj(props, &["title"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn update_team_task_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert("task_id".to_string(), str_field("Task id to update."));
+  props.insert(
+    "status".to_string(),
+    JsonSchema::String {
+      description: Some(
+        "Optional new task status: Pending, InProgress, Completed, Failed, or Canceled."
+          .to_string(),
+      ),
+    },
+  );
+  props.insert(
+    "assignee_thread_id".to_string(),
+    str_field("Optional new assignee thread id."),
+  );
+  props.insert(
+    "clear_assignee".to_string(),
+    bool_field("When true, clears the current assignee."),
+  );
+  props.insert(
+    "note".to_string(),
+    str_field("Optional note to append to the task history."),
+  );
+  ToolSpec::new(
+    "update_team_task",
+    "Update a shared team task status, assignee, or notes.",
+    obj(props, &["task_id"]),
     None,
     ToolHandlerType::Function,
     default_permissions(),
@@ -381,14 +568,20 @@ fn plan_tool() -> ToolSpec {
 
 fn request_user_input_tool() -> ToolSpec {
   let mut option_props = BTreeMap::new();
-  option_props.insert("label".to_string(), str_field("Short label for this option."));
+  option_props.insert(
+    "label".to_string(),
+    str_field("Short label for this option."),
+  );
   option_props.insert(
     "description".to_string(),
     str_field("Single-sentence description of the effect of choosing this option."),
   );
 
   let mut question_props = BTreeMap::new();
-  question_props.insert("id".to_string(), str_field("Stable identifier for the question."));
+  question_props.insert(
+    "id".to_string(),
+    str_field("Stable identifier for the question."),
+  );
   question_props.insert(
     "header".to_string(),
     str_field("Short header label shown for the question."),
@@ -409,7 +602,10 @@ fn request_user_input_tool() -> ToolSpec {
   props.insert(
     "questions".to_string(),
     JsonSchema::Array {
-      items: Box::new(obj(question_props, &["id", "header", "question", "options"])),
+      items: Box::new(obj(
+        question_props,
+        &["id", "header", "question", "options"],
+      )),
       description: Some("One to three short questions to ask the user.".to_string()),
     },
   );

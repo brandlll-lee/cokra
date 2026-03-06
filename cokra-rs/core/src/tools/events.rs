@@ -53,6 +53,16 @@ impl ToolEmitter {
     }
   }
 
+  pub fn with_display_command(
+    tool_name: impl Into<String>,
+    display_command: impl Into<String>,
+  ) -> Self {
+    Self {
+      tool_name: tool_name.into(),
+      display_command: Some(display_command.into()),
+    }
+  }
+
   pub fn shell(_command: Vec<String>) -> Self {
     Self::new("shell")
   }

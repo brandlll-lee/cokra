@@ -144,10 +144,6 @@ impl ChatWidget {
     self.run_commit_tick_with_scope(crate::streaming::commit_tick::CommitTickScope::CatchUpOnly);
   }
 
-  pub(crate) fn push_user_input_text(&mut self, text: String) {
-    self.add_to_history(UserHistoryCell::from_text(text));
-  }
-
   pub(crate) fn open_resume_picker(&mut self) {
     self.add_to_history(PlainHistoryCell::new(vec![Line::from(
       "• /resume is not yet implemented.".dim(),
@@ -249,7 +245,7 @@ impl ChatWidget {
         ])]));
       }
       EventMsg::Error(e) => self.on_error(e),
-      EventMsg::TurnComplete(_) => self.on_turn_complete(),
+      EventMsg::TurnComplete(e) => self.on_turn_complete(e),
       EventMsg::TurnAborted(e) => self.on_turn_aborted(e),
       EventMsg::RawResponseItem(_) => {}
       EventMsg::PlanDelta(e) => self.on_plan_delta(&e.delta),

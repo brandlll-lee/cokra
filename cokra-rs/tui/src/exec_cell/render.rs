@@ -1,6 +1,8 @@
 use std::time::Duration;
 use std::time::Instant;
 
+use ratatui::style::Modifier;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -8,8 +10,10 @@ use ratatui::text::Span;
 use super::model::CommandOutput;
 use super::model::ExecCall;
 use super::model::ExecCell;
+use crate::exec_cell::spinner;
 use crate::history_cell::HistoryCell;
 use crate::render::highlight::highlight_bash_to_lines;
+use crate::render::line_utils::prefix_lines;
 use crate::render::line_utils::push_owned_lines;
 use crate::terminal_palette::light_blue;
 use crate::wrapping::RtOptions;
@@ -130,6 +134,10 @@ fn format_duration_human(duration: Duration) -> String {
 
 impl HistoryCell for ExecCell {
   fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    if self.is_exploring_cell() {
+      return self.exploring_display_lines(width);
+    }
+
     let mut lines = Vec::new();
 
     for (idx, call) in self.iter_calls().enumerate() {
@@ -173,7 +181,7 @@ impl HistoryCell for ExecCell {
         );
         lines.extend(wrapped_cmd);
       } else {
-        let cmd_line = Line::from(Span::from(call.command.clone()).style(light_blue()));
+        let cmd_line = Line::from(call.command.clone());
         let wrapped_cmd = word_wrap_lines(
           &[cmd_line],
           RtOptions::new(width.max(1) as usize)
@@ -201,6 +209,10 @@ impl HistoryCell for ExecCell {
   }
 
   fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
+    if self.is_exploring_cell() {
+      return self.exploring_display_lines(width);
+    }
+
     let mut lines = Vec::new();
     for (idx, call) in self.iter_calls().enumerate() {
       if idx > 0 {
@@ -217,7 +229,7 @@ impl HistoryCell for ExecCell {
         );
         lines.extend(wrapped_cmd);
       } else {
-        let cmd_line = Line::from(Span::from(call.command.clone()).style(light_blue()));
+        let cmd_line = Line::from(call.command.clone());
         let wrapped_cmd = word_wrap_lines(
           &[cmd_line],
           RtOptions::new(width.max(1) as usize)
@@ -237,6 +249,80 @@ impl HistoryCell for ExecCell {
     }
     lines
   }
+}
+
+impl ExecCell {
+  fn exploring_display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+      if self.is_active() {
+        spinner(self.active_start_time(), self.animations_enabled())
+      } else {
+        "•".dim()
+      },
+      " ".into(),
+      if self.is_active() {
+        Span::from("Exploring").style(Style::new().fg(light_blue()).add_modifier(Modifier::BOLD))
+      } else {
+        Span::from("Explored").style(Style::new().fg(light_blue()).add_modifier(Modifier::BOLD))
+      },
+    ]));
+
+    let mut summary_lines = Vec::new();
+    let mut idx = 0usize;
+    while idx < self.calls.len() {
+      let call = &self.calls[idx];
+      if call.tool_name == "read_file" {
+        let mut names = vec![call.command.clone()];
+        idx += 1;
+        while idx < self.calls.len() && self.calls[idx].tool_name == "read_file" {
+          let next_name = self.calls[idx].command.clone();
+          if !names.iter().any(|name| name == &next_name) {
+            names.push(next_name);
+          }
+          idx += 1;
+        }
+        summary_lines.extend(wrap_exploring_line(width, "Read", names.join(", ")));
+        continue;
+      }
+
+      let title = match call.tool_name.as_str() {
+        "list_dir" => "List",
+        "grep_files" | "search_tool" => "Search",
+        _ => "Run",
+      };
+      summary_lines.extend(wrap_exploring_line(width, title, call.command.clone()));
+      idx += 1;
+    }
+
+    lines.extend(prefix_lines(summary_lines, "  └ ".dim(), "    ".into()));
+    lines
+  }
+}
+
+fn wrap_exploring_line(width: u16, title: &str, content: String) -> Vec<Line<'static>> {
+  let width = width.max(1) as usize;
+  let continuation = " ".repeat(title.len() + 1);
+  let available_width = width.saturating_sub(continuation.len()).max(1);
+  let wrapped = textwrap::wrap(&content, available_width);
+
+  wrapped
+    .into_iter()
+    .enumerate()
+    .map(|(idx, line)| {
+      let prefix = if idx == 0 {
+        Line::from(vec![
+          Span::from(title.to_string()).style(light_blue()),
+          " ".into(),
+        ])
+      } else {
+        continuation.clone().into()
+      };
+      let mut out = prefix;
+      out.push_span(line.into_owned());
+      out
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -278,7 +364,7 @@ mod tests {
     ExecCall {
       command_id: "call-2".to_string(),
       tool_name: "read_file".to_string(),
-      command: "read_file".to_string(),
+      command: "main.rs".to_string(),
       cwd: PathBuf::from("/home/user/project"),
       output: Some(CommandOutput {
         exit_code: 0,
@@ -293,7 +379,7 @@ mod tests {
     ExecCall {
       command_id: "call-3".to_string(),
       tool_name: "list_dir".to_string(),
-      command: "list_dir".to_string(),
+      command: "src".to_string(),
       cwd: PathBuf::from("/home/user/project"),
       output: Some(CommandOutput {
         exit_code: 0,

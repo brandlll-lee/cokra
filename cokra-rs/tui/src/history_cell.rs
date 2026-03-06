@@ -211,9 +211,7 @@ impl HistoryCell for RequestUserInputResultCell {
         width,
         "  ↳ ".dim().cyan(),
         "    ".dim(),
-        Style::default()
-          .fg(Color::Cyan)
-          .add_modifier(Modifier::DIM),
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
       ));
     }
 
@@ -729,7 +727,10 @@ impl HistoryCell for TurnCompleteHistoryCell {
       label_parts.push(format!("Worked for {elapsed_seconds}"));
     }
     if self.input_tokens > 0 || self.output_tokens > 0 {
-      label_parts.push(format!("{} in / {} out", self.input_tokens, self.output_tokens));
+      label_parts.push(format!(
+        "{} in / {} out",
+        self.input_tokens, self.output_tokens
+      ));
     }
 
     if label_parts.is_empty() {
@@ -738,7 +739,12 @@ impl HistoryCell for TurnCompleteHistoryCell {
 
     let label = format!("─ {} ─", label_parts.join(" • "));
     let (label, _suffix, label_width) = take_prefix_by_width(&label, width as usize);
-    vec![Line::from(vec![label.dim(), "─".repeat((width as usize).saturating_sub(label_width)).dim()])]
+    vec![Line::from(vec![
+      label.dim(),
+      "─"
+        .repeat((width as usize).saturating_sub(label_width))
+        .dim(),
+    ])]
   }
 }
 

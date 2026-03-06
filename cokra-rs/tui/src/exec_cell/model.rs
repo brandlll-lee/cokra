@@ -40,6 +40,19 @@ impl ExecCell {
     self.calls.push(call);
   }
 
+  pub(crate) fn with_added_call(&self, call: ExecCall) -> Option<Self> {
+    if self.is_exploring_cell() && Self::is_exploring_call(&call) {
+      let mut calls = self.calls.clone();
+      calls.push(call);
+      Some(Self {
+        calls,
+        animations_enabled: self.animations_enabled,
+      })
+    } else {
+      None
+    }
+  }
+
   pub(crate) fn complete_call(
     &mut self,
     command_id: &str,
@@ -96,6 +109,10 @@ impl ExecCell {
     self.calls.iter().any(|c| c.output.is_none())
   }
 
+  pub(crate) fn should_flush(&self) -> bool {
+    !self.is_exploring_cell() && self.calls.iter().all(|c| c.output.is_some())
+  }
+
   pub(crate) fn active_start_time(&self) -> Option<Instant> {
     self
       .calls
@@ -105,11 +122,26 @@ impl ExecCell {
       .and_then(|c| c.start_time)
   }
 
+  pub(crate) fn active_call(&self) -> Option<&ExecCall> {
+    self.calls.iter().rev().find(|c| c.output.is_none())
+  }
+
   pub(crate) fn animations_enabled(&self) -> bool {
     self.animations_enabled
   }
 
   pub(crate) fn iter_calls(&self) -> impl Iterator<Item = &ExecCall> {
     self.calls.iter()
+  }
+
+  pub(crate) fn is_exploring_cell(&self) -> bool {
+    self.calls.iter().all(Self::is_exploring_call)
+  }
+
+  pub(crate) fn is_exploring_call(call: &ExecCall) -> bool {
+    matches!(
+      call.tool_name.as_str(),
+      "read_file" | "list_dir" | "grep_files" | "search_tool"
+    )
   }
 }

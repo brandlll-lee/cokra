@@ -1,9 +1,9 @@
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -94,7 +94,7 @@ struct InvocationRuntimeState {
 pub struct ToolRouter {
   registry: Arc<ToolRegistry>,
   validator: Arc<ToolValidator>,
-  orchestrator: Arc<Mutex<ToolOrchestrator>>,
+  orchestrator: Arc<ToolOrchestrator>,
 }
 
 impl ToolRouter {
@@ -102,7 +102,7 @@ impl ToolRouter {
     Self {
       registry,
       validator,
-      orchestrator: Arc::new(Mutex::new(ToolOrchestrator::new())),
+      orchestrator: Arc::new(ToolOrchestrator::new()),
     }
   }
 
@@ -158,17 +158,7 @@ impl ToolRouter {
 
     // 1:1 codex: for shell tool, pass the actual command string so TUI
     // renders "$ pwd" instead of "$ shell".
-    let emitter = if call.tool_name == "shell" {
-      let raw_cmd = call
-        .args
-        .get("command")
-        .and_then(|v| v.as_str())
-        .unwrap_or("shell")
-        .to_string();
-      ToolEmitter::shell_with_command(raw_cmd)
-    } else {
-      ToolEmitter::new(call.tool_name.clone())
-    };
+    let emitter = tool_emitter_for_call(&call, &run_ctx.cwd);
     let event_ctx = ToolEventCtx {
       session: run_ctx.session.as_ref(),
       tx_event: run_ctx.tx_event.clone(),
@@ -180,9 +170,7 @@ impl ToolRouter {
     };
     emitter.begin(event_ctx.clone()).await;
 
-    let mut orchestrator = self.orchestrator.lock().await;
-    let result = orchestrator.run(&mut runtime, &call, &tool_ctx).await;
-    drop(orchestrator);
+    let result = self.orchestrator.run(&mut runtime, &call, &tool_ctx).await;
 
     match result {
       Ok(OrchestratorRunResult {
@@ -245,6 +233,69 @@ impl ToolRouter {
       .map_err(FunctionCallError::from)?;
     Ok(())
   }
+}
+
+fn tool_emitter_for_call(call: &ToolCall, cwd: &Path) -> ToolEmitter {
+  if call.tool_name == "shell" {
+    let raw_cmd = call
+      .args
+      .get("command")
+      .and_then(|v| v.as_str())
+      .unwrap_or("shell")
+      .to_string();
+    return ToolEmitter::shell_with_command(raw_cmd);
+  }
+
+  let Some(display_command) = summarize_tool_display_command(call, cwd) else {
+    return ToolEmitter::new(call.tool_name.clone());
+  };
+  ToolEmitter::with_display_command(call.tool_name.clone(), display_command)
+}
+
+fn summarize_tool_display_command(call: &ToolCall, cwd: &Path) -> Option<String> {
+  match call.tool_name.as_str() {
+    "read_file" => call
+      .args
+      .get("file_path")
+      .and_then(Value::as_str)
+      .map(|path| summarize_path_for_display(path, cwd)),
+    "list_dir" => call
+      .args
+      .get("dir_path")
+      .and_then(Value::as_str)
+      .map(|path| summarize_path_for_display(path, cwd)),
+    "grep_files" => {
+      let pattern = call.args.get("pattern").and_then(Value::as_str)?;
+      let path = call.args.get("path").and_then(Value::as_str);
+      Some(match path {
+        Some(path) if !path.is_empty() => {
+          format!("{pattern} in {}", summarize_path_for_display(path, cwd))
+        }
+        _ => pattern.to_string(),
+      })
+    }
+    "search_tool" => call
+      .args
+      .get("query")
+      .and_then(Value::as_str)
+      .map(ToString::to_string),
+    _ => None,
+  }
+}
+
+fn summarize_path_for_display(path: &str, cwd: &Path) -> String {
+  let path = PathBuf::from(path);
+  if let Ok(relative) = path.strip_prefix(cwd)
+    && !relative.as_os_str().is_empty()
+  {
+    return relative.display().to_string();
+  }
+  path
+    .file_name()
+    .and_then(|name| name.to_str())
+    .map(ToString::to_string)
+    .filter(|name| !name.is_empty())
+    .unwrap_or_else(|| path.display().to_string())
 }
 
 struct RegistryToolRuntime {

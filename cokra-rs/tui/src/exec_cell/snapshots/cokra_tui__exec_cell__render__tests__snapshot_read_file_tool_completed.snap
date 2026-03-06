@@ -2,11 +2,11 @@
 source: tui/src/exec_cell/render.rs
 expression: rendered
 ---
-"✓ read_file                                                 "
-"  › read_file                                               "
-"  └ 1: fn main() {                                          "
-"    2:   println!("hello");                                 "
-"    3: }                                                    "
+"• Explored                                                  "
+"  └ Read main.rs                                            "
+"                                                            "
+"                                                            "
+"                                                            "
 "                                                            "
 "                                                            "
 "                                                            "

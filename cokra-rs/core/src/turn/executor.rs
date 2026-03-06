@@ -198,14 +198,38 @@ impl TurnExecutor {
       .await
     {
       Ok(output) => output,
+      Err(TurnError::TurnAborted) => {
+        self
+          .send_event(EventMsg::TurnAborted(cokra_protocol::TurnAbortedEvent {
+            thread_id,
+            turn_id,
+            reason: "turn aborted".to_string(),
+          }))
+          .await?;
+        return Err(TurnError::TurnAborted);
+      }
       Err(e) => {
+        let error = e.to_string();
+        let details = format!("{e:?}");
         self
           .send_event(EventMsg::Error(ErrorEvent {
             thread_id: thread_id.clone(),
             turn_id: turn_id.clone(),
-            error: e.to_string(),
-            user_facing_message: e.to_string(),
-            details: format!("{e:?}"),
+            error: error.clone(),
+            user_facing_message: error.clone(),
+            details: details.clone(),
+          }))
+          .await?;
+        self
+          .send_event(EventMsg::TurnComplete(TurnCompleteEvent {
+            thread_id,
+            turn_id,
+            status: CompletionStatus::Errored {
+              error,
+              user_facing_message: e.to_string(),
+              details,
+            },
+            end_time: chrono::Utc::now().timestamp(),
           }))
           .await?;
         return Err(e);
@@ -521,6 +545,67 @@ mod tests {
     assert_eq!(
       turn_started_thread_id.as_deref(),
       Some(expected_thread_id.as_str())
+    );
+  }
+
+  #[tokio::test]
+  async fn test_error_path_emits_terminal_turn_complete() {
+    let provider = OrderedProvider::new(vec![vec![ResponseEvent::Error(
+      cokra_protocol::ResponseErrorEvent {
+        message: "boom".to_string(),
+      },
+    )]]);
+
+    let model_client = build_client(provider).await;
+    let tool_registry = Arc::new(ToolRegistry::new());
+    let tool_router = build_router(tool_registry.clone());
+    let session = Arc::new(Session::new());
+    let (tx_event, mut rx_event) = mpsc::channel(64);
+
+    let executor = TurnExecutor::new(
+      model_client,
+      tool_registry,
+      tool_router,
+      session,
+      tx_event,
+      test_config(),
+    );
+
+    let result = executor
+      .run_turn(UserInput {
+        content: "hello".to_string(),
+        attachments: Vec::new(),
+      })
+      .await;
+    assert!(result.is_err());
+
+    let mut labels = Vec::new();
+    let mut saw_error = false;
+    let mut saw_errored_complete = false;
+    while let Ok(event) = rx_event.try_recv() {
+      match event {
+        EventMsg::TurnStarted(_) => labels.push("turn_started"),
+        EventMsg::ItemStarted(_) => labels.push("item_started"),
+        EventMsg::Error(err) => {
+          saw_error = err.user_facing_message.contains("boom");
+          labels.push("error");
+        }
+        EventMsg::TurnComplete(done) => {
+          saw_errored_complete = matches!(
+            done.status,
+            cokra_protocol::CompletionStatus::Errored { .. }
+          );
+          labels.push("turn_complete");
+        }
+        _ => {}
+      }
+    }
+
+    assert!(saw_error);
+    assert!(saw_errored_complete);
+    assert_eq!(
+      labels,
+      vec!["turn_started", "item_started", "error", "turn_complete"]
     );
   }
 }

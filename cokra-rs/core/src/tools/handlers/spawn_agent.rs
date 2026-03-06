@@ -1,13 +1,8 @@
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::OnceLock;
-
 use async_trait::async_trait;
 use serde::Deserialize;
+use serde::Serialize;
 
-use cokra_protocol::ThreadId;
-
-use crate::agent::AgentControl;
+use crate::agent::team_runtime::runtime_for_thread;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -18,46 +13,47 @@ pub struct SpawnAgentHandler;
 
 #[derive(Debug, Deserialize)]
 struct SpawnAgentArgs {
-  task: String,
+  task: Option<String>,
+  message: Option<String>,
   role: Option<String>,
+  agent_type: Option<String>,
 }
 
-#[derive(Clone)]
-struct SpawnAgentRuntime {
-  agent_control: Arc<AgentControl>,
-  parent_thread_id: ThreadId,
-  max_threads: Option<usize>,
-  depth: usize,
+#[derive(Debug, Serialize)]
+struct SpawnAgentResult {
+  thread_id: String,
+  agent_id: String,
+  role: String,
+  status: String,
 }
 
-static SPAWN_RUNTIME: OnceLock<Mutex<Option<SpawnAgentRuntime>>> = OnceLock::new();
+fn resolve_message(args: SpawnAgentArgs) -> Result<(String, String), FunctionCallError> {
+  let task = args.task.map(|value| value.trim().to_string());
+  let message = args.message.map(|value| value.trim().to_string());
 
-fn spawn_runtime() -> &'static Mutex<Option<SpawnAgentRuntime>> {
-  SPAWN_RUNTIME.get_or_init(|| Mutex::new(None))
-}
+  let message = match (task, message) {
+    (Some(task), Some(message)) if !task.is_empty() && !message.is_empty() => {
+      return Err(FunctionCallError::RespondToModel(
+        "spawn_agent accepts either `task` or `message`, not both".to_string(),
+      ));
+    }
+    (Some(task), _) if !task.is_empty() => task,
+    (_, Some(message)) if !message.is_empty() => message,
+    _ => {
+      return Err(FunctionCallError::RespondToModel(
+        "spawn_agent requires a non-empty `task` or `message`".to_string(),
+      ));
+    }
+  };
 
-pub fn configure_spawn_agent_runtime(
-  agent_control: Arc<AgentControl>,
-  parent_thread_id: ThreadId,
-  max_threads: Option<usize>,
-  depth: usize,
-) {
-  let mut slot = spawn_runtime()
-    .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner);
-  *slot = Some(SpawnAgentRuntime {
-    agent_control,
-    parent_thread_id,
-    max_threads,
-    depth,
-  });
-}
+  let role = args
+    .agent_type
+    .or(args.role)
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+    .unwrap_or_else(|| "default".to_string());
 
-pub fn clear_spawn_agent_runtime() {
-  let mut slot = spawn_runtime()
-    .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner);
-  *slot = None;
+  Ok((message, role))
 }
 
 #[async_trait]
@@ -66,51 +62,33 @@ impl ToolHandler for SpawnAgentHandler {
     ToolKind::Function
   }
 
-  fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+  async fn handle_async(
+    &self,
+    invocation: ToolInvocation,
+  ) -> Result<ToolOutput, FunctionCallError> {
     let args: SpawnAgentArgs = invocation.parse_arguments()?;
-    let runtime = spawn_runtime()
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .clone()
-      .ok_or_else(|| {
-        FunctionCallError::Execution("spawn_agent runtime is not configured".to_string())
-      })?;
-
-    let role = args.role.unwrap_or_else(|| "default".to_string());
-    let task = args.task;
-    let agent_control = runtime.agent_control;
-    let parent_thread_id = runtime.parent_thread_id;
-    let max_threads = runtime.max_threads;
-    let depth = runtime.depth;
-    let spawn_role = role.clone();
-
-    let thread_id = std::thread::spawn(move || {
-      let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| FunctionCallError::Execution(format!("failed to create runtime: {e}")))?;
-      rt.block_on(agent_control.spawn_agent(
-        task,
-        Some(spawn_role),
-        Some(parent_thread_id),
-        depth,
-        max_threads,
-      ))
-      .map_err(|e| FunctionCallError::Execution(e.to_string()))
-    })
-    .join()
-    .map_err(|_| {
-      FunctionCallError::Execution("spawn_agent worker thread panicked".to_string())
-    })??;
+    let runtime = invocation
+      .runtime
+      .ok_or_else(|| FunctionCallError::Fatal("spawn_agent missing runtime context".to_string()))?;
+    let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
+      FunctionCallError::Execution("spawn_agent runtime is not configured".to_string())
+    })?;
+    let (message, role) = resolve_message(args)?;
+    let thread_id = team_runtime
+      .spawn_agent(&runtime.thread_id, message, role.clone())
+      .await
+      .map_err(|err| FunctionCallError::Execution(err.to_string()))?;
 
     let mut out = ToolOutput::success(
-      serde_json::json!({
-        "thread_id": thread_id.to_string(),
-        "agent_id": thread_id.to_string(),
-        "role": role,
-        "status": "created",
+      serde_json::to_string(&SpawnAgentResult {
+        thread_id: thread_id.to_string(),
+        agent_id: thread_id.to_string(),
+        role,
+        status: "running".to_string(),
       })
-      .to_string(),
+      .map_err(|err| {
+        FunctionCallError::Fatal(format!("failed to serialize spawn result: {err}"))
+      })?,
     );
     out.id = invocation.id;
     Ok(out)

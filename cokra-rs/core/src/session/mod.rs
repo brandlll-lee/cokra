@@ -47,11 +47,15 @@ pub struct TokenUsageState {
 
 impl Session {
   pub fn new() -> Self {
+    Self::new_with_thread_id(cokra_protocol::ThreadId::new())
+  }
+
+  pub fn new_with_thread_id(thread_id: cokra_protocol::ThreadId) -> Self {
     let (event_tx, _event_rx) = broadcast::channel(512);
     let shell = crate::shell::default_user_shell();
     Self {
       session_id: uuid::Uuid::new_v4().to_string(),
-      thread_id: cokra_protocol::ThreadId::new(),
+      thread_id,
       history: Arc::new(RwLock::new(Vec::new())),
       response_history: Arc::new(RwLock::new(Vec::new())),
       event_tx,
@@ -224,7 +228,10 @@ impl Session {
     turn_id: String,
     tx: oneshot::Sender<RequestUserInputResponse>,
   ) -> Option<oneshot::Sender<RequestUserInputResponse>> {
-    self.pending_user_inputs.insert(request_id, turn_id, tx).await
+    self
+      .pending_user_inputs
+      .insert(request_id, turn_id, tx)
+      .await
   }
 
   pub async fn remove_pending_user_input(

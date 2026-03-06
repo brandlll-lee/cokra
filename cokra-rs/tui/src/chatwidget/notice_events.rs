@@ -202,19 +202,31 @@ impl ChatWidget {
       }
       EventMsg::ReasoningContentDelta(_) | EventMsg::ReasoningRawContentDelta(_) => {}
       EventMsg::CollabWaitingBegin(_) => {
-        self.add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "• Waiting for agents...".dim(),
-        )]));
+        if let EventMsg::CollabWaitingBegin(e) = event {
+          self.add_to_history(multi_agents::waiting_begin(e.clone()));
+        }
       }
       EventMsg::CollabWaitingEnd(_) => {
-        self.add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "• Agents completed".dim(),
-        )]));
+        if let EventMsg::CollabWaitingEnd(e) = event {
+          self.add_to_history(multi_agents::waiting_end(e.clone()));
+        }
       }
-      EventMsg::CollabCloseBegin(_)
-      | EventMsg::CollabCloseEnd(_)
-      | EventMsg::CollabResumeBegin(_)
-      | EventMsg::CollabResumeEnd(_) => {}
+      EventMsg::CollabCloseBegin(e) => {
+        self.add_to_history(multi_agents::close_begin(e.clone()));
+      }
+      EventMsg::CollabCloseEnd(e) => {
+        self.add_to_history(multi_agents::close_end(e.clone()));
+      }
+      EventMsg::CollabMessagePosted(e) => {
+        self.add_to_history(multi_agents::message_posted(e.clone()));
+      }
+      EventMsg::CollabMessagesRead(e) => {
+        self.add_to_history(multi_agents::messages_read(e.clone()));
+      }
+      EventMsg::CollabTaskUpdated(e) => {
+        self.add_to_history(multi_agents::task_updated(e.clone()));
+      }
+      EventMsg::CollabResumeBegin(_) | EventMsg::CollabResumeEnd(_) => {}
       _ => return false,
     }
 

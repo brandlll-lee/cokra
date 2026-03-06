@@ -275,8 +275,11 @@ impl SseTurnExecutor {
         .send_event(EventMsg::ItemStarted(ItemStartedEvent {
           thread_id: thread_id.clone(),
           turn_id: turn_id.clone(),
-          item_id: item_id.clone(),
-          item_type: "agent-message".to_string(),
+          item: cokra_protocol::TurnItem::AgentMessage(cokra_protocol::AgentMessageItem {
+            id: item_id.clone(),
+            content: Vec::new(),
+            phase: None,
+          }),
         }))
         .await?;
 
@@ -333,8 +336,17 @@ impl SseTurnExecutor {
           .send_event(EventMsg::ItemCompleted(ItemCompletedEvent {
             thread_id: thread_id.clone(),
             turn_id: turn_id.clone(),
-            item_id,
-            result: final_content.clone(),
+            item: cokra_protocol::TurnItem::AgentMessage(cokra_protocol::AgentMessageItem {
+              id: item_id,
+              content: if final_content.is_empty() {
+                Vec::new()
+              } else {
+                vec![cokra_protocol::AgentMessageContent::Text {
+                  text: final_content.clone(),
+                }]
+              },
+              phase: None,
+            }),
           }))
           .await?;
 
@@ -389,8 +401,17 @@ impl SseTurnExecutor {
         .send_event(EventMsg::ItemCompleted(ItemCompletedEvent {
           thread_id: thread_id.clone(),
           turn_id: turn_id.clone(),
-          item_id,
-          result: assistant_delta,
+          item: cokra_protocol::TurnItem::AgentMessage(cokra_protocol::AgentMessageItem {
+            id: item_id,
+            content: if assistant_delta.is_empty() {
+              Vec::new()
+            } else {
+              vec![cokra_protocol::AgentMessageContent::Text {
+                text: assistant_delta,
+              }]
+            },
+            phase: None,
+          }),
         }))
         .await?;
     }

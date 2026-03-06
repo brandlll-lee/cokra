@@ -135,6 +135,9 @@ pub enum EventMsg {
   CollabCloseEnd(CollabCloseEndEvent),
   CollabResumeBegin(CollabResumeBeginEvent),
   CollabResumeEnd(CollabResumeEndEvent),
+  CollabMessagePosted(CollabMessagePostedEvent),
+  CollabMessagesRead(CollabMessagesReadEvent),
+  CollabTaskUpdated(CollabTaskUpdatedEvent),
 }
 
 // ============================================================================
@@ -502,8 +505,7 @@ pub struct CollabAgentInteractionEndEvent {
 pub struct ItemStartedEvent {
   pub thread_id: String,
   pub turn_id: String,
-  pub item_id: String,
-  pub item_type: String,
+  pub item: TurnItem,
 }
 
 /// Item completed event
@@ -511,8 +513,7 @@ pub struct ItemStartedEvent {
 pub struct ItemCompletedEvent {
   pub thread_id: String,
   pub turn_id: String,
-  pub item_id: String,
-  pub result: String,
+  pub item: TurnItem,
 }
 
 // ============================================================================
@@ -1178,6 +1179,28 @@ pub struct CollabResumeEndEvent {
   pub sender_thread_id: String,
   pub receiver_thread_id: String,
   pub status: AgentStatus,
+}
+
+/// Collab team message posted event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabMessagePostedEvent {
+  pub sender_thread_id: String,
+  pub recipient_thread_id: Option<String>,
+  pub message: String,
+}
+
+/// Collab team messages read event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabMessagesReadEvent {
+  pub reader_thread_id: String,
+  pub count: usize,
+}
+
+/// Collab task updated event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabTaskUpdatedEvent {
+  pub actor_thread_id: String,
+  pub task: TeamTask,
 }
 
 // ---------- Error Info ----------

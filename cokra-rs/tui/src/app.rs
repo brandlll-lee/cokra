@@ -35,8 +35,8 @@ use crate::bottom_pane::BottomPaneAction;
 use crate::bottom_pane::approval_overlay::ApprovalOverlay;
 use crate::bottom_pane::approval_overlay::ApprovalRequest;
 use crate::bottom_pane::chat_composer::ComposerSubmission;
-use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ActiveCellTranscriptKey;
+use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ChatWidgetAction;
 use crate::chatwidget::TokenUsage;
 use crate::custom_terminal::Frame;
@@ -425,32 +425,39 @@ impl App {
   }
 
   fn insert_history_cell(&mut self, cell: Box<dyn HistoryCell>, tui: &mut Tui) -> Result<()> {
+    let width = tui.terminal.last_known_screen_size.width.max(1);
+    self.stage_history_cell(cell, width, Some(tui));
+    Ok(())
+  }
+
+  fn stage_history_cell(&mut self, cell: Box<dyn HistoryCell>, width: u16, tui: Option<&mut Tui>) {
     self.transcript_cells.push(cell);
 
-    let width = tui.terminal.last_known_screen_size.width.max(1);
     let cell = self.transcript_cells.last().unwrap();
     let mut has_emitted = self.has_emitted_history_lines;
-    let display = prepare_history_display(cell.as_ref(), width, &mut has_emitted);
+    let display = prepare_history_display(cell.as_ref(), width.max(1), &mut has_emitted);
     if display.is_empty() {
-      return Ok(());
+      return;
     }
     self.has_emitted_history_lines = has_emitted;
 
     match self.ui_mode {
       UiMode::Inline => {
-        if self.deferred_history_lines.is_empty() {
-          tui.insert_history_lines(display);
+        if let Some(tui) = tui {
+          if self.deferred_history_lines.is_empty() {
+            tui.insert_history_lines(display);
+          } else {
+            self.deferred_history_lines.extend(display);
+          }
         } else {
           self.deferred_history_lines.extend(display);
         }
       }
       UiMode::AltScreen => {
         self.transcript_lines_cache.extend(display);
-        self.transcript_cache_width = width;
+        self.transcript_cache_width = width.max(1);
       }
     }
-
-    Ok(())
   }
 
   fn rebuild_transcript_cache(&mut self, width: u16) {
@@ -490,7 +497,11 @@ impl App {
     let mut has_emitted = false;
     let mut lines = Vec::new();
     for cell in &self.transcript_cells {
-      lines.extend(prepare_history_display(cell.as_ref(), width, &mut has_emitted));
+      lines.extend(prepare_history_display(
+        cell.as_ref(),
+        width,
+        &mut has_emitted,
+      ));
     }
     if !lines.is_empty() {
       tui.insert_history_lines(lines);
@@ -664,7 +675,6 @@ impl App {
     }
 
     self.scroll_offset = 0;
-    self.chat_widget.push_user_input_text(text.clone());
 
     let _ = self
       .cokra
@@ -686,7 +696,7 @@ impl App {
   async fn handle_cokra_event(&mut self, event: Event) -> Result<()> {
     let turn_finished = matches!(
       event.msg,
-      EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) | EventMsg::Error(_)
+      EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)
     );
 
     if let Some(action) = self.chat_widget.handle_event(&event.msg) {

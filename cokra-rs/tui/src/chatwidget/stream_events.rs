@@ -1,7 +1,7 @@
 use super::*;
-use cokra_protocol::AgentMessageContent;
 use crate::history_cell::AgentMessageCell;
 use crate::streaming::commit_tick::CommitTickScope;
+use cokra_protocol::AgentMessageContent;
 
 impl ChatWidget {
   pub(super) fn on_agent_message_delta(&mut self, item_id: &str, delta: &str) {

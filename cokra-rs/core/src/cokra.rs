@@ -30,6 +30,8 @@ use cokra_protocol::UserInput as ProtocolUserInput;
 use crate::agent::AgentControl;
 use crate::agent::AgentStatus;
 use crate::agent::Turn;
+use crate::agent::team_runtime::clear_team_runtime;
+use crate::agent::team_runtime::register_team_runtime;
 use crate::model::ChatResponse;
 use crate::model::ModelClient;
 use crate::model::ToolCall;
@@ -41,8 +43,6 @@ use crate::tools::build_default_tools;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolContext;
 use crate::tools::context::ToolOutput;
-use crate::tools::handlers::spawn_agent::clear_spawn_agent_runtime;
-use crate::tools::handlers::spawn_agent::configure_spawn_agent_runtime;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
 use crate::tools::router::ToolRunContext;
@@ -169,11 +169,13 @@ impl Cokra {
       guards,
       root_thread_id.clone(),
     ));
-    configure_spawn_agent_runtime(
+    register_team_runtime(
+      config.clone(),
+      model_client.clone(),
       agent_control.clone(),
+      agent_control.guards(),
+      thread_manager.state(),
       root_thread_id,
-      Some(config.agents.max_threads),
-      1,
     );
     agent_control.start().await?;
     let agent_status = agent_control.subscribe_status();
@@ -292,8 +294,17 @@ impl Cokra {
           final_message.push_str(&delta.delta);
         }
         EventMsg::ItemCompleted(item) => {
-          if !item.result.is_empty() {
-            final_message = item.result;
+          if let cokra_protocol::TurnItem::AgentMessage(agent) = item.item {
+            let text = agent
+              .content
+              .iter()
+              .map(|part| match part {
+                cokra_protocol::AgentMessageContent::Text { text } => text.as_str(),
+              })
+              .collect::<String>();
+            if !text.is_empty() {
+              final_message = text;
+            }
           }
         }
         EventMsg::TurnComplete(done) => {
@@ -416,7 +427,9 @@ impl Cokra {
     let _ = self.submit(Op::Shutdown).await?;
     self.agent_control.stop().await?;
     self.session.shutdown().await?;
-    clear_spawn_agent_runtime();
+    if let Some(thread_id) = self.thread_id() {
+      clear_team_runtime(thread_id);
+    }
     Ok(())
   }
 }
@@ -536,6 +549,18 @@ fn build_system_prompt() -> String {
     "- **grep_files**: Search code by content pattern. NEVER use `grep`, `rg`, or `ag` via shell.\n",
     "- **apply_patch**: Edit existing files with a patch. NEVER use `sed`, `awk`, or heredoc via shell.\n",
     "- **write_file**: Create new files. NEVER use `echo >` or `cat >` via shell.\n",
+    "- **spawn_agent**: Create a sub-agent and immediately give it an initial task.\n",
+    "- **send_input**: Send follow-up instructions to a spawned agent.\n",
+    "- **wait**: Wait for spawned agents before you summarize or finish.\n",
+    "- **close_agent**: Clean up spawned agents when they are no longer needed.\n",
+    "- **team_status**: Inspect the shared team snapshot, including members, tasks, and unread mailbox counts.\n",
+    "- **send_team_message**: Send a direct or broadcast mailbox message to teammates.\n",
+    "- **read_team_messages**: Read your mailbox messages and mark them as seen.\n",
+    "- **create_team_task**: Create a task on the shared team task board.\n",
+    "- **update_team_task**: Update a shared team task status, assignee, or notes.\n",
+    "\n",
+    "If you spawn agents for research or parallel analysis, call `wait` before delivering the final answer.\n",
+    "When coordinating a team, use `team_status` to inspect the shared state, use the mailbox tools for teammate-to-teammate communication, and keep the shared task board up to date.\n",
     "\n",
     "## Shell commands\n",
     "\n",
@@ -616,6 +641,7 @@ async fn emit_event(
   event_bus: &broadcast::Sender<EventMsg>,
   msg: EventMsg,
 ) {
+  let legacy = legacy_events_for(&msg);
   let _ = event_bus.send(msg.clone());
   let _ = tx_event
     .send(Event {
@@ -623,6 +649,25 @@ async fn emit_event(
       msg,
     })
     .await;
+
+  for legacy_msg in legacy {
+    let _ = event_bus.send(legacy_msg.clone());
+    let _ = tx_event
+      .send(Event {
+        id: Uuid::new_v4().to_string(),
+        msg: legacy_msg,
+      })
+      .await;
+  }
+}
+
+fn legacy_events_for(msg: &EventMsg) -> Vec<EventMsg> {
+  match msg {
+    EventMsg::ItemCompleted(event) => event
+      .item
+      .as_legacy_events(&event.thread_id, &event.turn_id),
+    _ => Vec::new(),
+  }
 }
 
 async fn submission_loop(
@@ -706,6 +751,28 @@ async fn submission_loop(
         .await;
       }
       Op::UserInput { items, .. } => {
+        let user_item =
+          cokra_protocol::TurnItem::UserMessage(cokra_protocol::UserMessageItem::new(&items));
+        emit_event(
+          &tx_event,
+          &event_bus,
+          EventMsg::ItemStarted(cokra_protocol::ItemStartedEvent {
+            thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
+            turn_id: sub.id.clone(),
+            item: user_item.clone(),
+          }),
+        )
+        .await;
+        emit_event(
+          &tx_event,
+          &event_bus,
+          EventMsg::ItemCompleted(cokra_protocol::ItemCompletedEvent {
+            thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
+            turn_id: sub.id.clone(),
+            item: user_item,
+          }),
+        )
+        .await;
         let user_message = extract_text_from_items(&items);
         run_turn_with_interrupt(
           &session,
@@ -731,6 +798,28 @@ async fn submission_loop(
         collaboration_mode: _,
         personality: _,
       } => {
+        let user_item =
+          cokra_protocol::TurnItem::UserMessage(cokra_protocol::UserMessageItem::new(&items));
+        emit_event(
+          &tx_event,
+          &event_bus,
+          EventMsg::ItemStarted(cokra_protocol::ItemStartedEvent {
+            thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
+            turn_id: sub.id.clone(),
+            item: user_item.clone(),
+          }),
+        )
+        .await;
+        emit_event(
+          &tx_event,
+          &event_bus,
+          EventMsg::ItemCompleted(cokra_protocol::ItemCompletedEvent {
+            thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
+            turn_id: sub.id.clone(),
+            item: user_item,
+          }),
+        )
+        .await;
         turn_config.model = model;
         agent_control.set_turn_config(turn_config.clone()).await;
         let user_message = extract_text_from_items(&items);
@@ -844,19 +933,7 @@ async fn run_turn_with_interrupt(
   loop {
     tokio::select! {
       res = &mut fut => {
-        if let Err(err) = res {
-          emit_event(
-            tx_event,
-            event_bus,
-            EventMsg::Error(cokra_protocol::ErrorEvent {
-              thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
-              turn_id: turn_id.to_string(),
-              error: err.to_string(),
-              user_facing_message: err.to_string(),
-              details: format!("{err:?}"),
-            }),
-          ).await;
-        }
+        let _ = res;
         session.clear_pending_approvals_for_turn(turn_id).await;
         session.clear_pending_user_inputs_for_turn(turn_id).await;
         break;
@@ -947,6 +1024,8 @@ mod tests {
   use uuid::Uuid;
 
   use super::Cokra;
+  use super::map_approval_policy;
+  use super::map_sandbox_policy;
   use super::resolve_model_id;
   use crate::model::ChatRequest;
   use crate::model::ChatResponse;
@@ -965,11 +1044,16 @@ mod tests {
   use crate::model::ToolCallFunction;
   use crate::model::Usage;
   use crate::model::provider::ModelProvider;
+  use crate::tools::context::ToolOutput;
+  use crate::tools::router::ToolRunContext;
   use cokra_config::ApprovalMode;
   use cokra_protocol::CompletionStatus;
   use cokra_protocol::EventMsg;
   use cokra_protocol::Op;
   use cokra_protocol::ReviewDecision;
+  use cokra_protocol::TeamSnapshot;
+  use cokra_protocol::TeamTask;
+  use cokra_protocol::TeamTaskStatus;
   use cokra_protocol::UserInput;
 
   #[derive(Debug)]
@@ -1829,6 +1913,29 @@ mod tests {
     )
   }
 
+  async fn execute_tool_as_thread(
+    cokra: &Cokra,
+    thread_id: String,
+    name: &str,
+    args: serde_json::Value,
+  ) -> ToolOutput {
+    let mut run_ctx = ToolRunContext::new(
+      cokra.session.clone(),
+      thread_id,
+      Uuid::new_v4().to_string(),
+      cokra.config.cwd.clone(),
+      map_approval_policy(&cokra.config),
+      map_sandbox_policy(&cokra.config),
+    );
+    run_ctx.has_managed_network_requirements = cokra.config.sandbox.network_access;
+
+    cokra
+      .tool_router
+      .route_tool_call(name, args, run_ctx)
+      .await
+      .expect("tool call should succeed")
+  }
+
   #[tokio::test]
   async fn test_cokra_creation() {
     let mut config = cokra_config::ConfigLoader::default()
@@ -1885,6 +1992,7 @@ mod tests {
       .expect("submit");
 
     let mut saw_configured = false;
+    let mut saw_user_message = false;
     let mut saw_started = false;
     let mut saw_item_started = false;
     let mut saw_item_completed = false;
@@ -1898,6 +2006,10 @@ mod tests {
         EventMsg::SessionConfigured(ev) => {
           configured_thread_id = Some(ev.thread_id);
           saw_configured = true;
+        }
+        EventMsg::UserMessage(ev) => {
+          assert_eq!(ev.items.len(), 1);
+          saw_user_message = true;
         }
         EventMsg::TurnStarted(ev) => {
           started_thread_id = Some(ev.thread_id);
@@ -1914,6 +2026,7 @@ mod tests {
     }
 
     assert!(saw_configured);
+    assert!(saw_user_message);
     assert!(saw_started);
     assert!(saw_item_started);
     assert!(saw_item_completed);
@@ -2033,6 +2146,214 @@ mod tests {
       .await;
 
     assert!(second.is_err());
+  }
+
+  #[tokio::test]
+  async fn test_spawn_agent_wait_and_close_round_trip() {
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "mock".to_string();
+    config.models.model = "mock/default".to_string();
+    config.approval.policy = ApprovalMode::Auto;
+
+    let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
+      .await
+      .expect("create cokra");
+
+    let spawn = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "spawn-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "spawn_agent".to_string(),
+          arguments: serde_json::json!({
+            "task": "Analyze the current repository"
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("spawn tool should succeed");
+
+    let spawned: serde_json::Value = serde_json::from_str(&spawn.content).expect("spawn json");
+    let agent_id = spawned
+      .get("agent_id")
+      .and_then(serde_json::Value::as_str)
+      .expect("agent id")
+      .to_string();
+
+    let wait = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "wait-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "wait".to_string(),
+          arguments: serde_json::json!({
+            "agent_ids": [agent_id.clone()],
+            "timeout_ms": 10000
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("wait tool should succeed");
+
+    let statuses: serde_json::Value = serde_json::from_str(&wait.content).expect("wait json");
+    assert_eq!(statuses[&agent_id]["Completed"], "mock reply");
+
+    let close = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "close-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "close_agent".to_string(),
+          arguments: serde_json::json!({
+            "agent_id": agent_id
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("close tool should succeed");
+
+    let closed: serde_json::Value = serde_json::from_str(&close.content).expect("close json");
+    assert_eq!(closed["status"], "Shutdown");
+  }
+
+  #[tokio::test]
+  async fn test_team_mailbox_and_task_board_round_trip() {
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "mock".to_string();
+    config.models.model = "mock/default".to_string();
+    config.approval.policy = ApprovalMode::Auto;
+
+    let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
+      .await
+      .expect("create cokra");
+
+    let spawn = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "spawn-team-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "spawn_agent".to_string(),
+          arguments: serde_json::json!({
+            "task": "You are teammate alex. Wait for team instructions."
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("spawn tool should succeed");
+    let spawned: serde_json::Value = serde_json::from_str(&spawn.content).expect("spawn json");
+    let agent_id = spawned["agent_id"].as_str().expect("agent id").to_string();
+
+    let _ = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "wait-team-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "wait".to_string(),
+          arguments: serde_json::json!({
+            "agent_ids": [agent_id.clone()],
+            "timeout_ms": 10000
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("wait should succeed");
+
+    let created = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "task-create-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "create_team_task".to_string(),
+          arguments: serde_json::json!({
+            "title": "Inspect current project structure",
+            "details": "Review core modules and summarize architecture.",
+            "assignee_thread_id": agent_id.clone()
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("create task should succeed");
+    let task: TeamTask = serde_json::from_str(&created.content).expect("task json");
+    assert_eq!(task.status, TeamTaskStatus::Pending);
+    assert_eq!(task.assignee_thread_id.as_deref(), Some(agent_id.as_str()));
+
+    let _ = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "mail-send-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "send_team_message".to_string(),
+          arguments: serde_json::json!({
+            "recipient_thread_id": agent_id.clone(),
+            "message": "Please inspect the repository structure and update your task when done."
+          })
+          .to_string(),
+        },
+      })
+      .await
+      .expect("send team message should succeed");
+
+    let read = execute_tool_as_thread(
+      &cokra,
+      agent_id.clone(),
+      "read_team_messages",
+      serde_json::json!({"unread_only": true}),
+    )
+    .await;
+    let messages: Vec<cokra_protocol::TeamMessage> =
+      serde_json::from_str(&read.content).expect("messages json");
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].unread);
+
+    let updated = execute_tool_as_thread(
+      &cokra,
+      agent_id.clone(),
+      "update_team_task",
+      serde_json::json!({
+        "task_id": task.id,
+        "status": "Completed",
+        "note": "Finished repository structure review."
+      }),
+    )
+    .await;
+    let updated_task: TeamTask = serde_json::from_str(&updated.content).expect("updated task json");
+    assert_eq!(updated_task.status, TeamTaskStatus::Completed);
+
+    let status = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "team-status-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "team_status".to_string(),
+          arguments: "{}".to_string(),
+        },
+      })
+      .await
+      .expect("team status should succeed");
+    let snapshot: TeamSnapshot = serde_json::from_str(&status.content).expect("snapshot json");
+    assert!(
+      snapshot
+        .members
+        .iter()
+        .any(|member| member.thread_id == agent_id)
+    );
+    assert!(
+      snapshot
+        .tasks
+        .iter()
+        .any(|item| item.status == TeamTaskStatus::Completed)
+    );
+    assert_eq!(snapshot.unread_counts.get(&agent_id), Some(&0usize));
   }
 
   #[tokio::test]
@@ -2201,6 +2522,9 @@ mod tests {
       }
     }
 
-    assert!(saw_complete, "expected turn completion after request_user_input");
+    assert!(
+      saw_complete,
+      "expected turn completion after request_user_input"
+    );
   }
 }

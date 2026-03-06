@@ -155,7 +155,9 @@ impl RequestUserInputView {
     let Some(question) = self.current_question() else {
       return Vec::new();
     };
-    let selected = self.current_answer().and_then(|answer| answer.selected_option);
+    let selected = self
+      .current_answer()
+      .and_then(|answer| answer.selected_option);
     let wrap_width = self.content_width(width).saturating_sub(4).max(1) as usize;
 
     let mut lines = Vec::new();
@@ -219,7 +221,11 @@ impl RequestUserInputView {
 
   fn input_outer_height(&self, width: u16) -> u16 {
     let inner_width = self.content_width(width).saturating_sub(2).max(1);
-    self.textarea.desired_height(inner_width).max(MIN_INPUT_HEIGHT) + 2
+    self
+      .textarea
+      .desired_height(inner_width)
+      .max(MIN_INPUT_HEIGHT)
+      + 2
   }
 
   fn footer_lines(&self, width: u16) -> Vec<Line<'static>> {
@@ -229,9 +235,8 @@ impl RequestUserInputView {
     } else {
       "enter next"
     };
-    let footer = format!(
-      "{enter_tip} | left/right navigate | up/down select option | esc submit now"
-    );
+    let footer =
+      format!("{enter_tip} | left/right navigate | up/down select option | esc submit now");
     textwrap::wrap(&footer, self.content_width(width) as usize)
       .into_iter()
       .map(|line| Line::from(line.to_string()).dim())
@@ -258,10 +263,12 @@ impl RequestUserInputView {
         answers: response.answers.clone(),
         interrupted,
       });
-    self.app_event_tx.send(AppEvent::CodexOp(Op::UserInputAnswer {
-      id: self.request.turn_id.clone(),
-      response,
-    }));
+    self
+      .app_event_tx
+      .send(AppEvent::CodexOp(Op::UserInputAnswer {
+        id: self.request.turn_id.clone(),
+        response,
+      }));
     self.complete = true;
   }
 
@@ -289,7 +296,10 @@ impl RequestUserInputView {
         }
       }
 
-      answers.insert(question.id.clone(), RequestUserInputAnswer { answers: entries });
+      answers.insert(
+        question.id.clone(),
+        RequestUserInputAnswer { answers: entries },
+      );
     }
 
     RequestUserInputResponse { answers }
@@ -341,7 +351,8 @@ impl BottomPaneView for RequestUserInputView {
         code: KeyCode::Left,
         modifiers: KeyModifiers::NONE,
         ..
-      } | KeyEvent {
+      }
+      | KeyEvent {
         code: KeyCode::Char('p'),
         modifiers: KeyModifiers::CONTROL,
         ..
@@ -356,7 +367,8 @@ impl BottomPaneView for RequestUserInputView {
         code: KeyCode::Right,
         modifiers: KeyModifiers::NONE,
         ..
-      } | KeyEvent {
+      }
+      | KeyEvent {
         code: KeyCode::Char('n'),
         modifiers: KeyModifiers::CONTROL,
         ..
@@ -475,7 +487,10 @@ impl Renderable for RequestUserInputView {
     if !input_inner.is_empty() {
       if self.textarea.is_empty() {
         Paragraph::new(Line::from(self.placeholder().dim())).render(input_inner, buf);
-      } else if self.current_question().is_some_and(|question| question.is_secret) {
+      } else if self
+        .current_question()
+        .is_some_and(|question| question.is_secret)
+      {
         self.textarea.render_ref_masked(
           input_inner,
           buf,

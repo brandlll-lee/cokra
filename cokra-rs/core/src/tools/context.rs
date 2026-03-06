@@ -35,8 +35,7 @@ pub struct ToolRuntimeContext {
 
 impl fmt::Debug for ToolRuntimeContext {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f
-      .debug_struct("ToolRuntimeContext")
+    f.debug_struct("ToolRuntimeContext")
       .field("thread_id", &self.thread_id)
       .field("turn_id", &self.turn_id)
       .finish_non_exhaustive()

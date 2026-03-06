@@ -8,15 +8,29 @@ use crate::exec_cell::new_active_exec_command;
 use crate::history_cell::ExecHistoryCell;
 
 impl ChatWidget {
-  pub(super) fn on_exec_command_begin(
-    &mut self,
-    event: &cokra_protocol::ExecCommandBeginEvent,
-  ) {
-    self.flush_stream_controllers();
-    if let Some(status) = self.bottom_pane.status_widget_mut() {
-      status.update_header(format!("Running {}", event.tool_name));
-      status.update_details(Some(event.command.clone()));
+  fn sync_exec_status_indicator(&mut self) {
+    let Some(status) = self.bottom_pane.status_widget_mut() else {
+      return;
+    };
+
+    let active_exec_call = self
+      .transcript
+      .active_cell
+      .as_ref()
+      .and_then(|cell| cell.as_any().downcast_ref::<ExecCell>())
+      .and_then(ExecCell::active_call);
+
+    if let Some(call) = active_exec_call {
+      status.update_header(format!("Running {}", call.tool_name));
+      status.update_details(Some(call.command.clone()));
+    } else if self.session.agent_turn_running {
+      status.update_header("Working".to_string());
+      status.update_details(None);
     }
+  }
+
+  pub(super) fn on_exec_command_begin(&mut self, event: &cokra_protocol::ExecCommandBeginEvent) {
+    self.flush_stream_controllers();
 
     let call = ExecCall {
       command_id: event.command_id.clone(),
@@ -28,21 +42,21 @@ impl ChatWidget {
       duration: None,
     };
 
-    let reuse_exec_cell = self
+    let merged_exec_cell = self
       .transcript
       .active_cell
       .as_ref()
       .and_then(|cell| cell.as_any().downcast_ref::<ExecCell>())
-      .is_some();
+      .and_then(|cell| cell.with_added_call(call.clone()));
 
-    if reuse_exec_cell {
+    if let Some(merged_exec_cell) = merged_exec_cell {
       if let Some(cell) = self
         .transcript
         .active_cell
         .as_mut()
         .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
       {
-        cell.push_call(call.clone());
+        *cell = merged_exec_cell;
       }
     } else {
       self.flush_active_cell();
@@ -59,6 +73,7 @@ impl ChatWidget {
       .transcript
       .pending_exec_calls
       .insert(call.command_id.clone(), call);
+    self.sync_exec_status_indicator();
     self.bump_active_cell_revision();
   }
 
@@ -66,7 +81,11 @@ impl ChatWidget {
     &mut self,
     event: &cokra_protocol::ExecCommandOutputDeltaEvent,
   ) {
-    if let Some(call) = self.transcript.pending_exec_calls.get_mut(&event.command_id) {
+    if let Some(call) = self
+      .transcript
+      .pending_exec_calls
+      .get_mut(&event.command_id)
+    {
       let output = call.output.get_or_insert_with(CommandOutput::default);
       output.output.push_str(&event.output);
     }
@@ -121,9 +140,12 @@ impl ChatWidget {
     {
       cell.complete_call(&event.command_id, output, duration);
       updated_active_exec = true;
-      should_flush_active = !cell.is_active();
+      should_flush_active = cell.should_flush();
     } else {
-      self.add_to_history(ExecHistoryCell::from_exec_call(call, self.animations_enabled()));
+      self.add_to_history(ExecHistoryCell::from_exec_call(
+        call,
+        self.animations_enabled(),
+      ));
     }
     if updated_active_exec {
       self.bump_active_cell_revision();
@@ -131,5 +153,79 @@ impl ChatWidget {
     if should_flush_active {
       self.flush_active_cell();
     }
+    self.sync_exec_status_indicator();
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::app_event_sender::AppEventSender;
+  use crate::tui::FrameRequester;
+  use std::path::PathBuf;
+  use tokio::sync::mpsc::unbounded_channel;
+
+  fn make_widget() -> ChatWidget {
+    let (tx, _rx) = unbounded_channel();
+    let sender = AppEventSender::new(tx);
+    let mut widget = ChatWidget::new(sender, FrameRequester::test_dummy(), false);
+    widget.set_agent_turn_running(true);
+    widget
+  }
+
+  fn begin_event(
+    command_id: &str,
+    tool_name: &str,
+    command: &str,
+  ) -> cokra_protocol::ExecCommandBeginEvent {
+    cokra_protocol::ExecCommandBeginEvent {
+      thread_id: "thread-1".to_string(),
+      turn_id: "turn-1".to_string(),
+      command_id: command_id.to_string(),
+      tool_name: tool_name.to_string(),
+      command: command.to_string(),
+      cwd: PathBuf::from("/tmp/project"),
+    }
+  }
+
+  fn end_event(command_id: &str) -> cokra_protocol::ExecCommandEndEvent {
+    cokra_protocol::ExecCommandEndEvent {
+      thread_id: "thread-1".to_string(),
+      turn_id: "turn-1".to_string(),
+      command_id: command_id.to_string(),
+      exit_code: 0,
+      output: String::new(),
+    }
+  }
+
+  #[test]
+  fn exec_end_restores_working_status_when_no_active_exec_calls_remain() {
+    let mut widget = make_widget();
+
+    widget.on_exec_command_begin(&begin_event("call-1", "read_file", "read_file"));
+    widget.on_exec_command_end(&end_event("call-1"));
+
+    let status = widget
+      .bottom_pane
+      .status_widget()
+      .expect("status should remain visible while turn is active");
+    assert_eq!(status.header(), "Working");
+    assert_eq!(status.details(), None);
+  }
+
+  #[test]
+  fn exec_end_switches_status_back_to_remaining_active_call() {
+    let mut widget = make_widget();
+
+    widget.on_exec_command_begin(&begin_event("call-1", "list_dir", "list_dir"));
+    widget.on_exec_command_begin(&begin_event("call-2", "read_file", "read_file"));
+    widget.on_exec_command_end(&end_event("call-2"));
+
+    let status = widget
+      .bottom_pane
+      .status_widget()
+      .expect("status should remain visible while turn is active");
+    assert_eq!(status.header(), "Running list_dir");
+    assert_eq!(status.details(), Some("List_dir"));
   }
 }

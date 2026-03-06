@@ -32,7 +32,11 @@ impl PendingUserInputs {
       }
     }
 
-    state.ids_by_turn.entry(turn_id).or_default().push(request_id);
+    state
+      .ids_by_turn
+      .entry(turn_id)
+      .or_default()
+      .push(request_id);
     previous
   }
 
@@ -59,10 +63,7 @@ impl PendingUserInputs {
     removed
   }
 
-  pub async fn clear_turn(
-    &self,
-    turn_id: &str,
-  ) -> Vec<oneshot::Sender<RequestUserInputResponse>> {
+  pub async fn clear_turn(&self, turn_id: &str) -> Vec<oneshot::Sender<RequestUserInputResponse>> {
     let mut state = self.state.lock().await;
     let Some(ids) = state.ids_by_turn.remove(turn_id) else {
       return Vec::new();

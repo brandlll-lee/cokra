@@ -413,17 +413,34 @@ fn print_human_event(event: &EventMsg) {
       println!("[turn:start] turn={} model={}", e.turn_id, e.model);
     }
     EventMsg::ItemStarted(e) => {
-      println!("[item:start] id={} type={}", e.item_id, e.item_type);
+      println!(
+        "[item:start] id={} type={}",
+        e.item.id(),
+        e.item.item_type()
+      );
     }
     EventMsg::AgentMessageDelta(e) | EventMsg::AgentMessageContentDelta(e) => {
       print!("{}", e.delta);
       let _ = io::stdout().flush();
     }
     EventMsg::ItemCompleted(e) => {
-      if !e.result.trim().is_empty() {
-        println!("\n[item:done] {}", e.result);
-      } else {
+      let summary = match &e.item {
+        cokra_protocol::TurnItem::UserMessage(item) => item.message(),
+        cokra_protocol::TurnItem::AgentMessage(item) => item
+          .content
+          .iter()
+          .map(|part| match part {
+            cokra_protocol::AgentMessageContent::Text { text } => text.as_str(),
+          })
+          .collect::<String>(),
+        cokra_protocol::TurnItem::Plan(item) => item.text.clone(),
+        cokra_protocol::TurnItem::Reasoning(item) => item.summary_text.join("\n"),
+        cokra_protocol::TurnItem::WebSearch(item) => item.query.clone(),
+      };
+      if summary.trim().is_empty() {
         println!("\n[item:done]");
+      } else {
+        println!("\n[item:done] {summary}");
       }
     }
     EventMsg::TurnComplete(e) => {

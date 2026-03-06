@@ -2,11 +2,11 @@
 source: tui/src/exec_cell/render.rs
 expression: rendered
 ---
-"✓ list_dir                                                  "
-"  › list_dir                                                "
-"  └ src/                                                    "
-"    Cargo.toml                                              "
-"    README.md                                               "
+"• Explored                                                  "
+"  └ List src                                                "
+"                                                            "
+"                                                            "
+"                                                            "
 "                                                            "
 "                                                            "
 "                                                            "

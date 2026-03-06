@@ -14,14 +14,14 @@ use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::default_exec_approval_requirement;
-use crate::tools::sandboxing::with_cached_approval;
 use cokra_protocol::AskForApproval;
 use cokra_protocol::ReviewDecision;
 use cokra_protocol::SandboxPolicy;
+use tokio::sync::Mutex;
 
 /// Central place for approvals + sandbox selection + retry semantics.
 pub struct ToolOrchestrator {
-  approval_store: ApprovalStore,
+  approval_store: Mutex<ApprovalStore>,
 }
 
 pub struct OrchestratorRunResult<Out> {
@@ -32,7 +32,27 @@ pub struct OrchestratorRunResult<Out> {
 impl ToolOrchestrator {
   pub fn new() -> Self {
     Self {
-      approval_store: ApprovalStore::new(),
+      approval_store: Mutex::new(ApprovalStore::new()),
+    }
+  }
+
+  async fn has_cached_always<K>(&self, keys: &[K]) -> bool
+  where
+    K: serde::Serialize,
+  {
+    let store = self.approval_store.lock().await;
+    keys
+      .iter()
+      .all(|key| matches!(store.get(key), Some(ReviewDecision::Always)))
+  }
+
+  async fn cache_always<K>(&self, keys: &[K])
+  where
+    K: Clone + serde::Serialize,
+  {
+    let mut store = self.approval_store.lock().await;
+    for key in keys.iter().cloned() {
+      store.put(key, ReviewDecision::Always);
     }
   }
 
@@ -89,7 +109,7 @@ impl ToolOrchestrator {
   }
 
   pub async fn run<Rq, Out, T>(
-    &mut self,
+    &self,
     tool: &mut T,
     req: &Rq,
     tool_ctx: &ToolCtx<'_>,
@@ -118,10 +138,17 @@ impl ToolOrchestrator {
           network_approval_reason: None,
         };
         let approval_keys = tool.approval_keys(req);
-        let decision = with_cached_approval(&mut self.approval_store, approval_keys, || async {
+        let decision = if approval_keys.is_empty() {
           tool.start_approval_async(req, approval_ctx).await
-        })
-        .await;
+        } else if self.has_cached_always(&approval_keys).await {
+          ReviewDecision::Always
+        } else {
+          let decision = tool.start_approval_async(req, approval_ctx).await;
+          if matches!(decision, ReviewDecision::Always) {
+            self.cache_always(&approval_keys).await;
+          }
+          decision
+        };
 
         match decision {
           ReviewDecision::Denied => {
@@ -389,7 +416,7 @@ mod tests {
   #[tokio::test]
   async fn skip_runs_directly() {
     let (session, turn) = ctx();
-    let mut orchestrator = ToolOrchestrator::new();
+    let orchestrator = ToolOrchestrator::new();
     let mut runtime = MockRuntime::new(ExecApprovalRequirement::Skip {
       bypass_sandbox: false,
     });
@@ -412,7 +439,7 @@ mod tests {
   #[tokio::test]
   async fn forbidden_returns_rejected() {
     let (session, turn) = ctx();
-    let mut orchestrator = ToolOrchestrator::new();
+    let orchestrator = ToolOrchestrator::new();
     let mut runtime = MockRuntime::new(ExecApprovalRequirement::Forbidden {
       reason: "forbidden".to_string(),
     });
@@ -435,7 +462,7 @@ mod tests {
   #[tokio::test]
   async fn needs_approval_denied_stops_execution() {
     let (session, turn) = ctx();
-    let mut orchestrator = ToolOrchestrator::new();
+    let orchestrator = ToolOrchestrator::new();
     let mut runtime = MockRuntime::new(ExecApprovalRequirement::NeedsApproval { reason: None });
     runtime.decision = ReviewDecision::Denied;
     let req = MockReq {
@@ -457,7 +484,7 @@ mod tests {
   #[tokio::test]
   async fn denied_without_escalation_returns_denied() {
     let (session, turn) = ctx();
-    let mut orchestrator = ToolOrchestrator::new();
+    let orchestrator = ToolOrchestrator::new();
     let mut runtime = MockRuntime::new(ExecApprovalRequirement::Skip {
       bypass_sandbox: false,
     });
@@ -483,7 +510,7 @@ mod tests {
   async fn denied_with_escalation_retries() {
     let (session, mut turn) = ctx();
     turn.approval_policy = AskForApproval::UnlessTrusted;
-    let mut orchestrator = ToolOrchestrator::new();
+    let orchestrator = ToolOrchestrator::new();
     let mut runtime = MockRuntime::new(ExecApprovalRequirement::Skip {
       bypass_sandbox: false,
     });
@@ -506,7 +533,7 @@ mod tests {
 
   #[tokio::test]
   async fn network_immediate_finalize_surfaces_denial() {
-    let mut orchestrator = ToolOrchestrator::new();
+    let orchestrator = ToolOrchestrator::new();
     let mut runtime = MockRuntime::new(ExecApprovalRequirement::Skip {
       bypass_sandbox: false,
     });
@@ -551,7 +578,7 @@ mod tests {
 
   #[tokio::test]
   async fn deferred_network_failure_cleans_up_attempt() {
-    let mut orchestrator = ToolOrchestrator::new();
+    let orchestrator = ToolOrchestrator::new();
     let mut runtime = MockRuntime::new(ExecApprovalRequirement::Skip {
       bypass_sandbox: false,
     });

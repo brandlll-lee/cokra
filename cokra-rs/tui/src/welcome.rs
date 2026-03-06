@@ -50,7 +50,7 @@ impl WelcomeWidget {
     // 渲染logo - 左对齐，纯白色
     for line in COKRA_LOGO {
       lines.push(Line::from(vec![
-        "  ".into(),        // 两个空格的左缩进（与codex一致）
+        "  ".into(),         // 两个空格的左缩进（与codex一致）
         line.white().bold(), // 纯白色，加粗
       ]));
     }
@@ -60,9 +60,9 @@ impl WelcomeWidget {
 
     // 欢迎文本 - 左对齐（1:1复刻codex的布局）
     lines.push(Line::from(vec![
-      "  ".into(),           // 两个空格的左缩进
-      "Welcome to ".into(),  // 普通文本
-      "Cokra".bold(),        // 加粗的Cokra
+      "  ".into(),                              // 两个空格的左缩进
+      "Welcome to ".into(),                     // 普通文本
+      "Cokra".bold(),                           // 加粗的Cokra
       ", AI Agent Team CLI Environment".into(), // 副标题
     ]));
 
@@ -72,7 +72,7 @@ impl WelcomeWidget {
     // 底部提示 - 左对齐（仅在初始显示时出现）
     if show_hint {
       lines.push(Line::from(vec![
-        "  ".into(),  // 两个空格的左缩进
+        "  ".into(),                        // 两个空格的左缩进
         "Press Enter to continue...".dim(), // 暗色提示
       ]));
     }

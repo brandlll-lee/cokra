@@ -3,10 +3,7 @@ use crate::history_cell::TurnCompleteHistoryCell;
 use crate::history_cell::new_session_info;
 
 impl ChatWidget {
-  pub(super) fn on_session_configured(
-    &mut self,
-    event: &cokra_protocol::SessionConfiguredEvent,
-  ) {
+  pub(super) fn on_session_configured(&mut self, event: &cokra_protocol::SessionConfiguredEvent) {
     let is_first = !self.session.has_seen_session_configured;
     self.session.has_seen_session_configured = true;
     self.session.set_model_name(event.model.clone());
@@ -38,10 +35,9 @@ impl ChatWidget {
       Span::from("error: ").red(),
       Span::from(event.user_facing_message.clone()),
     ])]));
-    self.set_agent_turn_running(false);
   }
 
-  pub(super) fn on_turn_complete(&mut self) {
+  pub(super) fn on_turn_complete(&mut self, event: &cokra_protocol::TurnCompleteEvent) {
     self.flush_stream_controllers();
     self.flush_active_cell();
 
@@ -51,11 +47,13 @@ impl ChatWidget {
       .map(|status| self.session.worked_elapsed_from(status.elapsed_seconds()));
 
     self.app_event_tx.send(AppEvent::StopCommitAnimation);
-    self.add_to_history(TurnCompleteHistoryCell {
-      elapsed_seconds,
-      input_tokens: self.session.token_usage.input_tokens,
-      output_tokens: self.session.token_usage.output_tokens,
-    });
+    if matches!(event.status, cokra_protocol::CompletionStatus::Success) {
+      self.add_to_history(TurnCompleteHistoryCell {
+        elapsed_seconds,
+        input_tokens: self.session.token_usage.input_tokens,
+        output_tokens: self.session.token_usage.output_tokens,
+      });
+    }
     self.set_agent_turn_running(false);
     self.transcript.clear_exec_state();
     self.transcript.streamed_agent_item_ids.clear();
