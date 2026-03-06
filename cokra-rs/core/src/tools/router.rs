@@ -40,6 +40,7 @@ use cokra_protocol::SandboxPolicy;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
+use crate::tools::context::ToolRuntimeContext;
 
 #[derive(Clone, Debug)]
 pub struct ToolCall {
@@ -80,6 +81,14 @@ impl ToolRunContext {
       has_managed_network_requirements: false,
     }
   }
+}
+
+#[derive(Clone)]
+struct InvocationRuntimeState {
+  session: Arc<Session>,
+  tx_event: Option<mpsc::Sender<EventMsg>>,
+  thread_id: String,
+  turn_id: String,
 }
 
 pub struct ToolRouter {
@@ -123,6 +132,12 @@ impl ToolRouter {
       self.registry.get_spec(&call.tool_name).cloned(),
       run_ctx.approval_policy.clone(),
       run_ctx.sandbox_policy.clone(),
+      Some(InvocationRuntimeState {
+        session: Arc::clone(&run_ctx.session),
+        tx_event: run_ctx.tx_event.clone(),
+        thread_id: run_ctx.thread_id.clone(),
+        turn_id: run_ctx.turn_id.clone(),
+      }),
     );
     let turn_ctx = ToolTurnContext {
       thread_id: run_ctx.thread_id.clone(),
@@ -203,6 +218,7 @@ impl ToolRouter {
       arguments: call.args.to_string(),
       // cwd is unused for is_mutating checks, but required by struct.
       cwd: PathBuf::from("."),
+      runtime: None,
     };
     match self.registry.is_mutating(&invocation) {
       Ok(is_mutating) => !is_mutating,
@@ -236,6 +252,7 @@ struct RegistryToolRuntime {
   spec: Option<ToolSpec>,
   approval_policy: AskForApproval,
   sandbox_policy: SandboxPolicy,
+  runtime: Option<InvocationRuntimeState>,
 }
 
 impl RegistryToolRuntime {
@@ -244,12 +261,14 @@ impl RegistryToolRuntime {
     spec: Option<ToolSpec>,
     approval_policy: AskForApproval,
     sandbox_policy: SandboxPolicy,
+    runtime: Option<InvocationRuntimeState>,
   ) -> Self {
     Self {
       registry,
       spec,
       approval_policy,
       sandbox_policy,
+      runtime,
     }
   }
 }
@@ -374,6 +393,14 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
       name: req.tool_name.clone(),
       arguments: req.args.to_string(),
       cwd: ctx.turn.cwd.clone(),
+      runtime: self.runtime.as_ref().map(|runtime| {
+        Arc::new(ToolRuntimeContext {
+          session: Arc::clone(&runtime.session),
+          tx_event: runtime.tx_event.clone(),
+          thread_id: runtime.thread_id.clone(),
+          turn_id: runtime.turn_id.clone(),
+        })
+      }),
     };
 
     // 1:1 codex: use dispatch_async to support async handlers (e.g. shell).

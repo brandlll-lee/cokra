@@ -765,6 +765,21 @@ async fn submission_loop(
           .await;
         }
       }
+      Op::UserInputAnswer { id, response } => {
+        let notified = session.notify_user_input(&id, response).await;
+        if !notified {
+          emit_event(
+            &tx_event,
+            &event_bus,
+            EventMsg::Warning(cokra_protocol::WarningEvent {
+              thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
+              turn_id: sub.id.clone(),
+              message: format!("no pending user input found for id: {id}"),
+            }),
+          )
+          .await;
+        }
+      }
       Op::Interrupt => {
         emit_event(
           &tx_event,
@@ -822,7 +837,10 @@ async fn run_turn_with_interrupt(
     return;
   }
 
-  let mut fut = Box::pin(agent_control.process_turn(Turn { user_message }));
+  let mut fut = Box::pin(agent_control.process_turn(Turn {
+    turn_id: turn_id.to_string(),
+    user_message,
+  }));
   loop {
     tokio::select! {
       res = &mut fut => {
@@ -840,11 +858,13 @@ async fn run_turn_with_interrupt(
           ).await;
         }
         session.clear_pending_approvals_for_turn(turn_id).await;
+        session.clear_pending_user_inputs_for_turn(turn_id).await;
         break;
       }
       maybe_sub = rx_sub.recv() => {
         let Some(next_sub) = maybe_sub else {
           session.clear_pending_approvals_for_turn(turn_id).await;
+          session.clear_pending_user_inputs_for_turn(turn_id).await;
           break;
         };
         match next_sub.op {
@@ -866,6 +886,20 @@ async fn run_turn_with_interrupt(
               ).await;
             }
           }
+          Op::UserInputAnswer { id, response } => {
+            let notified = session.notify_user_input(&id, response).await;
+            if !notified {
+              emit_event(
+                tx_event,
+                event_bus,
+                EventMsg::Warning(cokra_protocol::WarningEvent {
+                  thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
+                  turn_id: turn_id.to_string(),
+                  message: format!("no pending user input found for id: {id}"),
+                }),
+              ).await;
+            }
+          }
           Op::Interrupt => {
             emit_event(
               tx_event,
@@ -877,11 +911,13 @@ async fn run_turn_with_interrupt(
               }),
             ).await;
             session.clear_pending_approvals_for_turn(turn_id).await;
+            session.clear_pending_user_inputs_for_turn(turn_id).await;
             break;
           }
           Op::Shutdown => {
             emit_event(tx_event, event_bus, EventMsg::ShutdownComplete).await;
             session.clear_pending_approvals_for_turn(turn_id).await;
+            session.clear_pending_user_inputs_for_turn(turn_id).await;
             break;
           }
           _ => queue.push_back(next_sub),
@@ -1555,6 +1591,244 @@ mod tests {
     )
   }
 
+  #[derive(Debug)]
+  struct MockRequestUserInputProvider {
+    client: Client,
+    config: ProviderConfig,
+    calls: Arc<Mutex<u32>>,
+  }
+
+  impl MockRequestUserInputProvider {
+    fn new() -> Self {
+      Self {
+        client: Client::new(),
+        config: ProviderConfig {
+          provider_id: "mockinput".to_string(),
+          ..Default::default()
+        },
+        calls: Arc::new(Mutex::new(0)),
+      }
+    }
+  }
+
+  #[async_trait]
+  impl ModelProvider for MockRequestUserInputProvider {
+    fn provider_id(&self) -> &'static str {
+      "mockinput"
+    }
+
+    fn provider_name(&self) -> &'static str {
+      "Mock Request User Input Provider"
+    }
+
+    async fn chat_completion(&self, request: ChatRequest) -> crate::model::Result<ChatResponse> {
+      let mut calls = self
+        .calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      *calls += 1;
+
+      if *calls == 1 {
+        return Ok(ChatResponse {
+          id: "mock-input-1".to_string(),
+          object_type: "chat.completion".to_string(),
+          created: 0,
+          model: "mockinput/default".to_string(),
+          choices: vec![Choice {
+            index: 0,
+            message: ChoiceMessage {
+              role: "assistant".to_string(),
+              content: None,
+              tool_calls: Some(vec![ToolCall {
+                id: "call_input_1".to_string(),
+                call_type: "function".to_string(),
+                function: ToolCallFunction {
+                  name: "request_user_input".to_string(),
+                  arguments: serde_json::json!({
+                    "questions": [{
+                      "id": "name",
+                      "header": "Name",
+                      "question": "What is your name?",
+                      "options": [{
+                        "label": "leex",
+                        "description": "Use the preferred name leex."
+                      }, {
+                        "label": "other",
+                        "description": "Provide a different answer."
+                      }]
+                    }]
+                  })
+                  .to_string(),
+                },
+              }]),
+            },
+            finish_reason: Some("tool_calls".to_string()),
+          }],
+          usage: Usage {
+            input_tokens: 2,
+            output_tokens: 4,
+            total_tokens: 6,
+          },
+          extra: Default::default(),
+        });
+      }
+
+      let saw_tool_output = request.messages.iter().any(|message| match message {
+        Message::Tool {
+          tool_call_id,
+          content,
+        } if tool_call_id == "call_input_1" => serde_json::from_str::<serde_json::Value>(content)
+          .ok()
+          .is_some_and(|value| {
+            value
+              == serde_json::json!({
+                "answers": {
+                  "name": { "answers": ["leex"] }
+                }
+              })
+          }),
+        _ => false,
+      });
+
+      if !saw_tool_output {
+        return Err(crate::model::ModelError::InvalidRequest(
+          "follow-up request missing request_user_input output".to_string(),
+        ));
+      }
+
+      Ok(ChatResponse {
+        id: "mock-input-2".to_string(),
+        object_type: "chat.completion".to_string(),
+        created: 0,
+        model: "mockinput/default".to_string(),
+        choices: vec![Choice {
+          index: 0,
+          message: ChoiceMessage {
+            role: "assistant".to_string(),
+            content: Some("user input loop complete".to_string()),
+            tool_calls: None,
+          },
+          finish_reason: Some("stop".to_string()),
+        }],
+        usage: Usage {
+          input_tokens: 2,
+          output_tokens: 2,
+          total_tokens: 4,
+        },
+        extra: Default::default(),
+      })
+    }
+
+    async fn chat_completion_stream(
+      &self,
+      request: ChatRequest,
+    ) -> crate::model::Result<Pin<Box<dyn Stream<Item = crate::model::Result<Chunk>> + Send>>> {
+      let mut calls = self
+        .calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      *calls += 1;
+
+      if *calls == 1 {
+        let arguments = serde_json::json!({
+          "questions": [{
+            "id": "name",
+            "header": "Name",
+            "question": "What is your name?",
+            "options": [{
+              "label": "leex",
+              "description": "Use the preferred name leex."
+            }, {
+              "label": "other",
+              "description": "Provide a different answer."
+            }]
+          }]
+        })
+        .to_string();
+        return Ok(Box::pin(futures::stream::iter(vec![
+          Ok(Chunk::ToolCall {
+            delta: ToolCallDelta {
+              id: Some("call_input_1".to_string()),
+              name: Some("request_user_input".to_string()),
+              arguments: Some(arguments),
+            },
+          }),
+          Ok(Chunk::MessageStop),
+        ])));
+      }
+
+      let saw_tool_output = request.messages.iter().any(|message| match message {
+        Message::Tool {
+          tool_call_id,
+          content,
+        } if tool_call_id == "call_input_1" => serde_json::from_str::<serde_json::Value>(content)
+          .ok()
+          .is_some_and(|value| {
+            value
+              == serde_json::json!({
+                "answers": {
+                  "name": { "answers": ["leex"] }
+                }
+              })
+          }),
+        _ => false,
+      });
+
+      if !saw_tool_output {
+        return Err(crate::model::ModelError::InvalidRequest(
+          "follow-up request missing request_user_input output".to_string(),
+        ));
+      }
+
+      Ok(Box::pin(futures::stream::iter(vec![
+        Ok(Chunk::Content {
+          delta: ContentDelta {
+            text: "user input loop complete".to_string(),
+          },
+        }),
+        Ok(Chunk::MessageStop),
+      ])))
+    }
+
+    async fn list_models(&self) -> crate::model::Result<ListModelsResponse> {
+      Ok(ListModelsResponse {
+        object_type: "list".to_string(),
+        data: vec![ModelInfo {
+          id: "mockinput/default".to_string(),
+          object_type: "model".to_string(),
+          created: 0,
+          owned_by: Some("mockinput".to_string()),
+        }],
+      })
+    }
+
+    async fn validate_auth(&self) -> crate::model::Result<()> {
+      Ok(())
+    }
+
+    fn client(&self) -> &Client {
+      &self.client
+    }
+
+    fn config(&self) -> &ProviderConfig {
+      &self.config
+    }
+  }
+
+  async fn build_request_user_input_client() -> Arc<ModelClient> {
+    let registry = Arc::new(ProviderRegistry::new());
+    registry.register(MockRequestUserInputProvider::new()).await;
+    registry
+      .set_default("mockinput")
+      .await
+      .expect("set mockinput default");
+    Arc::new(
+      ModelClient::new(registry)
+        .await
+        .expect("build model client"),
+    )
+  }
+
   #[tokio::test]
   async fn test_cokra_creation() {
     let mut config = cokra_config::ConfigLoader::default()
@@ -1841,5 +2115,92 @@ mod tests {
     let written = std::fs::read_to_string(&tmp_path).expect("read written file");
     assert_eq!(written, "approved".to_string());
     let _ = std::fs::remove_file(tmp_path);
+  }
+
+  #[tokio::test]
+  async fn test_request_user_input_round_trip_unblocks_turn() {
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "mockinput".to_string();
+    config.models.model = "mockinput/default".to_string();
+    config.approval.policy = ApprovalMode::Auto;
+
+    let cokra = Cokra::new_with_model_client(config, build_request_user_input_client().await)
+      .await
+      .expect("create cokra");
+
+    let _ = cokra
+      .submit(Op::UserInput {
+        items: vec![UserInput::Text {
+          text: "ask me".to_string(),
+          text_elements: Vec::new(),
+        }],
+        final_output_json_schema: None,
+      })
+      .await
+      .expect("submit user input");
+
+    let mut started_turn_id = None;
+    let mut request_turn_id = None;
+    let mut request_call_id = None;
+    for _ in 0..40 {
+      let evt = timeout(Duration::from_secs(2), cokra.next_event())
+        .await
+        .expect("next_event timeout")
+        .expect("next_event");
+      match evt.msg {
+        EventMsg::TurnStarted(ev) => {
+          started_turn_id = Some(ev.turn_id);
+        }
+        EventMsg::RequestUserInput(ev) => {
+          request_turn_id = Some(ev.turn_id);
+          request_call_id = Some(ev.call_id);
+          break;
+        }
+        EventMsg::Error(err) => panic!("unexpected error: {}", err.user_facing_message),
+        _ => {}
+      }
+    }
+
+    let started_turn_id = started_turn_id.expect("expected turn started event");
+    let request_turn_id = request_turn_id.expect("expected request_user_input event");
+    let request_call_id = request_call_id.expect("expected request call id");
+    assert_eq!(started_turn_id, request_turn_id);
+    assert_eq!(request_call_id, "call_input_1");
+
+    let _ = cokra
+      .submit(Op::UserInputAnswer {
+        id: request_turn_id,
+        response: cokra_protocol::user_input::RequestUserInputResponse {
+          answers: std::collections::HashMap::from([(
+            "name".to_string(),
+            cokra_protocol::RequestUserInputAnswer {
+              answers: vec!["leex".to_string()],
+            },
+          )]),
+        },
+      })
+      .await
+      .expect("submit user input answer");
+
+    let mut saw_complete = false;
+    for _ in 0..40 {
+      let evt = timeout(Duration::from_secs(2), cokra.next_event())
+        .await
+        .expect("next_event timeout")
+        .expect("next_event");
+      match evt.msg {
+        EventMsg::TurnComplete(done) => {
+          assert!(matches!(done.status, CompletionStatus::Success));
+          saw_complete = true;
+          break;
+        }
+        EventMsg::Error(err) => panic!("unexpected error: {}", err.user_facing_message),
+        _ => {}
+      }
+    }
+
+    assert!(saw_complete, "expected turn completion after request_user_input");
   }
 }

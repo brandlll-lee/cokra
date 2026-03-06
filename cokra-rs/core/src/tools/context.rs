@@ -1,7 +1,12 @@
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
+use tokio::sync::mpsc;
+
+use crate::session::Session;
+use cokra_protocol::EventMsg;
 
 /// Invocation payload passed to a tool handler.
 ///
@@ -15,6 +20,27 @@ pub struct ToolInvocation {
   /// Session-level working directory. Handlers that accept file paths should
   /// use this for resolution instead of the process-level cwd.
   pub cwd: PathBuf,
+  /// Optional turn-scoped runtime context for handlers that need to emit
+  /// events and block on user responses, such as `request_user_input`.
+  pub runtime: Option<Arc<ToolRuntimeContext>>,
+}
+
+#[derive(Clone)]
+pub struct ToolRuntimeContext {
+  pub session: Arc<Session>,
+  pub tx_event: Option<mpsc::Sender<EventMsg>>,
+  pub thread_id: String,
+  pub turn_id: String,
+}
+
+impl fmt::Debug for ToolRuntimeContext {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f
+      .debug_struct("ToolRuntimeContext")
+      .field("thread_id", &self.thread_id)
+      .field("turn_id", &self.turn_id)
+      .finish_non_exhaustive()
+  }
 }
 
 impl ToolInvocation {

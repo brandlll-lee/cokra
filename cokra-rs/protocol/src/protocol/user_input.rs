@@ -1,9 +1,11 @@
 // User Input Types
 // Types for user input content
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use serde::Deserialize;
 use serde::Serialize;
-use std::path::PathBuf;
 
 /// User input content
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,8 +39,41 @@ pub struct ByteRange {
   pub end: usize,
 }
 
-/// Request user input response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Selectable option for a request_user_input question.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequestUserInputQuestionOption {
+  pub label: String,
+  pub description: String,
+}
+
+/// One question in a request_user_input prompt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequestUserInputQuestion {
+  pub id: String,
+  pub header: String,
+  pub question: String,
+  #[serde(rename = "isOther", default)]
+  pub is_other: bool,
+  #[serde(rename = "isSecret", default)]
+  pub is_secret: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub options: Option<Vec<RequestUserInputQuestionOption>>,
+}
+
+/// Tool arguments for request_user_input.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequestUserInputArgs {
+  pub questions: Vec<RequestUserInputQuestion>,
+}
+
+/// One answered question in a request_user_input response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequestUserInputAnswer {
+  pub answers: Vec<String>,
+}
+
+/// Response returned by request_user_input.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct RequestUserInputResponse {
-  pub response: String,
+  pub answers: HashMap<String, RequestUserInputAnswer>,
 }

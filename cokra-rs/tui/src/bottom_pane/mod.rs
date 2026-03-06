@@ -20,6 +20,9 @@ use bottom_pane_view::BottomPaneView;
 use chat_composer::ChatComposer;
 use chat_composer::ComposerAction;
 use chat_composer::ComposerSubmission;
+use queued_user_messages::QueuedUserMessages;
+use request_user_input::RequestUserInputView;
+use cokra_protocol::RequestUserInputEvent;
 
 pub(crate) mod api_key_entry_view;
 pub(crate) mod approval_overlay;
@@ -32,6 +35,8 @@ pub(crate) mod list_selection_view;
 pub(crate) mod paste_burst;
 pub(crate) mod popup_consts;
 pub(crate) mod prompt_args;
+pub(crate) mod queued_user_messages;
+pub(crate) mod request_user_input;
 pub(crate) mod scroll_state;
 pub(crate) mod selection_popup_common;
 pub(crate) mod slash_commands;
@@ -53,6 +58,7 @@ pub(crate) struct LocalImageAttachment {
 pub(crate) enum BottomPaneAction {
   None,
   Submit(ComposerSubmission),
+  Queue(ComposerSubmission),
   Interrupt,
   RequestQuit,
   ApprovalDecision(ApprovalChoice),
@@ -77,6 +83,7 @@ pub(crate) struct BottomPane {
 
   /// Inline status indicator shown above the composer while a task is running.
   status: Option<StatusIndicatorWidget>,
+  queued_user_messages: QueuedUserMessages,
   app_event_tx: AppEventSender,
   frame_requester: FrameRequester,
   animations_enabled: bool,
@@ -93,6 +100,7 @@ impl BottomPane {
       view_stack: Vec::new(),
       approval_overlay: None,
       status: None,
+      queued_user_messages: QueuedUserMessages::new(),
       app_event_tx,
       frame_requester,
       animations_enabled,
@@ -154,6 +162,10 @@ impl BottomPane {
     self.composer.set_status_line_enabled(enabled);
   }
 
+  pub(crate) fn set_queued_user_messages(&mut self, queued: Vec<String>) {
+    self.queued_user_messages.messages = queued;
+  }
+
   pub(crate) fn next_footer_transition_in(&self) -> Option<Duration> {
     self.composer.next_footer_transition_in()
   }
@@ -191,6 +203,13 @@ impl BottomPane {
     self.push_view(Box::new(view));
   }
 
+  pub(crate) fn push_user_input_request(&mut self, request: RequestUserInputEvent) {
+    self.push_view(Box::new(RequestUserInputView::new(
+      request,
+      self.app_event_tx.clone(),
+    )));
+  }
+
   /// 1:1 codex: active view is the top of the stack.
   fn active_view(&self) -> Option<&dyn BottomPaneView> {
     self.view_stack.last().map(|v| v.as_ref())
@@ -201,7 +220,7 @@ impl BottomPane {
   }
 
   pub(crate) fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-    if self.approval_overlay.is_some() || !self.view_stack.is_empty() {
+    if self.approval_overlay.is_some() {
       return None;
     }
     self.as_renderable().cursor_pos(area)
@@ -253,7 +272,12 @@ impl BottomPane {
 
     // Layer 3: composer (default).
     match self.composer.handle_key_event(key) {
-      ComposerAction::None | ComposerAction::Queue => BottomPaneAction::None,
+      ComposerAction::None => BottomPaneAction::None,
+      ComposerAction::Queue => self
+        .composer
+        .prepare_submission()
+        .map(BottomPaneAction::Queue)
+        .unwrap_or(BottomPaneAction::None),
       ComposerAction::Interrupt => BottomPaneAction::Interrupt,
       ComposerAction::RequestQuit => BottomPaneAction::RequestQuit,
       ComposerAction::Submit => self
@@ -266,6 +290,11 @@ impl BottomPane {
   }
 
   pub(crate) fn handle_paste(&mut self, text: String) {
+    if let Some(view) = self.view_stack.last_mut()
+      && view.handle_paste(text.clone())
+    {
+      return;
+    }
     self.composer.handle_paste(text);
   }
 
@@ -276,11 +305,25 @@ impl BottomPane {
       // 1:1 codex: view replaces composer.
       RenderableItem::Borrowed(view as &dyn Renderable)
     } else {
-      // 1:1 codex: compose status (flex=0) + composer (flex=0).
-      let mut flex = FlexRenderable::new();
+      let mut header = FlexRenderable::new();
       if let Some(status) = &self.status {
-        flex.push(0, RenderableItem::Borrowed(status as &dyn Renderable));
+        header.push(0, RenderableItem::Borrowed(status as &dyn Renderable));
       }
+      let has_queued_messages = !self.queued_user_messages.messages.is_empty();
+      let has_status = self.status.is_some();
+      if has_queued_messages && has_status {
+        header.push(0, RenderableItem::Owned("".into()));
+      }
+      header.push(
+        1,
+        RenderableItem::Borrowed(&self.queued_user_messages as &dyn Renderable),
+      );
+      if !has_queued_messages && has_status {
+        header.push(0, RenderableItem::Owned("".into()));
+      }
+
+      let mut flex = FlexRenderable::new();
+      flex.push(1, RenderableItem::Owned(Box::new(header)));
       flex.push(
         0,
         RenderableItem::Borrowed(&self.composer as &dyn Renderable),

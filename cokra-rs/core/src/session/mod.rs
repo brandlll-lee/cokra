@@ -1,4 +1,5 @@
 mod approvals;
+mod user_input;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,7 +16,10 @@ use crate::turn::response_items::ResponseItem;
 use approvals::PendingApprovals;
 use cokra_protocol::EventMsg;
 use cokra_protocol::ExecApprovalRequestEvent;
+use cokra_protocol::RequestUserInputEvent;
 use cokra_protocol::ReviewDecision;
+use cokra_protocol::user_input::RequestUserInputResponse;
+use user_input::PendingUserInputs;
 
 /// Runtime session state for one conversation thread.
 ///
@@ -28,6 +32,7 @@ pub struct Session {
   response_history: Arc<RwLock<Vec<ResponseItem>>>,
   event_tx: broadcast::Sender<cokra_protocol::EventMsg>,
   pending_approvals: Arc<PendingApprovals>,
+  pending_user_inputs: Arc<PendingUserInputs>,
   /// Spec 3.2: cached user shell, resolved once at session creation.
   cached_shell: Arc<RwLock<Shell>>,
   token_usage: Arc<RwLock<TokenUsageState>>,
@@ -51,6 +56,7 @@ impl Session {
       response_history: Arc::new(RwLock::new(Vec::new())),
       event_tx,
       pending_approvals: Arc::new(PendingApprovals::default()),
+      pending_user_inputs: Arc::new(PendingUserInputs::default()),
       cached_shell: Arc::new(RwLock::new(shell)),
       token_usage: Arc::new(RwLock::new(TokenUsageState::default())),
     }
@@ -212,6 +218,26 @@ impl Session {
     total
   }
 
+  pub async fn insert_pending_user_input(
+    &self,
+    request_id: String,
+    turn_id: String,
+    tx: oneshot::Sender<RequestUserInputResponse>,
+  ) -> Option<oneshot::Sender<RequestUserInputResponse>> {
+    self.pending_user_inputs.insert(request_id, turn_id, tx).await
+  }
+
+  pub async fn remove_pending_user_input(
+    &self,
+    request_id: &str,
+  ) -> Option<oneshot::Sender<RequestUserInputResponse>> {
+    self.pending_user_inputs.remove(request_id).await
+  }
+
+  pub async fn clear_pending_user_inputs_for_turn(&self, turn_id: &str) -> usize {
+    self.pending_user_inputs.clear_turn(turn_id).await.len()
+  }
+
   pub async fn emit_exec_approval_request(
     &self,
     thread_id: String,
@@ -229,6 +255,26 @@ impl Session {
       tool_name,
       command,
       cwd,
+    });
+    self.emit_event(event.clone());
+    if let Some(tx_event) = tx_event {
+      let _ = tx_event.send(event).await;
+    }
+  }
+
+  pub async fn emit_request_user_input(
+    &self,
+    thread_id: String,
+    turn_id: String,
+    call_id: String,
+    questions: Vec<cokra_protocol::RequestUserInputQuestion>,
+    tx_event: Option<mpsc::Sender<EventMsg>>,
+  ) {
+    let event = EventMsg::RequestUserInput(RequestUserInputEvent {
+      thread_id,
+      turn_id,
+      call_id,
+      questions,
     });
     self.emit_event(event.clone());
     if let Some(tx_event) = tx_event {
@@ -281,6 +327,42 @@ impl Session {
     true
   }
 
+  pub async fn request_user_input(
+    &self,
+    thread_id: String,
+    turn_id: String,
+    request_id: String,
+    call_id: String,
+    questions: Vec<cokra_protocol::RequestUserInputQuestion>,
+    tx_event: Option<mpsc::Sender<EventMsg>>,
+  ) -> Option<RequestUserInputResponse> {
+    let (tx, rx) = oneshot::channel();
+    let previous = self
+      .insert_pending_user_input(request_id.clone(), turn_id.clone(), tx)
+      .await;
+    if previous.is_some() {
+      tracing::warn!("overwriting existing pending user input for id: {request_id}");
+    }
+
+    self
+      .emit_request_user_input(thread_id, turn_id, call_id, questions, tx_event)
+      .await;
+
+    rx.await.ok()
+  }
+
+  pub async fn notify_user_input(
+    &self,
+    request_id: &str,
+    response: RequestUserInputResponse,
+  ) -> bool {
+    let Some(tx) = self.remove_pending_user_input(request_id).await else {
+      return false;
+    };
+    let _ = tx.send(response);
+    true
+  }
+
   pub fn thread_id(&self) -> Option<&cokra_protocol::ThreadId> {
     Some(&self.thread_id)
   }
@@ -318,6 +400,7 @@ mod tests {
   use super::Session;
   use crate::model::Message;
   use cokra_protocol::ReviewDecision;
+  use cokra_protocol::user_input::RequestUserInputResponse;
 
   #[tokio::test]
   async fn pending_approval_insert_notify_round_trip() {
@@ -342,6 +425,36 @@ mod tests {
       .notify_exec_approval("does-not-exist", ReviewDecision::Denied)
       .await;
     assert!(!notified);
+  }
+
+  #[tokio::test]
+  async fn pending_user_input_insert_notify_round_trip() {
+    let session = Session::new();
+    let (tx, rx) = oneshot::channel();
+    let previous = session
+      .insert_pending_user_input("input-1".to_string(), "turn-1".to_string(), tx)
+      .await;
+    assert!(previous.is_none());
+
+    let notified = session
+      .notify_user_input(
+        "input-1",
+        RequestUserInputResponse {
+          answers: std::collections::HashMap::from([(
+            "q1".to_string(),
+            cokra_protocol::RequestUserInputAnswer {
+              answers: vec!["hello".to_string()],
+            },
+          )]),
+        },
+      )
+      .await;
+    assert!(notified);
+    assert!(matches!(
+      rx.await,
+      Ok(RequestUserInputResponse { answers })
+        if answers.get("q1").is_some_and(|answer| answer.answers == vec!["hello".to_string()])
+    ));
   }
 
   #[tokio::test]
@@ -371,6 +484,49 @@ mod tests {
       .await;
     assert!(notified);
     assert!(matches!(rx3.await, Ok(ReviewDecision::Approved)));
+  }
+
+  #[tokio::test]
+  async fn clear_turn_drops_pending_user_inputs() {
+    let session = Session::new();
+    let (tx1, rx1) = oneshot::channel();
+    let (tx2, rx2) = oneshot::channel();
+    let (tx3, rx3) = oneshot::channel();
+
+    session
+      .insert_pending_user_input("u1".to_string(), "turn-a".to_string(), tx1)
+      .await;
+    session
+      .insert_pending_user_input("u2".to_string(), "turn-a".to_string(), tx2)
+      .await;
+    session
+      .insert_pending_user_input("u3".to_string(), "turn-b".to_string(), tx3)
+      .await;
+
+    let cleared = session.clear_pending_user_inputs_for_turn("turn-a").await;
+    assert_eq!(cleared, 2);
+    assert!(rx1.await.is_err());
+    assert!(rx2.await.is_err());
+
+    let notified = session
+      .notify_user_input(
+        "u3",
+        RequestUserInputResponse {
+          answers: std::collections::HashMap::from([(
+            "q1".to_string(),
+            cokra_protocol::RequestUserInputAnswer {
+              answers: vec!["kept".to_string()],
+            },
+          )]),
+        },
+      )
+      .await;
+    assert!(notified);
+    assert!(matches!(
+      rx3.await,
+      Ok(RequestUserInputResponse { answers })
+        if answers.get("q1").is_some_and(|answer| answer.answers == vec!["kept".to_string()])
+    ));
   }
 
   #[tokio::test]

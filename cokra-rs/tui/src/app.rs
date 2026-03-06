@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -33,7 +34,9 @@ use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPaneAction;
 use crate::bottom_pane::approval_overlay::ApprovalOverlay;
 use crate::bottom_pane::approval_overlay::ApprovalRequest;
+use crate::bottom_pane::chat_composer::ComposerSubmission;
 use crate::chatwidget::ChatWidget;
+use crate::chatwidget::ActiveCellTranscriptKey;
 use crate::chatwidget::ChatWidgetAction;
 use crate::chatwidget::TokenUsage;
 use crate::custom_terminal::Frame;
@@ -64,11 +67,17 @@ pub struct App {
   ui_mode: UiMode,
   transcript_cells: Vec<Box<dyn HistoryCell>>,
   transcript_lines_cache: Vec<Line<'static>>,
+  active_tail_cache_key: Option<ActiveCellTranscriptKey>,
+  active_tail_cache_width: u16,
+  active_tail_cache_lines: Vec<Line<'static>>,
+  deferred_history_lines: Vec<Line<'static>>,
   transcript_cache_width: u16,
   scroll_offset: u16,
   history_width: u16,
   has_emitted_history_lines: bool,
+  backtrack_render_pending: bool,
   status_line_mode: StatusLineMode,
+  queued_submissions: VecDeque<ComposerSubmission>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,11 +116,17 @@ impl App {
       ui_mode,
       transcript_cells: Vec::new(),
       transcript_lines_cache: Vec::new(),
+      active_tail_cache_key: None,
+      active_tail_cache_width: 0,
+      active_tail_cache_lines: Vec::new(),
+      deferred_history_lines: Vec::new(),
       transcript_cache_width: 0,
       scroll_offset: 0,
       history_width: 1,
       has_emitted_history_lines: false,
+      backtrack_render_pending: false,
       status_line_mode: StatusLineMode::Default,
+      queued_submissions: VecDeque::new(),
     };
 
     // 1:1 codex: status line is enabled by default.
@@ -369,7 +384,12 @@ impl App {
         // Clear transcript and push a new session cell.
         self.transcript_cells.clear();
         self.transcript_lines_cache.clear();
+        self.active_tail_cache_key = None;
+        self.active_tail_cache_width = 0;
+        self.active_tail_cache_lines.clear();
+        self.deferred_history_lines.clear();
         self.has_emitted_history_lines = false;
+        self.backtrack_render_pending = false;
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
@@ -407,37 +427,24 @@ impl App {
   fn insert_history_cell(&mut self, cell: Box<dyn HistoryCell>, tui: &mut Tui) -> Result<()> {
     self.transcript_cells.push(cell);
 
-    let width = self.history_width.max(1);
+    let width = tui.terminal.last_known_screen_size.width.max(1);
     let cell = self.transcript_cells.last().unwrap();
-    let mut display = cell.display_lines(width);
-
+    let mut has_emitted = self.has_emitted_history_lines;
+    let display = prepare_history_display(cell.as_ref(), width, &mut has_emitted);
     if display.is_empty() {
       return Ok(());
     }
-
-    // 1:1 codex: only insert a separating blank line for new cells that are
-    // not part of an ongoing stream. Streaming continuations should not
-    // accrue extra blank lines between chunks.
-    let needs_separator = !cell.is_stream_continuation();
+    self.has_emitted_history_lines = has_emitted;
 
     match self.ui_mode {
       UiMode::Inline => {
-        if needs_separator {
-          if self.has_emitted_history_lines {
-            display.insert(0, Line::from(""));
-          } else {
-            self.has_emitted_history_lines = true;
-          }
+        if self.deferred_history_lines.is_empty() {
+          tui.insert_history_lines(display);
+        } else {
+          self.deferred_history_lines.extend(display);
         }
-        tui.insert_history_lines(display);
       }
       UiMode::AltScreen => {
-        if needs_separator && self.has_emitted_history_lines {
-          self.transcript_lines_cache.push(Line::from(""));
-        }
-        if needs_separator && !self.has_emitted_history_lines {
-          self.has_emitted_history_lines = true;
-        }
         self.transcript_lines_cache.extend(display);
         self.transcript_cache_width = width;
       }
@@ -450,23 +457,44 @@ impl App {
     let width = width.max(1);
     self.transcript_lines_cache.clear();
 
-    let mut emitted = false;
+    let mut has_emitted = false;
     for cell in self.transcript_cells.iter() {
-      let lines = cell.display_lines(width);
-      if lines.is_empty() {
-        continue;
-      }
-      if !cell.is_stream_continuation() {
-        if emitted {
-          self.transcript_lines_cache.push(Line::from(""));
-        } else {
-          emitted = true;
-        }
-      }
+      let lines = prepare_history_display(cell.as_ref(), width, &mut has_emitted);
       self.transcript_lines_cache.extend(lines);
     }
 
     self.transcript_cache_width = width;
+  }
+
+  fn refresh_active_tail_cache(&mut self, width: u16) {
+    let width = width.max(1);
+    let key = self.chat_widget.active_cell_transcript_key();
+    if self.active_tail_cache_width == width && self.active_tail_cache_key == key {
+      return;
+    }
+
+    self.active_tail_cache_width = width;
+    self.active_tail_cache_key = key;
+    self.active_tail_cache_lines = self
+      .chat_widget
+      .active_cell_transcript_lines(width)
+      .unwrap_or_default();
+  }
+
+  fn render_transcript_once(&mut self, tui: &mut Tui) {
+    if self.transcript_cells.is_empty() {
+      return;
+    }
+
+    let width = tui.terminal.last_known_screen_size.width.max(1);
+    let mut has_emitted = false;
+    let mut lines = Vec::new();
+    for cell in &self.transcript_cells {
+      lines.extend(prepare_history_display(cell.as_ref(), width, &mut has_emitted));
+    }
+    if !lines.is_empty() {
+      tui.insert_history_lines(lines);
+    }
   }
 
   async fn handle_tui_event(&mut self, event: TuiEvent, tui: &mut Tui) -> Result<()> {
@@ -499,6 +527,22 @@ impl App {
         }
       }
       TuiEvent::Draw => {
+        if let Ok(size) = tui.terminal.size()
+          && size != tui.terminal.last_known_screen_size
+        {
+          self.refresh_status_line();
+        }
+
+        if self.backtrack_render_pending {
+          self.backtrack_render_pending = false;
+          self.render_transcript_once(tui);
+        }
+
+        if !self.deferred_history_lines.is_empty() && self.ui_mode == UiMode::Inline {
+          let lines = std::mem::take(&mut self.deferred_history_lines);
+          tui.insert_history_lines(lines);
+        }
+
         // 1:1 codex: flush paste burst first; if something flushed, redraw immediately.
         // If still in a burst (first char held for flicker suppression), schedule a
         // follow-up tick so the held char is eventually released even without a keypress.
@@ -579,6 +623,10 @@ impl App {
           .submit_user_input(submission.text, submission.text_elements)
           .await?;
       }
+      BottomPaneAction::Queue(submission) => {
+        self.queued_submissions.push_back(submission);
+        self.sync_bottom_pane_context();
+      }
       BottomPaneAction::ApprovalDecision(choice) => {
         if let Some(pending) = self.pending_approval.take() {
           let decision = match choice {
@@ -658,6 +706,9 @@ impl App {
               command: format!("{}  (cwd: {})", req.command, req.cwd.display()),
             }));
         }
+        ChatWidgetAction::ShowRequestUserInput(req) => {
+          self.chat_widget.bottom_pane.push_user_input_request(req);
+        }
       }
     }
 
@@ -668,9 +719,24 @@ impl App {
       self.chat_widget.set_agent_turn_running(false);
       self.pending_approval = None;
       self.chat_widget.bottom_pane.close_approval();
+      self.submit_next_queued_submission().await?;
     }
 
     Ok(())
+  }
+
+  async fn submit_next_queued_submission(&mut self) -> Result<()> {
+    if self.task_running {
+      return Ok(());
+    }
+    let Some(submission) = self.queued_submissions.pop_front() else {
+      self.sync_bottom_pane_context();
+      return Ok(());
+    };
+    self.sync_bottom_pane_context();
+    self
+      .submit_user_input(submission.text, submission.text_elements)
+      .await
   }
 
   // 1:1 codex: dispatch_command handles all slash commands at the app layer.
@@ -713,7 +779,7 @@ impl App {
       }
       SlashCommand::Status => {
         let usage = self.chat_widget.token_usage();
-        let model = &self.chat_widget.model_name;
+        let model = self.chat_widget.model_name();
         let cwd = self
           .chat_widget
           .cwd()
@@ -826,7 +892,7 @@ impl App {
       return Ok(());
     }
 
-    let current_model = self.chat_widget.model_name.clone();
+    let current_model = self.chat_widget.model_name().to_string();
 
     let mut all_model_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for provider in &providers {
@@ -972,7 +1038,7 @@ impl App {
     use crate::bottom_pane::list_selection_view::SelectionViewParams;
     use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 
-    let current_model = self.chat_widget.model_name.clone();
+    let current_model = self.chat_widget.model_name().to_string();
 
     let mut items: Vec<SelectionItem> = Vec::new();
     for provider in &providers {
@@ -1113,7 +1179,7 @@ impl App {
     }
 
     // 3) Update local model name so the UI reflects the change immediately.
-    self.chat_widget.model_name = model_id.clone();
+    self.chat_widget.set_model_name(model_id.clone());
 
     // 4) Show confirmation in chat history.
     self
@@ -1137,6 +1203,13 @@ impl App {
       .chat_widget
       .bottom_pane
       .set_context_window(None, used_tokens);
+    self.chat_widget.bottom_pane.set_queued_user_messages(
+      self
+        .queued_submissions
+        .iter()
+        .map(|submission| submission.text.clone())
+        .collect(),
+    );
     self.refresh_status_line();
   }
 
@@ -1156,7 +1229,7 @@ impl App {
       .cwd()
       .cloned()
       .unwrap_or_else(|| self.cokra.cwd());
-    let model = self.chat_widget.model_name.clone();
+    let model = self.chat_widget.model_name().to_string();
     let usage = self.chat_widget.token_usage();
 
     let line = match self.status_line_mode {
@@ -1206,6 +1279,7 @@ impl App {
         if self.transcript_cache_width != area.width {
           self.rebuild_transcript_cache(area.width);
         }
+        self.refresh_active_tail_cache(area.width);
         let bottom_height = self
           .chat_widget
           .bottom_pane
@@ -1217,6 +1291,7 @@ impl App {
           chunks[0],
           frame.buffer_mut(),
           &self.transcript_lines_cache,
+          &self.active_tail_cache_lines,
           self.scroll_offset,
         );
         self
@@ -1239,4 +1314,58 @@ pub(crate) fn make_frame_requester() -> (broadcast::Sender<()>, FrameRequester) 
 
 pub(crate) fn default_cwd() -> PathBuf {
   std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn prepare_history_display(
+  cell: &dyn HistoryCell,
+  width: u16,
+  has_emitted_history_lines: &mut bool,
+) -> Vec<Line<'static>> {
+  let mut display = cell.display_lines(width.max(1));
+  if display.is_empty() {
+    return display;
+  }
+
+  if !cell.is_stream_continuation() {
+    if *has_emitted_history_lines {
+      display.insert(0, Line::from(""));
+    } else {
+      *has_emitted_history_lines = true;
+    }
+  }
+
+  display
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::history_cell::PlainHistoryCell;
+
+  fn lines_to_string(lines: &[Line<'static>]) -> String {
+    lines
+      .iter()
+      .map(|line| {
+        line
+          .spans
+          .iter()
+          .map(|span| span.content.as_ref())
+          .collect::<String>()
+      })
+      .collect::<Vec<_>>()
+      .join("\n")
+  }
+
+  #[test]
+  fn prepare_history_display_inserts_separator_after_first_non_stream_cell() {
+    let first = PlainHistoryCell::new(vec![Line::from("first")]);
+    let second = PlainHistoryCell::new(vec![Line::from("second")]);
+    let mut emitted = false;
+
+    let first_lines = prepare_history_display(&first, 80, &mut emitted);
+    let second_lines = prepare_history_display(&second, 80, &mut emitted);
+
+    assert_eq!(lines_to_string(&first_lines), "first");
+    assert_eq!(lines_to_string(&second_lines), "\nsecond");
+  }
 }

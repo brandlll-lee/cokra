@@ -147,13 +147,22 @@ impl TurnExecutor {
   }
 
   pub async fn run_turn(&self, input: UserInput) -> Result<TurnResult, TurnError> {
+    self
+      .run_turn_with_id(input, Uuid::new_v4().to_string())
+      .await
+  }
+
+  pub async fn run_turn_with_id(
+    &self,
+    input: UserInput,
+    turn_id: String,
+  ) -> Result<TurnResult, TurnError> {
     let thread_id = self
       .session
       .thread_id()
       .cloned()
       .unwrap_or_default()
       .to_string();
-    let turn_id = Uuid::new_v4().to_string();
 
     self
       .send_event(EventMsg::TurnStarted(TurnStartedEvent {

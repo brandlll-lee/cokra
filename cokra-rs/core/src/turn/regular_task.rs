@@ -118,7 +118,9 @@ impl SessionTask for RegularTask {
     };
 
     // Execute the turn
-    let result = executor.run_turn(self.user_input.clone()).await?;
+    let result = executor
+      .run_turn_with_id(self.user_input.clone(), self.metadata.id.clone())
+      .await?;
 
     // Convert to AgentMessageEvent
     let message = AgentMessageEvent {

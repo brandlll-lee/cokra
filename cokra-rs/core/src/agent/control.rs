@@ -28,6 +28,7 @@ use super::status::AgentStatus;
 /// Turn input handled by agent control.
 #[derive(Debug, Clone)]
 pub struct Turn {
+  pub turn_id: String,
   pub user_message: String,
 }
 
@@ -109,10 +110,13 @@ impl AgentControl {
     );
 
     let result = executor
-      .run_turn(UserInput {
-        content: turn.user_message,
-        attachments: Vec::new(),
-      })
+      .run_turn_with_id(
+        UserInput {
+          content: turn.user_message,
+          attachments: Vec::new(),
+        },
+        turn.turn_id,
+      )
       .await;
 
     match result {

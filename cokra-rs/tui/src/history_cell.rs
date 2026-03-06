@@ -1,8 +1,10 @@
 use std::any::Any;
+use std::collections::HashMap;
 
 use ratatui::prelude::Buffer;
 use ratatui::prelude::Rect;
 use ratatui::style::Color;
+use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
@@ -12,7 +14,10 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
 
+use cokra_protocol::RequestUserInputAnswer;
+use cokra_protocol::RequestUserInputQuestion;
 use cokra_protocol::TextElement;
+use unicode_width::UnicodeWidthStr;
 
 use crate::exec_cell::ExecCall;
 use crate::exec_cell::ExecCell;
@@ -101,6 +106,116 @@ impl PlainHistoryCell {
 impl HistoryCell for PlainHistoryCell {
   fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
     self.lines.clone()
+  }
+}
+
+#[derive(Debug)]
+pub(crate) struct RequestUserInputResultCell {
+  pub(crate) questions: Vec<RequestUserInputQuestion>,
+  pub(crate) answers: HashMap<String, RequestUserInputAnswer>,
+  pub(crate) interrupted: bool,
+}
+
+impl HistoryCell for RequestUserInputResultCell {
+  fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    let width = width.max(1) as usize;
+    let total = self.questions.len();
+    let answered = self
+      .questions
+      .iter()
+      .filter(|question| {
+        self
+          .answers
+          .get(&question.id)
+          .is_some_and(|answer| !answer.answers.is_empty())
+      })
+      .count();
+    let unanswered = total.saturating_sub(answered);
+
+    let mut header = vec!["•".dim(), " ".into(), "Questions".bold()];
+    header.push(format!(" {answered}/{total} answered").dim());
+    if self.interrupted {
+      header.push(" (submitted early)".cyan());
+    }
+
+    let mut lines: Vec<Line<'static>> = vec![header.into()];
+
+    for question in &self.questions {
+      let answer = self.answers.get(&question.id);
+      let answer_missing = match answer {
+        Some(answer) => answer.answers.is_empty(),
+        None => true,
+      };
+
+      let mut question_lines = wrap_with_prefix(
+        &question.question,
+        width,
+        "  • ".into(),
+        "    ".into(),
+        Style::default(),
+      );
+      if answer_missing && let Some(last) = question_lines.last_mut() {
+        last.spans.push(" (unanswered)".dim());
+      }
+      lines.extend(question_lines);
+
+      let Some(answer) = answer.filter(|answer| !answer.answers.is_empty()) else {
+        continue;
+      };
+
+      if question.is_secret {
+        lines.extend(wrap_with_prefix(
+          "••••••",
+          width,
+          "    answer: ".dim(),
+          "            ".dim(),
+          Style::default().fg(Color::Cyan),
+        ));
+        continue;
+      }
+
+      let (options, note) = split_request_user_input_answer(answer);
+      for option in options {
+        lines.extend(wrap_with_prefix(
+          &option,
+          width,
+          "    answer: ".dim(),
+          "            ".dim(),
+          Style::default().fg(Color::Cyan),
+        ));
+      }
+      if let Some(note) = note {
+        let (label, continuation, style) = if question.options.is_some() {
+          (
+            "    note: ".dim(),
+            "          ".dim(),
+            Style::default().fg(Color::Cyan),
+          )
+        } else {
+          (
+            "    answer: ".dim(),
+            "            ".dim(),
+            Style::default().fg(Color::Cyan),
+          )
+        };
+        lines.extend(wrap_with_prefix(&note, width, label, continuation, style));
+      }
+    }
+
+    if self.interrupted && unanswered > 0 {
+      let summary = format!("submitted with {unanswered} unanswered");
+      lines.extend(wrap_with_prefix(
+        &summary,
+        width,
+        "  ↳ ".dim().cyan(),
+        "    ".dim(),
+        Style::default()
+          .fg(Color::Cyan)
+          .add_modifier(Modifier::DIM),
+      ));
+    }
+
+    lines
   }
 }
 
@@ -222,6 +337,39 @@ fn prefix_lines(
       line
     })
     .collect()
+}
+
+fn wrap_with_prefix(
+  text: &str,
+  width: usize,
+  initial_prefix: Span<'static>,
+  subsequent_prefix: Span<'static>,
+  style: Style,
+) -> Vec<Line<'static>> {
+  let prefix_width = UnicodeWidthStr::width(initial_prefix.content.as_ref())
+    .max(UnicodeWidthStr::width(subsequent_prefix.content.as_ref()));
+  let wrap_width = width.saturating_sub(prefix_width).max(1);
+  let wrapped = textwrap::wrap(text, wrap_width);
+  let lines = wrapped
+    .into_iter()
+    .map(|segment| Line::from(Span::styled(segment.to_string(), style)))
+    .collect::<Vec<_>>();
+  prefix_lines(lines, initial_prefix, subsequent_prefix)
+}
+
+fn split_request_user_input_answer(
+  answer: &RequestUserInputAnswer,
+) -> (Vec<String>, Option<String>) {
+  let mut options = Vec::new();
+  let mut note = None;
+  for entry in &answer.answers {
+    if let Some(note_text) = entry.strip_prefix("user_note: ") {
+      note = Some(note_text.to_string());
+    } else {
+      options.push(entry.clone());
+    }
+  }
+  (options, note)
 }
 
 impl HistoryCell for UserHistoryCell {
@@ -638,5 +786,55 @@ mod tests {
     assert!(!rendered.contains("Welcome to Cokra"));
     assert!(!rendered.contains("/help - show available commands"));
     assert!(rendered.contains("cwd: /tmp/project"));
+  }
+
+  #[test]
+  fn request_user_input_result_cell_renders_answers_and_note() {
+    let cell = RequestUserInputResultCell {
+      questions: vec![
+        RequestUserInputQuestion {
+          id: "confirm".to_string(),
+          header: "Confirm".to_string(),
+          question: "Proceed with the plan?".to_string(),
+          is_other: true,
+          is_secret: false,
+          options: Some(vec![cokra_protocol::RequestUserInputQuestionOption {
+            label: "Yes".to_string(),
+            description: "Continue.".to_string(),
+          }]),
+        },
+        RequestUserInputQuestion {
+          id: "secret".to_string(),
+          header: "Secret".to_string(),
+          question: "Enter token".to_string(),
+          is_other: false,
+          is_secret: true,
+          options: None,
+        },
+      ],
+      answers: HashMap::from([
+        (
+          "confirm".to_string(),
+          RequestUserInputAnswer {
+            answers: vec!["Yes".to_string(), "user_note: immediately".to_string()],
+          },
+        ),
+        (
+          "secret".to_string(),
+          RequestUserInputAnswer {
+            answers: vec!["super-secret".to_string()],
+          },
+        ),
+      ]),
+      interrupted: true,
+    };
+
+    let rendered = lines_to_string(&cell.display_lines(80));
+    assert!(rendered.contains("Questions 2/2 answered"));
+    assert!(rendered.contains("Proceed with the plan?"));
+    assert!(rendered.contains("Yes"));
+    assert!(rendered.contains("immediately"));
+    assert!(rendered.contains("••••••"));
+    assert!(rendered.contains("submitted early"));
   }
 }

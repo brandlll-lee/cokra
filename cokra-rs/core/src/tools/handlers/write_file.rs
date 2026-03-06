@@ -80,6 +80,7 @@ mod tests {
       })
       .to_string(),
       cwd: std::env::temp_dir(),
+      runtime: None,
     };
 
     let out = WriteFileHandler.handle(inv).expect("write file");
@@ -101,6 +102,7 @@ mod tests {
       })
       .to_string(),
       cwd: std::env::temp_dir(),
+      runtime: None,
     };
 
     let err = WriteFileHandler

@@ -380,12 +380,43 @@ fn plan_tool() -> ToolSpec {
 }
 
 fn request_user_input_tool() -> ToolSpec {
+  let mut option_props = BTreeMap::new();
+  option_props.insert("label".to_string(), str_field("Short label for this option."));
+  option_props.insert(
+    "description".to_string(),
+    str_field("Single-sentence description of the effect of choosing this option."),
+  );
+
+  let mut question_props = BTreeMap::new();
+  question_props.insert("id".to_string(), str_field("Stable identifier for the question."));
+  question_props.insert(
+    "header".to_string(),
+    str_field("Short header label shown for the question."),
+  );
+  question_props.insert(
+    "question".to_string(),
+    str_field("Single-sentence prompt shown to the user."),
+  );
+  question_props.insert(
+    "options".to_string(),
+    JsonSchema::Array {
+      items: Box::new(obj(option_props, &["label", "description"])),
+      description: Some("Two or three mutually exclusive options for the question.".to_string()),
+    },
+  );
+
   let mut props = BTreeMap::new();
-  props.insert("prompt".to_string(), str_field("Prompt to user"));
+  props.insert(
+    "questions".to_string(),
+    JsonSchema::Array {
+      items: Box::new(obj(question_props, &["id", "header", "question", "options"])),
+      description: Some("One to three short questions to ask the user.".to_string()),
+    },
+  );
   ToolSpec::new(
     "request_user_input",
-    "Request user input",
-    obj(props, &["prompt"]),
+    "Request user input for one to three short questions and wait for the response.",
+    obj(props, &["questions"]),
     None,
     ToolHandlerType::Function,
     default_permissions(),

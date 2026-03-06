@@ -453,8 +453,9 @@ pub struct ExecApprovalRequestEvent {
 pub struct RequestUserInputEvent {
   pub thread_id: String,
   pub turn_id: String,
-  pub id: String,
-  pub prompt: String,
+  #[serde(alias = "id")]
+  pub call_id: String,
+  pub questions: Vec<RequestUserInputQuestion>,
 }
 
 /// Stream error event
