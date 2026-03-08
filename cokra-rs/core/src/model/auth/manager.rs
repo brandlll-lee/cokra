@@ -94,10 +94,24 @@ impl AuthManager {
 
     let should_refresh = match &stored.credentials {
       Credentials::OAuth {
+        access_token,
         refresh_token,
         expires_at,
         ..
-      } => !refresh_token.is_empty() && *expires_at <= chrono::Utc::now().timestamp() as u64,
+      } => {
+        let now = chrono::Utc::now().timestamp() as u64;
+        let expired = !refresh_token.is_empty() && *expires_at <= now;
+
+        // Backward-compat migration for GitHub Copilot OAuth:
+        // older versions stored the GitHub token as both refresh+access with a near-infinite
+        // expiry. We want to refresh once to obtain a real Copilot token (pi-mono parity).
+        let needs_copilot_migration = (provider_id == "github-copilot"
+          || provider_id == "github-copilot-enterprise")
+          && !refresh_token.is_empty()
+          && refresh_token == access_token;
+
+        expired || needs_copilot_migration
+      }
       _ => false,
     };
 
