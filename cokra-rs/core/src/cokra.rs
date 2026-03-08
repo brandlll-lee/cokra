@@ -531,6 +531,9 @@ fn build_system_prompt() -> String {
     "You are a coding agent running in Cokra, a terminal-based coding assistant. ",
     "You are expected to be precise, safe, and helpful.\n",
     "\n",
+    "You may also help with technical analysis and comparisons even when the user is not asking for a direct code change. ",
+    "Be explicit about what you can verify from the local workspace and what would require external confirmation.\n",
+    "\n",
     "Your capabilities:\n",
     "\n",
     "- Receive user prompts and other context provided by the harness, such as files in the workspace.\n",
@@ -3039,12 +3042,29 @@ mod tests {
     config.approval.policy = ApprovalMode::Auto;
     config.cwd = tmpdir.path().to_path_buf();
 
-    let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
+    // Avoid HOME-scoped file storage in tests: use a shared in-memory credential
+    // store so the registry and test AuthManager see consistent state.
+    let storage = std::sync::Arc::new(crate::model::auth::storage::MemoryCredentialStorage::new());
+    let auth = std::sync::Arc::new(
+      crate::model::auth::AuthManager::with_storage(storage).expect("auth manager"),
+    );
+    let registry = std::sync::Arc::new(crate::model::ProviderRegistry::new_with_auth(Some(
+      auth.clone(),
+    )));
+    registry.register(MockProvider::new()).await;
+    registry
+      .set_default("mock")
+      .await
+      .expect("set mock default");
+    let model_client = std::sync::Arc::new(
+      crate::model::ModelClient::new(registry)
+        .await
+        .expect("build model client"),
+    );
+
+    let cokra = Cokra::new_with_model_client(config, model_client)
       .await
       .expect("create cokra");
-
-    let auth = crate::model::auth::AuthManager::new().expect("auth manager");
-    let _ = auth.remove("openrouter").await;
 
     // Reuse the TUI path's persistence semantics directly via auth manager.
     auth

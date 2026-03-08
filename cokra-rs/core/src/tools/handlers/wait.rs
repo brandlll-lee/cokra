@@ -85,6 +85,14 @@ impl ToolHandler for WaitHandler {
     let agent_ids = args
       .agent_ids
       .filter(|ids| !ids.is_empty())
+      .map(|ids| {
+        ids
+          .into_iter()
+          // Tradeoff: keep unresolved selectors as-is so the output can report NotFound.
+          .map(|id| team_runtime.resolve_agent_selector(&id).unwrap_or(id))
+          .collect::<Vec<_>>()
+      })
+      .filter(|ids| !ids.is_empty())
       .unwrap_or_else(|| team_runtime.list_spawned_agent_ids());
 
     if let Some(tx_event) = &runtime.tx_event {

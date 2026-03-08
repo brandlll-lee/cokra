@@ -21,6 +21,7 @@ pub(super) struct SessionState {
   pub(super) agent_turn_running: bool,
   pub(super) has_seen_session_configured: bool,
   pub(super) last_separator_elapsed_secs: Option<u64>,
+  pub(super) last_wait_end_fingerprint: Option<u64>,
 }
 
 impl SessionState {

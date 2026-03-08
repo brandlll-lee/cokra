@@ -25,6 +25,44 @@ const STATUS_PREVIEW_CHARS: usize = 160;
 const TASK_PREVIEW_CHARS: usize = 96;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WaitingPreview {
+  pub(crate) summary: String,
+  pub(crate) details: Option<String>,
+  pub(crate) receiver_count: usize,
+}
+
+pub(crate) fn waiting_preview(ev: &CollabWaitingBeginEvent) -> WaitingPreview {
+  let receivers = merge_wait_receivers(&ev.receiver_thread_ids, ev.receiver_agents.clone());
+
+  let summary = match receivers.as_slice() {
+    [receiver] => format!(
+      "等待 {}",
+      agent_label_display(agent_label_from_ref(receiver))
+    ),
+    [] => "等待队友完成".to_string(),
+    _ => format!("等待 {} 个队友完成", receivers.len()),
+  };
+
+  let details = if receivers.len() > 1 {
+    Some(
+      receivers
+        .iter()
+        .map(|receiver| agent_label_display(agent_label_from_ref(receiver)))
+        .collect::<Vec<_>>()
+        .join("\n"),
+    )
+  } else {
+    None
+  };
+
+  WaitingPreview {
+    summary,
+    details,
+    receiver_count: receivers.len(),
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentPickerThreadEntry {
   pub(crate) nickname: Option<String>,
   pub(crate) role: Option<String>,
@@ -401,6 +439,29 @@ fn agent_label_from_ref(agent: &CollabAgentRef) -> AgentLabel<'_> {
 
 fn agent_label_line(agent: AgentLabel<'_>) -> Line<'static> {
   Line::from(agent_label_spans(agent))
+}
+
+fn agent_label_display(agent: AgentLabel<'_>) -> String {
+  let base = if let Some(nickname) = agent
+    .nickname
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+  {
+    format!("@{nickname}")
+  } else {
+    format!("@{}", short_thread_id(agent.thread_id))
+  };
+
+  let role = agent.role.map(str::trim).filter(|value| {
+    !value.is_empty()
+      && !value.eq_ignore_ascii_case("default")
+      && !value.eq_ignore_ascii_case("leader")
+  });
+  if let Some(role) = role {
+    format!("{base} [{role}]")
+  } else {
+    base
+  }
 }
 
 fn agent_label_spans(agent: AgentLabel<'_>) -> Vec<Span<'static>> {

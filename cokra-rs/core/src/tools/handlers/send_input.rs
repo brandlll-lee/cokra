@@ -44,7 +44,10 @@ impl ToolHandler for SendInputHandler {
     let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
       FunctionCallError::Execution("send_input runtime is not configured".to_string())
     })?;
-    let receiver = team_runtime.collab_agent_ref(&args.agent_id);
+    let agent_id = team_runtime
+      .resolve_agent_selector(&args.agent_id)
+      .ok_or_else(|| FunctionCallError::Execution(format!("agent not found: {}", args.agent_id)))?;
+    let receiver = team_runtime.collab_agent_ref(&agent_id);
     let outbound_message = args.message.clone();
 
     if let Some(tx_event) = &runtime.tx_event {
@@ -52,7 +55,7 @@ impl ToolHandler for SendInputHandler {
         .send(EventMsg::CollabAgentInteractionBegin(
           CollabAgentInteractionBeginEvent {
             thread_id: runtime.thread_id.clone(),
-            agent_id: args.agent_id.clone(),
+            agent_id: agent_id.clone(),
             nickname: receiver.as_ref().and_then(|agent| agent.nickname.clone()),
             role: receiver.as_ref().and_then(|agent| agent.role.clone()),
             message: outbound_message.clone(),
@@ -62,7 +65,7 @@ impl ToolHandler for SendInputHandler {
     }
 
     team_runtime
-      .send_input(&args.agent_id, args.message)
+      .send_input(&agent_id, args.message)
       .await
       .map_err(|err| FunctionCallError::Execution(err.to_string()))?;
 
@@ -71,7 +74,7 @@ impl ToolHandler for SendInputHandler {
         .send(EventMsg::CollabAgentInteractionEnd(
           CollabAgentInteractionEndEvent {
             thread_id: runtime.thread_id.clone(),
-            agent_id: args.agent_id.clone(),
+            agent_id: agent_id.clone(),
             nickname: receiver.as_ref().and_then(|agent| agent.nickname.clone()),
             role: receiver.and_then(|agent| agent.role),
             message: outbound_message,
@@ -85,7 +88,7 @@ impl ToolHandler for SendInputHandler {
 
     let mut out = ToolOutput::success(
       serde_json::to_string(&SendInputResult {
-        agent_id: args.agent_id,
+        agent_id,
         status: "sent".to_string(),
       })
       .map_err(|err| {

@@ -8,6 +8,7 @@ pub mod regular_task;
 pub mod response_items;
 pub mod sse_executor;
 pub mod task;
+mod text_function_calls;
 
 pub use context::TurnContext;
 pub use executor::Attachment;

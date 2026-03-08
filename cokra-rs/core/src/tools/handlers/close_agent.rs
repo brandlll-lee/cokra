@@ -43,20 +43,23 @@ impl ToolHandler for CloseAgentHandler {
     let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
       FunctionCallError::Execution("close_agent runtime is not configured".to_string())
     })?;
-    let receiver = team_runtime.collab_agent_ref(&args.agent_id);
+    let agent_id = team_runtime
+      .resolve_agent_selector(&args.agent_id)
+      .ok_or_else(|| FunctionCallError::Execution(format!("agent not found: {}", args.agent_id)))?;
+    let receiver = team_runtime.collab_agent_ref(&agent_id);
 
     if let Some(tx_event) = &runtime.tx_event {
       let _ = tx_event
         .send(EventMsg::CollabCloseBegin(CollabCloseBeginEvent {
           call_id: invocation.id.clone(),
           sender_thread_id: runtime.thread_id.clone(),
-          receiver_thread_id: args.agent_id.clone(),
+          receiver_thread_id: agent_id.clone(),
         }))
         .await;
     }
 
     let status = team_runtime
-      .close_agent(&args.agent_id)
+      .close_agent(&agent_id)
       .await
       .map_err(|err| FunctionCallError::Execution(err.to_string()))?;
 
@@ -65,7 +68,7 @@ impl ToolHandler for CloseAgentHandler {
         .send(EventMsg::CollabCloseEnd(CollabCloseEndEvent {
           call_id: invocation.id.clone(),
           sender_thread_id: runtime.thread_id.clone(),
-          receiver_thread_id: args.agent_id.clone(),
+          receiver_thread_id: agent_id.clone(),
           receiver_nickname: receiver.as_ref().and_then(|agent| agent.nickname.clone()),
           receiver_role: receiver.and_then(|agent| agent.role),
           status: status.clone(),
@@ -74,11 +77,7 @@ impl ToolHandler for CloseAgentHandler {
     }
 
     let mut out = ToolOutput::success(
-      serde_json::to_string(&CloseAgentResult {
-        agent_id: args.agent_id,
-        status,
-      })
-      .map_err(|err| {
+      serde_json::to_string(&CloseAgentResult { agent_id, status }).map_err(|err| {
         FunctionCallError::Fatal(format!("failed to serialize close_agent result: {err}"))
       })?,
     );

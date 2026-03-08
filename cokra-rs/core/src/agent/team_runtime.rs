@@ -397,6 +397,26 @@ impl TeamRuntime {
       .find(|candidate| candidate.to_string() == thread_id)
   }
 
+  pub(crate) fn resolve_agent_selector(&self, selector: &str) -> Option<String> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+      return None;
+    }
+
+    if self.resolve_thread_id(selector).is_some() {
+      return Some(selector.to_string());
+    }
+
+    // Fallback: resolve by nickname (Codex-style teams often refer to agents by name).
+    self
+      .manager
+      .list_thread_ids()
+      .into_iter()
+      .filter_map(|thread_id| self.manager.get_thread(&thread_id))
+      .find(|info| info.nickname.as_deref() == Some(selector))
+      .map(|info| info.thread_id.to_string())
+  }
+
   pub(crate) async fn spawn_agent(
     &self,
     parent_thread_id: &str,
@@ -584,7 +604,23 @@ impl TeamRuntime {
     initial_message: String,
   ) -> anyhow::Result<()> {
     let session = Arc::new(Session::new_with_thread_id(thread_id.clone()));
-    let turn_config = self.agent_control.turn_config().await;
+    let thread_info = self.find_thread_info(&thread_id.to_string());
+    let mut turn_config = self.agent_control.turn_config().await;
+    if let Some(base) = turn_config.system_prompt.as_deref() {
+      // Tradeoff: we append a small sub-agent contract to the base prompt instead of
+      // replacing it wholesale. This keeps tool-use and safety guidance consistent
+      // with the main agent while making "agent teams" useful for research/discussion.
+      turn_config.system_prompt = Some(build_spawned_agent_system_prompt(
+        base,
+        thread_info
+          .as_ref()
+          .and_then(|info| info.nickname.as_deref()),
+        thread_info
+          .as_ref()
+          .map(|info| info.role.as_str())
+          .unwrap_or("default"),
+      ));
+    }
     let (tool_registry, tool_router) = build_default_tools(self.config.as_ref());
     let (tx_raw_event, mut rx_raw_event) = mpsc::channel(CHILD_EVENT_CHANNEL_CAPACITY);
     let root_tx_event = self.root_tx_event.clone();
@@ -670,4 +706,30 @@ impl TeamRuntime {
 
     Ok(())
   }
+}
+
+fn build_spawned_agent_system_prompt(base: &str, nickname: Option<&str>, role: &str) -> String {
+  let mut out = String::with_capacity(base.len() + 800);
+  out.push_str(base);
+  out.push_str("\n\n# Agent Teams: spawned teammate mode\n\n");
+  out.push_str(
+    "You are a spawned teammate agent inside Cokra Agent Teams. Your job is to help @main by working on a specific subtask.\n",
+  );
+  if let Some(nickname) = nickname.map(str::trim).filter(|value| !value.is_empty()) {
+    out.push_str(&format!("Your teammate nickname is @{nickname}.\n"));
+  }
+  if !role.trim().is_empty() && !role.eq_ignore_ascii_case("default") {
+    out.push_str(&format!("Your teammate role is {role}.\n"));
+  }
+  out.push_str("\n");
+  out.push_str(
+    "- You may do research, comparisons, design discussion, or drafting even when the task is not directly editing code.\n",
+  );
+  out.push_str(
+    "- Do not refuse a task solely because it is \"not a coding task\". Instead: do your best, be explicit about what you can verify locally, and list what would need external verification if required.\n",
+  );
+  out.push_str(
+    "- Keep outputs concise and oriented toward helping @main (key findings, clear recommendation, and any follow-up questions).\n",
+  );
+  out
 }

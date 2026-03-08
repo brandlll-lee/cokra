@@ -25,6 +25,8 @@ pub struct ProviderRegistry {
   configs: RwLock<HashMap<String, ProviderConfig>>,
   /// 1:1 opencode: models.dev client for fetching the complete provider+model database
   models_dev: ModelsDevClient,
+  /// Shared auth manager used for connect-catalog credential discovery.
+  auth: Option<Arc<AuthManager>>,
 }
 
 impl Default for ProviderRegistry {
@@ -41,6 +43,19 @@ impl ProviderRegistry {
       default_provider: RwLock::new(None),
       configs: RwLock::new(HashMap::new()),
       models_dev: ModelsDevClient::new(),
+      // Tradeoff: resolve default storage once at startup to avoid repeated disk I/O
+      // and env-dependent path resolution on every catalog render.
+      auth: AuthManager::new().ok().map(Arc::new),
+    }
+  }
+
+  pub fn new_with_auth(auth: Option<Arc<AuthManager>>) -> Self {
+    Self {
+      providers: RwLock::new(HashMap::new()),
+      default_provider: RwLock::new(None),
+      configs: RwLock::new(HashMap::new()),
+      models_dev: ModelsDevClient::new(),
+      auth,
     }
   }
 
@@ -328,7 +343,7 @@ impl ProviderRegistry {
   }
 
   pub async fn list_connect_catalog(&self) -> Vec<ProviderInfo> {
-    let auth = AuthManager::new().ok();
+    let auth = self.auth.clone();
     let configs = self.configs.read().await.clone();
     let mut providers = PluginRegistry::entries()
       .into_iter()
@@ -380,7 +395,11 @@ impl ProviderRegistry {
   pub async fn list_connected_models_catalog(&self) -> Vec<ProviderInfo> {
     // Tradeoff: use cached models.dev data to keep the TUI responsive; a background
     // refresh will warm the cache if it's missing.
-    let models_dev_db = self.models_dev.get_cached_or_refresh().await.unwrap_or_default();
+    let models_dev_db = self
+      .models_dev
+      .get_cached_or_refresh()
+      .await
+      .unwrap_or_default();
     let connected = self
       .list_connect_catalog()
       .await

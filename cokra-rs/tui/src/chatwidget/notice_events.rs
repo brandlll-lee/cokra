@@ -1,6 +1,9 @@
 use super::*;
 use crate::multi_agents;
 use crate::terminal_palette::light_blue;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
 
 impl ChatWidget {
   pub(super) fn handle_notice_event(&mut self, event: &EventMsg) -> bool {
@@ -197,15 +200,39 @@ impl ChatWidget {
         )]));
       }
       EventMsg::ReasoningContentDelta(_) | EventMsg::ReasoningRawContentDelta(_) => {}
-      EventMsg::CollabWaitingBegin(_) => {
-        if let EventMsg::CollabWaitingBegin(e) = event {
-          self.add_to_history(multi_agents::waiting_begin(e.clone()));
+      EventMsg::CollabWaitingBegin(e) => {
+        // Keep agent-teams progress out of the main transcript to avoid spam when models
+        // repeatedly call `wait`. Use the status indicator line as the compact surface.
+        self.bottom_pane.ensure_status_indicator();
+        if let Some(status) = self.bottom_pane.status_widget_mut() {
+          let preview = multi_agents::waiting_preview(e);
+          // Tradeoff: inline_message is the only stable "updatable" surface we currently
+          // have without introducing editable history cells.
+          let inline = if preview.receiver_count > 0 {
+            format!("{} agents launched (/agent 展开)", preview.receiver_count)
+          } else {
+            "Waiting for agents (/agent 展开)".to_string()
+          };
+          status.update_inline_message(Some(inline));
+          if preview.details.is_some() {
+            status.update_details(preview.details);
+          }
         }
       }
-      EventMsg::CollabWaitingEnd(_) => {
-        if let EventMsg::CollabWaitingEnd(e) = event {
-          self.add_to_history(multi_agents::waiting_end(e.clone()));
+      EventMsg::CollabWaitingEnd(e) => {
+        if let Some(status) = self.bottom_pane.status_widget_mut() {
+          status.update_inline_message(None);
+          // If we set details for agent teams, clear them on completion so exec/tool
+          // details do not get stuck behind a finished wait.
+          status.update_details(None);
         }
+
+        let fingerprint = wait_end_fingerprint(e);
+        if self.session.last_wait_end_fingerprint == Some(fingerprint) {
+          return true;
+        }
+        self.session.last_wait_end_fingerprint = Some(fingerprint);
+        self.add_to_history(multi_agents::waiting_end(e.clone()));
       }
       EventMsg::CollabCloseBegin(_) => {}
       EventMsg::CollabCloseEnd(e) => {
@@ -234,5 +261,49 @@ impl ChatWidget {
     }
 
     true
+  }
+}
+
+fn wait_end_fingerprint(ev: &cokra_protocol::CollabWaitingEndEvent) -> u64 {
+  let mut entries = ev.agent_statuses.clone();
+  entries.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+
+  let mut hasher = DefaultHasher::new();
+  if entries.is_empty() {
+    // Defensive fallback: some producers may only fill `statuses`.
+    let mut pairs = ev.statuses.iter().collect::<Vec<_>>();
+    pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (thread_id, status) in pairs {
+      thread_id.hash(&mut hasher);
+      hash_agent_status(status, &mut hasher);
+    }
+  } else {
+    for entry in entries {
+      entry.thread_id.hash(&mut hasher);
+      entry.nickname.hash(&mut hasher);
+      entry.role.hash(&mut hasher);
+      hash_agent_status(&entry.status, &mut hasher);
+    }
+  }
+  hasher.finish()
+}
+
+fn hash_agent_status(status: &cokra_protocol::AgentStatus, hasher: &mut DefaultHasher) {
+  match status {
+    cokra_protocol::AgentStatus::PendingInit => "PendingInit".hash(hasher),
+    cokra_protocol::AgentStatus::Running => "Running".hash(hasher),
+    cokra_protocol::AgentStatus::Completed(message) => {
+      "Completed".hash(hasher);
+      // Tradeoff: hash the full message string so repeated `wait` calls that return the
+      // same content dedupe correctly. This can cost some CPU for very large outputs,
+      // but keeps UI stable and avoids hiding real changes.
+      message.hash(hasher);
+    }
+    cokra_protocol::AgentStatus::Errored(message) => {
+      "Errored".hash(hasher);
+      message.hash(hasher);
+    }
+    cokra_protocol::AgentStatus::Shutdown => "Shutdown".hash(hasher),
+    cokra_protocol::AgentStatus::NotFound => "NotFound".hash(hasher),
   }
 }

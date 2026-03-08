@@ -35,6 +35,8 @@ use super::executor::TurnConfig;
 use super::executor::TurnError;
 use super::executor::TurnResult;
 use super::response_items::ResponseItem;
+use super::text_function_calls::FunctionCallsTextFilter;
+use super::text_function_calls::parse_text_function_calls;
 
 #[derive(Debug)]
 struct SamplingRequestResult {
@@ -127,6 +129,7 @@ impl SseTurnExecutor {
       .map_err(map_stream_model_error)?;
     let mut assistant_delta = String::new();
     let mut function_calls: Vec<FunctionCallEvent> = Vec::new();
+    let mut text_filter = FunctionCallsTextFilter::new();
 
     loop {
       let event = tokio::select! {
@@ -144,13 +147,17 @@ impl SseTurnExecutor {
             continue;
           }
           assistant_delta.push_str(&delta.text);
+          let visible = text_filter.filter_visible(&delta.text);
+          if visible.is_empty() {
+            continue;
+          }
           self
             .send_event(EventMsg::AgentMessageContentDelta(
               AgentMessageContentDeltaEvent {
                 thread_id: thread_id.to_string(),
                 turn_id: turn_id.to_string(),
                 item_id: item_id.to_string(),
-                delta: delta.text,
+                delta: visible,
               },
             ))
             .await?;
@@ -285,8 +292,8 @@ impl SseTurnExecutor {
         .await?;
 
       let SamplingRequestResult {
-        assistant_delta,
-        function_calls,
+        mut assistant_delta,
+        mut function_calls,
       } = self
         .run_sampling_request(
           messages.clone(),
@@ -296,6 +303,17 @@ impl SseTurnExecutor {
           turn_cancellation.child_token(),
         )
         .await?;
+
+      if function_calls.is_empty()
+        && self.config.enable_tools
+        && assistant_delta.contains("<function_calls>")
+      {
+        let parsed = parse_text_function_calls(&assistant_delta);
+        if !parsed.calls.is_empty() {
+          assistant_delta = parsed.visible_text;
+          function_calls = parsed.calls;
+        }
+      }
 
       if !assistant_delta.is_empty() {
         final_content.push_str(&assistant_delta);
