@@ -1445,6 +1445,7 @@ mod tests {
                   })
                   .to_string(),
                 },
+                provider_meta: None,
               }]),
             },
             finish_reason: Some("tool_calls".to_string()),
@@ -1510,6 +1511,7 @@ mod tests {
               id: Some("call_read_1".to_string()),
               name: Some("read_file".to_string()),
               arguments: Some(arguments),
+              thought_signature: None,
             },
           }),
           Ok(Chunk::MessageStop),
@@ -1639,6 +1641,7 @@ mod tests {
                   })
                   .to_string(),
                 },
+                provider_meta: None,
               }]),
             },
             finish_reason: Some("tool_calls".to_string()),
@@ -1708,6 +1711,7 @@ mod tests {
               id: Some("call_write_1".to_string()),
               name: Some("write_file".to_string()),
               arguments: Some(arguments),
+              thought_signature: None,
             },
           }),
           Ok(Chunk::MessageStop),
@@ -1845,6 +1849,7 @@ mod tests {
                   })
                   .to_string(),
                 },
+                provider_meta: None,
               }]),
             },
             finish_reason: Some("tool_calls".to_string()),
@@ -1936,6 +1941,7 @@ mod tests {
               id: Some("call_input_1".to_string()),
               name: Some("request_user_input".to_string()),
               arguments: Some(arguments),
+              thought_signature: None,
             },
           }),
           Ok(Chunk::MessageStop),
@@ -2228,6 +2234,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_spawn_agent_respects_max_threads_limit() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
     let mut config = cokra_config::ConfigLoader::default()
       .load_with_cli_overrides(vec![])
       .expect("load config");
@@ -2235,6 +2242,7 @@ mod tests {
     config.models.model = "mock/default".to_string();
     config.approval.policy = ApprovalMode::Auto;
     config.agents.max_threads = 1;
+    config.cwd = tmpdir.path().to_path_buf();
 
     let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
       .await
@@ -2272,12 +2280,14 @@ mod tests {
 
   #[tokio::test]
   async fn test_spawn_agent_wait_and_close_round_trip() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
     let mut config = cokra_config::ConfigLoader::default()
       .load_with_cli_overrides(vec![])
       .expect("load config");
     config.models.provider = "mock".to_string();
     config.models.model = "mock/default".to_string();
     config.approval.policy = ApprovalMode::Auto;
+    config.cwd = tmpdir.path().to_path_buf();
 
     let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
       .await
@@ -2294,6 +2304,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("spawn tool should succeed");
@@ -2317,6 +2328,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("wait tool should succeed");
@@ -2335,6 +2347,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("close tool should succeed");
@@ -2369,6 +2382,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("spawn tool should succeed");
@@ -2387,6 +2401,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("wait should succeed");
@@ -2404,6 +2419,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("create task should succeed");
@@ -2423,6 +2439,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("send team message should succeed");
@@ -2461,6 +2478,7 @@ mod tests {
           name: "team_status".to_string(),
           arguments: "{}".to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("team status should succeed");
@@ -2507,6 +2525,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("create task");
@@ -2524,6 +2543,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("send message");
@@ -2541,6 +2561,7 @@ mod tests {
           name: "team_status".to_string(),
           arguments: "{}".to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("team status");
@@ -2552,7 +2573,8 @@ mod tests {
         .any(|item| item.title == "Persistent task")
     );
     let current_root = restored.thread_id().expect("thread id").to_string();
-    assert_eq!(snapshot.unread_counts.get(&current_root), Some(&1usize));
+    // Root thread authored the message; unread counts should remain stable across restarts.
+    assert_eq!(snapshot.unread_counts.get(&current_root), Some(&0usize));
   }
 
   #[tokio::test]
@@ -2580,6 +2602,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("create temp task");
@@ -2591,6 +2614,7 @@ mod tests {
           name: "cleanup_team".to_string(),
           arguments: "{}".to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("cleanup team");
@@ -2607,6 +2631,7 @@ mod tests {
           name: "team_status".to_string(),
           arguments: "{}".to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("team status");
@@ -2642,6 +2667,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("create task");
@@ -2659,6 +2685,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("claim task");
@@ -2702,6 +2729,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("spawn");
@@ -2719,6 +2747,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("wait");
@@ -2764,6 +2793,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("approve plan");
@@ -2804,6 +2834,7 @@ mod tests {
           name: "spawn_agent".to_string(),
           arguments: serde_json::json!({"task": "You are teammate alex."}).to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("spawn");
@@ -2818,6 +2849,7 @@ mod tests {
           arguments: serde_json::json!({"agent_ids": [agent_id.clone()], "timeout_ms": 10000})
             .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("wait");
@@ -2834,6 +2866,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("channel send");
@@ -2864,6 +2897,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("queue send");
@@ -2906,6 +2940,7 @@ mod tests {
           name: "spawn_agent".to_string(),
           arguments: serde_json::json!({"task": "You are teammate alex."}).to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("spawn");
@@ -2920,6 +2955,7 @@ mod tests {
           arguments: serde_json::json!({"agent_ids": [alex_id.clone()], "timeout_ms": 10000})
             .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("wait");
@@ -2932,6 +2968,7 @@ mod tests {
           name: "create_team_task".to_string(),
           arguments: serde_json::json!({"title": "Implement feature"}).to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("create");
@@ -2949,6 +2986,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("assign");
@@ -2967,6 +3005,7 @@ mod tests {
           })
           .to_string(),
         },
+        provider_meta: None,
       })
       .await
       .expect("handoff");

@@ -482,6 +482,7 @@ mod tests {
           id: Some("call_1".to_string()),
           name: Some("read_file".to_string()),
           arguments: Some("{\"file_path\":\"a.txt\"}".to_string()),
+          thought_signature: None,
         },
       }),
       Ok(Chunk::MessageStop),

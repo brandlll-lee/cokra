@@ -793,6 +793,7 @@ mod tests {
             name: "read_file".to_string(),
             arguments: "{}".to_string(),
           },
+          provider_meta: None,
         }]),
       }],
       ..Default::default()
