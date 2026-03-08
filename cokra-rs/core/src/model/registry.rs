@@ -378,7 +378,9 @@ impl ProviderRegistry {
   }
 
   pub async fn list_connected_models_catalog(&self) -> Vec<ProviderInfo> {
-    let models_dev_db = self.models_dev.get().await.unwrap_or_default();
+    // Tradeoff: use cached models.dev data to keep the TUI responsive; a background
+    // refresh will warm the cache if it's missing.
+    let models_dev_db = self.models_dev.get_cached_or_refresh().await.unwrap_or_default();
     let connected = self
       .list_connect_catalog()
       .await
@@ -395,53 +397,22 @@ impl ProviderRegistry {
         continue;
       };
 
-      // Prefer runtime provider live model list when wired; otherwise fall back to
-      // connect-catalog defaults so connected-but-not-wired providers still show up.
+      // Tradeoff: opening "Available Models" must not trigger network calls or OAuth refresh.
+      // We rely on models.dev cache first, then fall back to connect defaults.
       let (models, is_live) = if entry.supports_model_runtime() {
-        let runtime = {
-          let providers = self.providers.read().await;
-          providers.get(&model_provider_id).cloned()
-        };
-        match runtime {
-          Some(runtime) => match runtime.list_models().await {
-            Ok(response) if !response.data.is_empty() => {
-              (response.data.into_iter().map(|m| m.id).collect(), true)
-            }
-            _ => {
-              // Fall back to models.dev (try runtime provider id first, then connect provider id).
-              let mdev = models_dev_db
-                .get(model_provider_id.as_str())
-                .or_else(|| models_dev_db.get(provider.id.as_str()));
-              if let Some(mdev) = mdev {
-                let mut models: Vec<String> = mdev.models.keys().cloned().collect();
-                models.sort();
-                if !models.is_empty() {
-                  (models, false)
-                } else {
-                  (provider.models, false)
-                }
-              } else {
-                (provider.models, false)
-              }
-            }
-          },
-          None => {
-            // Not wired (yet): use models.dev when available, otherwise connect defaults.
-            let mdev = models_dev_db
-              .get(model_provider_id.as_str())
-              .or_else(|| models_dev_db.get(provider.id.as_str()));
-            if let Some(mdev) = mdev {
-              let mut models: Vec<String> = mdev.models.keys().cloned().collect();
-              models.sort();
-              if !models.is_empty() {
-                (models, false)
-              } else {
-                (provider.models, false)
-              }
-            } else {
-              (provider.models, false)
-            }
+        let mdev = models_dev_db
+          .get(model_provider_id.as_str())
+          .or_else(|| models_dev_db.get(provider.id.as_str()));
+        if let Some(mdev) = mdev {
+          let mut models: Vec<String> = mdev.models.keys().cloned().collect();
+          models.sort();
+          if !models.is_empty() {
+            (models, false)
+          } else {
+            (provider.models, false)
           }
+        } else {
+          (provider.models, false)
         }
       } else {
         (provider.models, false)

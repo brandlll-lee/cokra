@@ -341,7 +341,8 @@ impl App {
           .add_to_history(PlainHistoryCell::new(vec![Line::from(
             format!("• Failed to wire provider runtime for {provider_id}: {err}").red(),
           )]));
-        return Ok(());
+        // Tradeoff: don't early-return here; if wiring fails we still want to fall back
+        // to the provider's connect flow so users can re-auth / reconfigure in-TUI.
       }
     }
 

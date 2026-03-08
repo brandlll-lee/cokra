@@ -109,6 +109,7 @@ pub struct ModelsDevClient {
   cache_path: PathBuf,
   data: Arc<RwLock<Option<ModelsDevDatabase>>>,
   client: reqwest::Client,
+  refresh_started: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for ModelsDevClient {
@@ -131,6 +132,7 @@ impl ModelsDevClient {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new()),
+      refresh_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
   }
 
@@ -178,6 +180,63 @@ impl ModelsDevClient {
         Ok(HashMap::new())
       }
     }
+  }
+
+  /// Cached-only models.dev lookup for latency-sensitive UI paths.
+  ///
+  /// This method never blocks on network I/O. If there is no in-memory or disk
+  /// cache, it triggers a best-effort background refresh and returns an empty DB.
+  pub async fn get_cached_or_refresh(&self) -> Result<ModelsDevDatabase> {
+    // Return cached data if available
+    {
+      let data = self.data.read().await;
+      if let Some(db) = data.as_ref() {
+        return Ok(db.clone());
+      }
+    }
+
+    // Try loading from disk cache
+    if let Ok(contents) = tokio::fs::read_to_string(&self.cache_path).await
+      && let Ok(db) = serde_json::from_str::<ModelsDevDatabase>(&contents)
+      && !db.is_empty()
+    {
+      let mut data = self.data.write().await;
+      *data = Some(db.clone());
+      return Ok(db);
+    }
+
+    // Tradeoff: return immediately instead of blocking the TUI on a network fetch.
+    // The background refresh warms the cache for the next open.
+    self.spawn_refresh_if_needed();
+    Ok(HashMap::new())
+  }
+
+  fn spawn_refresh_if_needed(&self) {
+    use std::sync::atomic::Ordering;
+
+    if self
+      .refresh_started
+      .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+      .is_err()
+    {
+      return;
+    }
+
+    // We clone the minimal state needed for a refresh task.
+    let cache_path = self.cache_path.clone();
+    let data = Arc::clone(&self.data);
+    let client = self.client.clone();
+    let refresh_started = Arc::clone(&self.refresh_started);
+
+    tokio::spawn(async move {
+      let refresh_client = ModelsDevClient {
+        cache_path,
+        data,
+        client,
+        refresh_started,
+      };
+      let _ = refresh_client.refresh().await;
+    });
   }
 
   /// 1:1 opencode ModelsDev.refresh: fetch latest data from API and update cache

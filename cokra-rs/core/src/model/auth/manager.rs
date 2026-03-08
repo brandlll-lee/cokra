@@ -299,10 +299,9 @@ impl AuthManager {
               Some(&stored),
             )?
             .ok_or_else(|| {
-              AuthError::OAuthError(format!(
-                "OAuth refresh is not configured for provider {}",
-                provider_id
-              ))
+              // Tradeoff: treat missing refresh client config as "token expired" so callers
+              // can fall back to re-auth/connect flows instead of hard-failing.
+              AuthError::TokenExpired(provider.clone())
             })?
           } else {
             Self::oauth_config_for_provider(provider_id, None, None)?

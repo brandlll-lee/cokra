@@ -150,7 +150,15 @@ impl ProviderAuth {
 
     let auth = AuthManager::new();
     let stored = match &auth {
-      Ok(auth) => auth.load_for_runtime_registration(entry.id).await?,
+      Ok(auth) => match auth.load_for_runtime_registration(entry.id).await {
+        Ok(stored) => stored,
+        Err(AuthError::TokenExpired(_)) => {
+          // Tradeoff: runtime wiring is best-effort; if OAuth cannot be refreshed,
+          // let the caller fall back to the provider's connect flow.
+          return Ok(false);
+        }
+        Err(err) => return Err(err.into()),
+      },
       Err(_) => None,
     };
     let Some(stored) = stored else {
