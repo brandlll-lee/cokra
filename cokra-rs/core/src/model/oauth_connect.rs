@@ -1,7 +1,9 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use std::collections::HashMap;
 use std::error::Error as _;
+use std::path::PathBuf;
 
 use reqwest::Url;
 use serde::Deserialize;
@@ -338,32 +340,189 @@ const GOOGLE_ANTIGRAVITY_SCOPES: &[&str] = &[
   "https://www.googleapis.com/auth/experimentsandconfigs",
 ];
 
-fn env_required(name: &'static str) -> Result<String, AuthError> {
-  std::env::var(name).map_err(|_| {
+const OAUTH_CLIENTS_FILE_NAME: &str = "oauth_clients.json";
+
+#[derive(Debug, Deserialize)]
+struct OAuthClientFileEntry {
+  #[serde(default)]
+  client_id: Option<String>,
+  #[serde(default)]
+  client_secret: Option<String>,
+  #[serde(default)]
+  client_id_b64: Option<String>,
+  #[serde(default)]
+  client_secret_b64: Option<String>,
+}
+
+fn env_optional(name: &'static str) -> Option<String> {
+  std::env::var(name)
+    .ok()
+    .filter(|value| !value.trim().is_empty())
+}
+
+fn oauth_clients_file_path() -> Option<PathBuf> {
+  let home = dirs::home_dir()?;
+  Some(home.join(".cokra").join(OAUTH_CLIENTS_FILE_NAME))
+}
+
+fn parse_oauth_client_entry(
+  entry: &OAuthClientFileEntry,
+) -> Result<Option<(String, Option<String>)>, AuthError> {
+  let mut client_id = entry
+    .client_id
+    .as_ref()
+    .map(|v| v.trim().to_string())
+    .filter(|v| !v.is_empty());
+
+  if client_id.is_none() {
+    if let Some(b64) = entry
+      .client_id_b64
+      .as_deref()
+      .map(str::trim)
+      .filter(|v| !v.is_empty())
+    {
+      client_id = Some(decode_b64(b64)?);
+    }
+  }
+
+  let mut client_secret = entry
+    .client_secret
+    .as_ref()
+    .map(|v| v.trim().to_string())
+    .filter(|v| !v.is_empty());
+
+  if client_secret.is_none() {
+    if let Some(b64) = entry
+      .client_secret_b64
+      .as_deref()
+      .map(str::trim)
+      .filter(|v| !v.is_empty())
+    {
+      client_secret = Some(decode_b64(b64)?);
+    }
+  }
+
+  let Some(client_id) = client_id else {
+    return Ok(None);
+  };
+  Ok(Some((client_id, client_secret)))
+}
+
+fn load_oauth_clients_from_file() -> Result<HashMap<String, OAuthClientFileEntry>, AuthError> {
+  let Some(path) = oauth_clients_file_path() else {
+    return Ok(HashMap::new());
+  };
+  if !path.exists() {
+    return Ok(HashMap::new());
+  }
+  let content = std::fs::read_to_string(&path).map_err(|e| {
     AuthError::OAuthError(format!(
-      "missing OAuth client configuration: set {name} in your environment"
+      "failed to read OAuth clients file {}: {e}",
+      path.display()
+    ))
+  })?;
+  if content.trim().is_empty() {
+    return Ok(HashMap::new());
+  }
+  serde_json::from_str::<HashMap<String, OAuthClientFileEntry>>(&content).map_err(|e| {
+    AuthError::OAuthError(format!(
+      "failed to parse OAuth clients file {}: {e}",
+      path.display()
     ))
   })
 }
 
-fn env_optional(name: &'static str) -> Option<String> {
-  std::env::var(name).ok().filter(|value| !value.trim().is_empty())
+fn oauth_client_from_metadata(metadata: &Value) -> Option<(String, Option<String>)> {
+  let client_id = metadata
+    .get("oauth_client_id")
+    .and_then(Value::as_str)
+    .map(str::trim)
+    .filter(|v| !v.is_empty())
+    .map(ToString::to_string)?;
+
+  let client_secret = metadata
+    .get("oauth_client_secret")
+    .and_then(Value::as_str)
+    .map(str::trim)
+    .filter(|v| !v.is_empty())
+    .map(ToString::to_string);
+
+  Some((client_id, client_secret))
 }
 
-fn google_oauth_client(kind: OAuthProviderKind) -> Result<(String, Option<String>), AuthError> {
-  match kind {
-    OAuthProviderKind::GoogleGeminiCli => Ok((
-      env_required(ENV_GOOGLE_GEMINI_CLIENT_ID)?,
-      env_optional(ENV_GOOGLE_GEMINI_CLIENT_SECRET),
-    )),
-    OAuthProviderKind::GoogleAntigravity => Ok((
-      env_required(ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID)?,
-      env_optional(ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET),
-    )),
-    _ => Err(AuthError::OAuthError(
-      "provider is not a Google OAuth flow".to_string(),
-    )),
+fn google_oauth_client_optional(
+  kind: OAuthProviderKind,
+  stored: Option<&StoredCredentials>,
+) -> Result<Option<(String, Option<String>)>, AuthError> {
+  let (provider_id, env_id, env_secret) = match kind {
+    OAuthProviderKind::GoogleGeminiCli => (
+      "google-gemini-cli",
+      ENV_GOOGLE_GEMINI_CLIENT_ID,
+      ENV_GOOGLE_GEMINI_CLIENT_SECRET,
+    ),
+    OAuthProviderKind::GoogleAntigravity => (
+      "google-antigravity",
+      ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID,
+      ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET,
+    ),
+    _ => {
+      return Err(AuthError::OAuthError(
+        "provider is not a Google OAuth flow".to_string(),
+      ));
+    }
+  };
+
+  // 1) Env vars (explicit and immediate)
+  if let Some(client_id) = env_optional(env_id) {
+    return Ok(Some((client_id, env_optional(env_secret))));
   }
+
+  // 2) Local oauth_clients.json (~/.cokra/oauth_clients.json). This matches pi-mono's
+  // "works out of the box" behavior without committing secrets into the repository.
+  let map = load_oauth_clients_from_file()?;
+  if let Some(entry) = map.get(provider_id) {
+    if let Some(pair) = parse_oauth_client_entry(entry)? {
+      return Ok(Some(pair));
+    }
+  }
+
+  // 3) Stored metadata fallback (post-connect refresh parity without requiring env vars).
+  if let Some(stored) = stored {
+    if let Some(pair) = oauth_client_from_metadata(&stored.metadata) {
+      return Ok(Some(pair));
+    }
+  }
+
+  Ok(None)
+}
+
+fn google_oauth_client(
+  kind: OAuthProviderKind,
+  stored: Option<&StoredCredentials>,
+) -> Result<(String, Option<String>), AuthError> {
+  let (provider_id, env_id, env_secret) = match kind {
+    OAuthProviderKind::GoogleGeminiCli => (
+      "google-gemini-cli",
+      ENV_GOOGLE_GEMINI_CLIENT_ID,
+      ENV_GOOGLE_GEMINI_CLIENT_SECRET,
+    ),
+    OAuthProviderKind::GoogleAntigravity => (
+      "google-antigravity",
+      ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID,
+      ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET,
+    ),
+    _ => {
+      return Err(AuthError::OAuthError(
+        "provider is not a Google OAuth flow".to_string(),
+      ));
+    }
+  };
+
+  google_oauth_client_optional(kind, stored)?.ok_or_else(|| {
+    AuthError::OAuthError(format!(
+      "missing OAuth client configuration for {provider_id}: set {env_id} (and optionally {env_secret}) or provide ~/.cokra/{OAUTH_CLIENTS_FILE_NAME}"
+    ))
+  })
 }
 
 const CALLBACK_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
@@ -416,7 +575,7 @@ pub async fn start_oauth_connect(
     OAuthProviderKind::Anthropic => start_anthropic_connect(provider_id, provider_name),
     OAuthProviderKind::OpenAICodex => start_openai_codex_connect(provider_id, provider_name),
     OAuthProviderKind::GoogleGeminiCli => {
-      let (client_id, _secret) = google_oauth_client(OAuthProviderKind::GoogleGeminiCli)?;
+      let (client_id, _secret) = google_oauth_client(OAuthProviderKind::GoogleGeminiCli, None)?;
       start_google_connect(
         provider_id,
         provider_name,
@@ -428,7 +587,7 @@ pub async fn start_oauth_connect(
       )
     }
     OAuthProviderKind::GoogleAntigravity => {
-      let (client_id, _secret) = google_oauth_client(OAuthProviderKind::GoogleAntigravity)?;
+      let (client_id, _secret) = google_oauth_client(OAuthProviderKind::GoogleAntigravity, None)?;
       start_google_connect(
         provider_id,
         provider_name,
@@ -455,7 +614,8 @@ pub async fn complete_oauth_connect(
       complete_openai_codex_connect(pending, input.unwrap_or_default()).await
     }
     OAuthProviderKind::GoogleGeminiCli => {
-      let (client_id, client_secret) = google_oauth_client(OAuthProviderKind::GoogleGeminiCli)?;
+      let (client_id, client_secret) =
+        google_oauth_client(OAuthProviderKind::GoogleGeminiCli, None)?;
       complete_google_connect(
         pending,
         input.unwrap_or_default(),
@@ -468,7 +628,8 @@ pub async fn complete_oauth_connect(
       .await
     }
     OAuthProviderKind::GoogleAntigravity => {
-      let (client_id, client_secret) = google_oauth_client(OAuthProviderKind::GoogleAntigravity)?;
+      let (client_id, client_secret) =
+        google_oauth_client(OAuthProviderKind::GoogleAntigravity, None)?;
       complete_google_connect(
         pending,
         input.unwrap_or_default(),
@@ -489,6 +650,13 @@ pub fn uses_local_callback(kind: OAuthProviderKind) -> bool {
 
 pub fn oauth_refresh_config_for_provider(
   provider_id: &str,
+) -> Result<Option<OAuthConfig>, AuthError> {
+  oauth_refresh_config_for_provider_with_stored(provider_id, None)
+}
+
+pub fn oauth_refresh_config_for_provider_with_stored(
+  provider_id: &str,
+  stored: Option<&StoredCredentials>,
 ) -> Result<Option<OAuthConfig>, AuthError> {
   let config = match provider_id {
     "anthropic-oauth" => Some(OAuthConfig {
@@ -516,34 +684,38 @@ pub fn oauth_refresh_config_for_provider(
       redirect_uri: OPENAI_REDIRECT_URI.to_string(),
     }),
     "google-gemini-cli" => {
-      let client_id = env_optional(ENV_GOOGLE_GEMINI_CLIENT_ID);
-      client_id.map(|client_id| OAuthConfig {
-        provider_id: provider_id.to_string(),
-        client_id,
-        client_secret: env_optional(ENV_GOOGLE_GEMINI_CLIENT_SECRET),
-        auth_url: GOOGLE_GEMINI_AUTH_URL.to_string(),
-        token_url: GOOGLE_GEMINI_TOKEN_URL.to_string(),
-        scopes: GOOGLE_GEMINI_SCOPES
-          .iter()
-          .map(|scope| (*scope).to_string())
-          .collect(),
-        redirect_uri: GOOGLE_GEMINI_REDIRECT_URI.to_string(),
-      })
+      match google_oauth_client_optional(OAuthProviderKind::GoogleGeminiCli, stored)? {
+        Some((client_id, client_secret)) => Some(OAuthConfig {
+          provider_id: provider_id.to_string(),
+          client_id,
+          client_secret,
+          auth_url: GOOGLE_GEMINI_AUTH_URL.to_string(),
+          token_url: GOOGLE_GEMINI_TOKEN_URL.to_string(),
+          scopes: GOOGLE_GEMINI_SCOPES
+            .iter()
+            .map(|scope| (*scope).to_string())
+            .collect(),
+          redirect_uri: GOOGLE_GEMINI_REDIRECT_URI.to_string(),
+        }),
+        None => None,
+      }
     }
     "google-antigravity" => {
-      let client_id = env_optional(ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID);
-      client_id.map(|client_id| OAuthConfig {
-        provider_id: provider_id.to_string(),
-        client_id,
-        client_secret: env_optional(ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET),
-        auth_url: GOOGLE_ANTIGRAVITY_AUTH_URL.to_string(),
-        token_url: GOOGLE_ANTIGRAVITY_TOKEN_URL.to_string(),
-        scopes: GOOGLE_ANTIGRAVITY_SCOPES
-          .iter()
-          .map(|scope| (*scope).to_string())
-          .collect(),
-        redirect_uri: GOOGLE_ANTIGRAVITY_REDIRECT_URI.to_string(),
-      })
+      match google_oauth_client_optional(OAuthProviderKind::GoogleAntigravity, stored)? {
+        Some((client_id, client_secret)) => Some(OAuthConfig {
+          provider_id: provider_id.to_string(),
+          client_id,
+          client_secret,
+          auth_url: GOOGLE_ANTIGRAVITY_AUTH_URL.to_string(),
+          token_url: GOOGLE_ANTIGRAVITY_TOKEN_URL.to_string(),
+          scopes: GOOGLE_ANTIGRAVITY_SCOPES
+            .iter()
+            .map(|scope| (*scope).to_string())
+            .collect(),
+          redirect_uri: GOOGLE_ANTIGRAVITY_REDIRECT_URI.to_string(),
+        }),
+        None => None,
+      }
     }
     _ => None,
   };
@@ -1010,15 +1182,21 @@ async fn complete_google_connect(
     discover_google_project(&client, &token.access_token).await
   };
 
+  let mut metadata = serde_json::json!({
+    "email": email,
+    "project_id": project_id,
+    "oauth_client_id": client_id,
+  });
+  if let Some(secret) = client_secret {
+    metadata["oauth_client_secret"] = Value::String(secret);
+  }
+
   Ok(oauth_stored_credentials(
     &pending.provider_id,
     token,
     None,
     None,
-    serde_json::json!({
-      "email": email,
-      "project_id": project_id,
-    }),
+    metadata,
   ))
 }
 
@@ -2047,5 +2225,33 @@ mod tests {
 
     assert_eq!(info.account_id.as_deref(), Some("org_fallback"));
     assert_eq!(info.organization_id.as_deref(), Some("org_fallback"));
+  }
+
+  #[test]
+  fn google_refresh_config_can_use_stored_oauth_client_metadata() {
+    let mut stored = StoredCredentials::new(
+      "google-antigravity",
+      Credentials::OAuth {
+        access_token: "oauth-access".to_string(),
+        refresh_token: "oauth-refresh".to_string(),
+        expires_at: chrono::Utc::now().timestamp() as u64 + 60,
+        account_id: None,
+        enterprise_url: None,
+      },
+    );
+    stored.metadata = serde_json::json!({
+      "oauth_client_id": "client-id-from-metadata",
+      "oauth_client_secret": "client-secret-from-metadata",
+    });
+
+    let cfg = oauth_refresh_config_for_provider_with_stored("google-antigravity", Some(&stored))
+      .expect("config resolution")
+      .expect("oauth config");
+
+    assert_eq!(cfg.client_id, "client-id-from-metadata");
+    assert_eq!(
+      cfg.client_secret.as_deref(),
+      Some("client-secret-from-metadata")
+    );
   }
 }

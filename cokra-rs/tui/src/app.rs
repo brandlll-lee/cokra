@@ -1994,9 +1994,8 @@ impl App {
           dismiss_on_select: true,
           search_value: Some(model_id),
           is_disabled: !is_runtime_ready,
-          disabled_reason: (!is_runtime_ready).then_some(
-            "Model runtime is not wired yet for this provider.".to_string(),
-          ),
+          disabled_reason: (!is_runtime_ready)
+            .then_some("Model runtime is not wired yet for this provider.".to_string()),
           ..Default::default()
         });
       }

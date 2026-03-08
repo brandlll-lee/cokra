@@ -495,9 +495,11 @@ async fn infer_root_thread_id_from_team_state(
     return Ok(None);
   };
 
-  Ok(team_state
-    .likely_root_thread_id()
-    .and_then(|id| ThreadId::parse(&id)))
+  Ok(
+    team_state
+      .likely_root_thread_id()
+      .and_then(|id| ThreadId::parse(&id)),
+  )
 }
 
 fn build_turn_config(config: &Config) -> TurnConfig {

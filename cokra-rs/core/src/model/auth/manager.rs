@@ -228,7 +228,21 @@ impl AuthManager {
           if refresh_token.is_empty() {
             return Err(AuthError::TokenExpired(provider));
           }
-          let config = Self::oauth_config_for_provider(provider_id, None, None)?;
+          let config = if provider_id == "google-gemini-cli" || provider_id == "google-antigravity"
+          {
+            crate::model::oauth_connect::oauth_refresh_config_for_provider_with_stored(
+              provider_id,
+              Some(&stored),
+            )?
+            .ok_or_else(|| {
+              AuthError::OAuthError(format!(
+                "OAuth refresh is not configured for provider {}",
+                provider_id
+              ))
+            })?
+          } else {
+            Self::oauth_config_for_provider(provider_id, None, None)?
+          };
           let oauth = OAuthManager::new(self.storage.clone());
           oauth.refresh_token(&config, refresh_token).await?;
           if let Some(updated) = self.storage.load(provider_id).await? {
