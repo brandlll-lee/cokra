@@ -218,6 +218,56 @@ impl AuthManager {
       .await?
       .ok_or_else(|| AuthError::NotFound(provider.clone()))?;
 
+    // GitHub Copilot OAuth: refresh token is the GitHub access token; access token is the
+    // Copilot token obtained via `copilot_internal/v2/token` (pi-mono parity).
+    if provider_id == "github-copilot" || provider_id == "github-copilot-enterprise" {
+      match &stored.credentials {
+        Credentials::OAuth {
+          refresh_token,
+          enterprise_url,
+          ..
+        } => {
+          if refresh_token.is_empty() {
+            return Err(AuthError::TokenExpired(provider));
+          }
+
+          let (access_token, expires_at) =
+            crate::model::oauth_connect::refresh_github_copilot_token(
+              refresh_token,
+              enterprise_url.as_deref(),
+            )
+            .await?;
+
+          let base_url = crate::model::oauth_connect::get_github_copilot_base_url(
+            Some(&access_token),
+            enterprise_url.as_deref(),
+          );
+
+          let mut updated = stored.clone();
+          updated.credentials = Credentials::OAuth {
+            access_token,
+            refresh_token: refresh_token.clone(),
+            expires_at,
+            account_id: None,
+            enterprise_url: enterprise_url.clone(),
+          };
+          if updated.metadata.is_object() {
+            updated.metadata["base_url"] = serde_json::Value::String(base_url);
+          } else {
+            updated.metadata = serde_json::json!({ "base_url": base_url });
+          }
+
+          self.storage.save(updated.clone()).await?;
+          return Ok(updated.credentials);
+        }
+        _ => {
+          return Err(AuthError::OAuthError(
+            "GitHub Copilot OAuth refresh requires OAuth credentials".to_string(),
+          ));
+        }
+      }
+    }
+
     match &stored.credentials {
       Credentials::OAuth {
         refresh_token,

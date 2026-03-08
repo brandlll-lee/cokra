@@ -34,6 +34,13 @@ pub struct GitHubCopilotProvider {
   oauth_mode: bool,
 }
 
+// GitHub Copilot headers (pi-mono parity).
+const COPILOT_HEADERS: [(&str, &str); 3] = [
+  ("Editor-Version", "vscode/1.107.0"),
+  ("Editor-Plugin-Version", "copilot-chat/0.35.0"),
+  ("Copilot-Integration-Id", "vscode-chat"),
+];
+
 impl GitHubCopilotProvider {
   /// Create a new GitHub Copilot provider with a token
   pub fn new(token: String, config: ProviderConfig) -> Self {
@@ -63,9 +70,18 @@ impl GitHubCopilotProvider {
       ));
     };
 
+    let base_url = stored
+      .metadata
+      .get("base_url")
+      .and_then(serde_json::Value::as_str)
+      .map(str::trim)
+      .filter(|value| !value.is_empty())
+      .map(ToString::to_string)
+      .unwrap_or_else(|| provider_base_url(&config, enterprise_url.as_deref()));
+
     Ok(Self {
       client: create_client(config.timeout),
-      base_url: provider_base_url(&config, enterprise_url.as_deref()),
+      base_url,
       config,
       token: access_token.clone(),
       use_responses_api: true,
@@ -93,11 +109,15 @@ impl GitHubCopilotProvider {
     let mut request = request.header("Authorization", self.auth_header()).header(
       "User-Agent",
       if self.oauth_mode {
-        "cokra/github-copilot-oauth"
+        "GitHubCopilotChat/0.35.0"
       } else {
         "cokra/github-copilot"
       },
     );
+
+    for (key, value) in COPILOT_HEADERS {
+      request = request.header(key, value);
+    }
 
     if self.oauth_mode {
       let initiator = input
@@ -308,7 +328,31 @@ impl ModelProvider for GitHubCopilotProvider {
   }
 
   async fn list_models(&self) -> Result<ListModelsResponse> {
-    // Return static list of known Copilot models
+    // Prefer live list from Copilot API (opencode parity: don't ship a stale hardcoded list).
+    let candidates = ["models", "v1/models"];
+    for path in candidates {
+      let url = self.endpoint(path);
+      let response = match self
+        .apply_headers(self.client.get(&url), None)
+        .header("Accept", "application/json")
+        .send()
+        .await
+      {
+        Ok(resp) => resp,
+        Err(_) => continue,
+      };
+
+      if response.status().is_success() {
+        // Try strict ListModelsResponse shape first.
+        if let Ok(parsed) = response.json::<ListModelsResponse>().await {
+          if !parsed.data.is_empty() {
+            return Ok(parsed);
+          }
+        }
+      }
+    }
+
+    // Fallback: static list of known Copilot models.
     Ok(ListModelsResponse {
       object_type: "list".to_string(),
       data: GITHUB_MODELS

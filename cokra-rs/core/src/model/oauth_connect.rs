@@ -1264,25 +1264,30 @@ async fn complete_github_copilot_connect(
     tokio::time::sleep(std::time::Duration::from_secs(wait_interval)).await;
   };
 
-  // Enable all GitHub Copilot models after successful login
   let enterprise_domain_ref = pending.enterprise_domain.as_deref();
+
+  // Exchange the GitHub access token for a Copilot token (pi-mono parity).
+  let (copilot_access_token, expires_at) =
+    refresh_github_copilot_token(&github_access_token, enterprise_domain_ref).await?;
+
+  // Enable all GitHub Copilot models after successful login.
   let enablement_results =
-    enable_all_github_copilot_models(&github_access_token, enterprise_domain_ref).await;
+    enable_all_github_copilot_models(&copilot_access_token, enterprise_domain_ref).await;
   let enabled_count = enablement_results
     .iter()
     .filter(|(_, success)| *success)
     .count();
 
-  // Extract base URL from token for future API calls
-  let base_url = get_github_copilot_base_url(Some(&github_access_token), enterprise_domain_ref);
+  // Extract base URL from the Copilot token for future API calls
+  let base_url = get_github_copilot_base_url(Some(&copilot_access_token), enterprise_domain_ref);
 
   Ok(
     StoredCredentials::new(
       pending.provider_id.clone(),
       Credentials::OAuth {
-        access_token: github_access_token.clone(),
+        access_token: copilot_access_token,
         refresh_token: github_access_token,
-        expires_at: u64::MAX.saturating_sub(1),
+        expires_at,
         account_id: None,
         enterprise_url: pending.enterprise_domain.clone(),
       },
