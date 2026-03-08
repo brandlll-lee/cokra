@@ -17,7 +17,9 @@ pub struct SendInputHandler;
 
 #[derive(Debug, Deserialize)]
 struct SendInputArgs {
+  #[serde(alias = "agent")]
   agent_id: String,
+  #[serde(alias = "input")]
   message: String,
 }
 

@@ -17,6 +17,7 @@ pub struct CloseAgentHandler;
 
 #[derive(Debug, Deserialize)]
 struct CloseAgentArgs {
+  #[serde(alias = "agent")]
   agent_id: String,
 }
 

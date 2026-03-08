@@ -729,6 +729,12 @@ fn build_spawned_agent_system_prompt(base: &str, nickname: Option<&str>, role: &
     "- Do not refuse a task solely because it is \"not a coding task\". Instead: do your best, be explicit about what you can verify locally, and list what would need external verification if required.\n",
   );
   out.push_str(
+    "- If the user question is general (not about this repository), answer directly without trying to force a workspace/code inspection first.\n",
+  );
+  out.push_str(
+    "- Do not invent product timelines, deprecations, pricing, or other time-sensitive facts. If you are unsure, say so and keep claims scoped.\n",
+  );
+  out.push_str(
     "- Keep outputs concise and oriented toward helping @main (key findings, clear recommendation, and any follow-up questions).\n",
   );
   out

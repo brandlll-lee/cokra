@@ -13,10 +13,14 @@ pub struct SpawnAgentHandler;
 
 #[derive(Debug, Deserialize)]
 struct SpawnAgentArgs {
+  #[serde(alias = "initial_task")]
   task: Option<String>,
+  #[serde(alias = "input")]
   message: Option<String>,
+  #[serde(alias = "name")]
   nickname: Option<String>,
   role: Option<String>,
+  #[serde(alias = "type")]
   agent_type: Option<String>,
 }
 

@@ -25,6 +25,7 @@ const MAX_WAIT_TIMEOUT_MS: i64 = 3_600_000;
 
 #[derive(Debug, Deserialize)]
 struct WaitArgs {
+  #[serde(alias = "agents")]
   agent_ids: Option<Vec<String>>,
   timeout_ms: Option<i64>,
 }
