@@ -26,6 +26,7 @@ use cokra_core::model::PluginRegistry;
 use cokra_core::model::ProviderAuth;
 use cokra_core::model::oauth_connect::OAuthConnectStart;
 use cokra_core::model::oauth_connect::PendingOAuthConnect;
+use cokra_core::model::provider::ProviderConnectMethod;
 use cokra_protocol::Event;
 use cokra_protocol::EventMsg;
 use cokra_protocol::ExecApprovalRequestEvent;
@@ -318,6 +319,52 @@ impl App {
     if has_provider {
       self.apply_model_selection(model_id).await?;
       return Ok(());
+    }
+
+    // Provider not wired yet: attempt a lazy runtime registration from stored
+    // connect-catalog credentials (pi-mono parity for connected providers).
+    match ProviderAuth::ensure_runtime_registered(
+      self.cokra.model_client().registry(),
+      self.cokra.config(),
+      &provider_id,
+    )
+    .await
+    {
+      Ok(true) => {
+        self.apply_model_selection(model_id).await?;
+        return Ok(());
+      }
+      Ok(false) => {}
+      Err(err) => {
+        self
+          .chat_widget
+          .add_to_history(PlainHistoryCell::new(vec![Line::from(
+            format!("• Failed to wire provider runtime for {provider_id}: {err}").red(),
+          )]));
+        return Ok(());
+      }
+    }
+
+    // Fallback: open the appropriate connect flow for this provider if known.
+    if let Some(entry) = PluginRegistry::find(&provider_id) {
+      match entry.connect_method {
+        ProviderConnectMethod::OAuth => {
+          // start_oauth_connect will surface any missing env/config as an in-TUI error.
+          if let Err(err) = self.start_oauth_connect(&provider_id).await {
+            self
+              .chat_widget
+              .add_to_history(PlainHistoryCell::new(vec![Line::from(
+                format!("• OAuth connect failed for {provider_id}: {err}").red(),
+              )]));
+          }
+          return Ok(());
+        }
+        ProviderConnectMethod::ApiKey => {
+          self.open_api_key_entry(provider_id, model_id, effort);
+          return Ok(());
+        }
+        ProviderConnectMethod::None => {}
+      }
     }
 
     self.open_api_key_entry(provider_id, model_id, effort);
@@ -1938,13 +1985,7 @@ impl App {
           .options
           .get("runtime_ready")
           .and_then(serde_json::Value::as_bool)
-          .unwrap_or(true)
-          && self
-            .cokra
-            .model_client()
-            .registry()
-            .has_provider(model_id.split('/').next().unwrap_or_default())
-            .await;
+          .unwrap_or(true);
         items.push(SelectionItem {
           name: model_id.clone(),
           description: (idx == 0).then_some(provider.name.clone()),
@@ -1954,7 +1995,7 @@ impl App {
           search_value: Some(model_id),
           is_disabled: !is_runtime_ready,
           disabled_reason: (!is_runtime_ready).then_some(
-            "Connected, but model runtime is not wired yet for this provider.".to_string(),
+            "Model runtime is not wired yet for this provider.".to_string(),
           ),
           ..Default::default()
         });

@@ -121,4 +121,56 @@ impl ProviderAuth {
       runtime_registered,
     })
   }
+
+  /// Ensure a connected (catalog) provider is registered in the runtime registry.
+  ///
+  /// The Connect catalog tracks authentication separately from the runtime provider
+  /// registry. For OAuth providers in particular, we want "connected" models to be
+  /// selectable immediately (pi-mono parity), and only wire the runtime provider
+  /// lazily when needed.
+  pub async fn ensure_runtime_registered(
+    registry: &ProviderRegistry,
+    config: &cokra_config::Config,
+    runtime_provider_id: &str,
+  ) -> Result<bool> {
+    if registry.has_provider(runtime_provider_id).await {
+      return Ok(true);
+    }
+
+    let entry = PluginRegistry::entries()
+      .into_iter()
+      .find(|entry| entry.runtime_provider_id == Some(runtime_provider_id))
+      .or_else(|| PluginRegistry::find(runtime_provider_id));
+    let Some(entry) = entry else {
+      return Ok(false);
+    };
+    if entry.runtime_registration == super::connect_catalog::RuntimeRegistrationKind::None {
+      return Ok(false);
+    }
+
+    let auth = AuthManager::new();
+    let stored = match &auth {
+      Ok(auth) => auth.load_for_runtime_registration(entry.id).await?,
+      Err(_) => None,
+    };
+    let Some(stored) = stored else {
+      return Ok(false);
+    };
+    let Some(token) = registration_token_for_stored(entry.runtime_registration, &stored) else {
+      return Ok(false);
+    };
+
+    register_provider_by_registration(
+      registry,
+      config,
+      entry.runtime_registration,
+      token,
+      Some(entry.id),
+      Some(&stored),
+      None,
+    )
+    .await?;
+
+    Ok(registry.has_provider(runtime_provider_id).await)
+  }
 }
