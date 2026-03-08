@@ -609,7 +609,9 @@ async fn list_models(
 
 #[cfg(test)]
 mod tests {
+  use super::CliUiMode;
   use super::parse_ui_mode_from_str;
+  use super::resolve_ui_mode;
   use cokra_tui::UiMode;
 
   #[test]
@@ -632,5 +634,25 @@ mod tests {
   fn parse_ui_mode_from_str_rejects_unknown_values() {
     assert_eq!(parse_ui_mode_from_str(""), None);
     assert_eq!(parse_ui_mode_from_str("auto"), None);
+  }
+
+  #[test]
+  fn resolve_ui_mode_defaults_to_inline() {
+    // Tradeoff: env mutation is process-global in Rust 2024, so tests must opt
+    // into the unsafe contract explicitly.
+    unsafe { std::env::remove_var("COKRA_TUI_MODE") };
+    assert_eq!(resolve_ui_mode(None), UiMode::Inline);
+  }
+
+  #[test]
+  fn resolve_ui_mode_cli_override_still_wins() {
+    // Tradeoff: env mutation is process-global in Rust 2024, so tests must opt
+    // into the unsafe contract explicitly.
+    unsafe { std::env::set_var("COKRA_TUI_MODE", "inline") };
+    assert_eq!(
+      resolve_ui_mode(Some(CliUiMode::AltScreen)),
+      UiMode::AltScreen
+    );
+    unsafe { std::env::remove_var("COKRA_TUI_MODE") };
   }
 }

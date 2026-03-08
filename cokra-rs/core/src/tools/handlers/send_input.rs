@@ -44,6 +44,8 @@ impl ToolHandler for SendInputHandler {
     let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
       FunctionCallError::Execution("send_input runtime is not configured".to_string())
     })?;
+    let receiver = team_runtime.collab_agent_ref(&args.agent_id);
+    let outbound_message = args.message.clone();
 
     if let Some(tx_event) = &runtime.tx_event {
       let _ = tx_event
@@ -51,6 +53,9 @@ impl ToolHandler for SendInputHandler {
           CollabAgentInteractionBeginEvent {
             thread_id: runtime.thread_id.clone(),
             agent_id: args.agent_id.clone(),
+            nickname: receiver.as_ref().and_then(|agent| agent.nickname.clone()),
+            role: receiver.as_ref().and_then(|agent| agent.role.clone()),
+            message: outbound_message.clone(),
           },
         ))
         .await;
@@ -67,7 +72,12 @@ impl ToolHandler for SendInputHandler {
           CollabAgentInteractionEndEvent {
             thread_id: runtime.thread_id.clone(),
             agent_id: args.agent_id.clone(),
-            result: "sent".to_string(),
+            nickname: receiver.as_ref().and_then(|agent| agent.nickname.clone()),
+            role: receiver.and_then(|agent| agent.role),
+            message: outbound_message,
+            // Tradeoff: `send_input` queues work asynchronously, so we report the best-known
+            // status instead of blocking here just to fetch a newer state.
+            status: cokra_protocol::AgentStatus::Running,
           },
         ))
         .await;

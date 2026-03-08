@@ -81,6 +81,8 @@ struct FunctionCallBuffer {
   id: String,
   name: String,
   arguments: String,
+  /// Google Gemini 3 thought signature - preserved for multi-turn function calling
+  thought_signature: Option<String>,
 }
 
 /// Convert provider chunk stream into codex-style response events.
@@ -148,6 +150,10 @@ pub fn chunk_stream_to_response_events(
           if let Some(arguments) = delta.arguments {
             entry.arguments.push_str(&arguments);
           }
+          // Preserve thought_signature for Gemini 3 multi-turn function calling
+          if let Some(thought_signature) = delta.thought_signature {
+            entry.thought_signature = Some(thought_signature);
+          }
         }
         Chunk::MessageStop => {
           for call in function_calls.values() {
@@ -161,6 +167,7 @@ pub fn chunk_stream_to_response_events(
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
               },
+              thought_signature: call.thought_signature.clone(),
             }));
           }
           function_calls.clear();
@@ -195,6 +202,7 @@ pub fn chunk_stream_to_response_events(
             name: call.name.clone(),
             arguments: call.arguments.clone(),
           },
+          thought_signature: call.thought_signature.clone(),
         }));
       }
     }
@@ -235,6 +243,27 @@ pub struct ProviderInfo {
   /// Provider-specific options
   #[serde(default)]
   pub options: serde_json::Value,
+
+  /// Connection method for this provider.
+  #[serde(default)]
+  pub connect_method: ProviderConnectMethod,
+
+  /// Whether the provider should appear in the Connect menu even when not active.
+  #[serde(default)]
+  pub connectable: bool,
+
+  /// Whether this provider should show up in Available Models.
+  #[serde(default)]
+  pub visible: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderConnectMethod {
+  #[default]
+  None,
+  ApiKey,
+  OAuth,
 }
 
 impl ProviderInfo {
@@ -248,6 +277,9 @@ impl ProviderInfo {
       models: Vec::new(),
       is_live: false,
       options: serde_json::json!({}),
+      connect_method: ProviderConnectMethod::None,
+      connectable: false,
+      visible: true,
     }
   }
 
@@ -272,6 +304,21 @@ impl ProviderInfo {
   /// Set whether models were fetched live
   pub fn live(mut self, is_live: bool) -> Self {
     self.is_live = is_live;
+    self
+  }
+
+  pub fn connect_method(mut self, connect_method: ProviderConnectMethod) -> Self {
+    self.connect_method = connect_method;
+    self
+  }
+
+  pub fn connectable(mut self, connectable: bool) -> Self {
+    self.connectable = connectable;
+    self
+  }
+
+  pub fn visible(mut self, visible: bool) -> Self {
+    self.visible = visible;
     self
   }
 }
@@ -456,6 +503,7 @@ mod tests {
           name: "read_file".to_string(),
           arguments: "{\"file_path\":\"a.txt\"}".to_string(),
         },
+        thought_signature: None,
       })
     );
     assert!(matches!(&seen[2], ResponseEvent::Completed { .. }));

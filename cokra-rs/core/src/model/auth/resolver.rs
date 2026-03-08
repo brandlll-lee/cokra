@@ -27,6 +27,23 @@ impl EnvAuthResolver {
 
   /// Get environment variable mappings for providers
   fn get_env_vars_for_provider(provider_id: &str) -> Vec<String> {
+    match provider_id {
+      "openai" => return vec!["OPENAI_API_KEY".to_string()],
+      "anthropic" => return vec!["ANTHROPIC_API_KEY".to_string()],
+      "google" => return vec!["GOOGLE_API_KEY".to_string(), "GEMINI_API_KEY".to_string()],
+      "openrouter" => return vec!["OPENROUTER_API_KEY".to_string()],
+      "github" => {
+        return vec![
+          "GITHUB_COPILOT_TOKEN".to_string(),
+          "GITHUB_TOKEN".to_string(),
+        ];
+      }
+      // OAuth-only providers must not inherit unrelated API-key env vars.
+      "github-copilot" | "anthropic-oauth" | "google-gemini-cli" | "google-antigravity"
+      | "openai-codex" => return Vec::new(),
+      _ => {}
+    }
+
     // Standardize provider ID (replace hyphens with underscores)
     let provider_upper = provider_id.to_uppercase().replace('-', "_");
     let provider_snake = provider_id.to_uppercase();
@@ -36,18 +53,6 @@ impl EnvAuthResolver {
       format!("{}_API_KEY", provider_snake),
       format!("{}_KEY", provider_upper),
       format!("{}_KEY", provider_snake),
-    ]
-  }
-
-  /// Get common fallback env vars
-  fn get_fallback_env_vars() -> Vec<String> {
-    vec![
-      "OPENAI_API_KEY".to_string(),
-      "ANTHROPIC_API_KEY".to_string(),
-      "GOOGLE_API_KEY".to_string(),
-      "COHERE_API_KEY".to_string(),
-      "AZURE_API_KEY".to_string(),
-      "OPENROUTER_API_KEY".to_string(),
     ]
   }
 }
@@ -60,26 +65,13 @@ impl Default for EnvAuthResolver {
 
 impl AuthResolver for EnvAuthResolver {
   fn resolve(&self, provider_id: &str) -> Option<Credentials> {
-    // Check provider-specific env vars first
+    // Only resolve env vars explicitly associated with this provider.
+    // Unrelated global API keys must not make OAuth-only providers appear connected.
     for var in Self::get_env_vars_for_provider(provider_id) {
       if let Ok(key) = std::env::var(&var)
         && !key.is_empty()
       {
         tracing::debug!("Found credentials for {} in env var {}", provider_id, var);
-        return Some(Credentials::ApiKey { key });
-      }
-    }
-
-    // Check common fallbacks
-    for var in Self::get_fallback_env_vars() {
-      if let Ok(key) = std::env::var(&var)
-        && !key.is_empty()
-      {
-        tracing::debug!(
-          "Found credentials for {} in fallback env var {}",
-          provider_id,
-          var
-        );
         return Some(Credentials::ApiKey { key });
       }
     }
@@ -289,6 +281,24 @@ mod tests {
 
     unsafe {
       std::env::remove_var(env_var);
+    }
+  }
+
+  #[test]
+  fn test_unrelated_api_key_does_not_mark_oauth_provider_connected() {
+    let resolver = EnvAuthResolver::new();
+
+    unsafe {
+      std::env::set_var("OPENAI_API_KEY", "test-openai-key-123");
+    }
+
+    assert!(resolver.resolve("github-copilot").is_none());
+    assert!(resolver.resolve("google-antigravity").is_none());
+    assert!(resolver.resolve("google-gemini-cli").is_none());
+    assert!(resolver.resolve("openai-codex").is_none());
+
+    unsafe {
+      std::env::remove_var("OPENAI_API_KEY");
     }
   }
 }

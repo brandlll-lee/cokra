@@ -5,15 +5,11 @@ use crate::terminal_palette::light_blue;
 impl ChatWidget {
   pub(super) fn handle_notice_event(&mut self, event: &EventMsg) -> bool {
     match event {
-      EventMsg::CollabAgentSpawnBegin(e) => {
-        self.add_to_history(multi_agents::spawn_begin(e.clone()));
-      }
+      EventMsg::CollabAgentSpawnBegin(_) => {}
       EventMsg::CollabAgentSpawnEnd(e) => {
         self.add_to_history(multi_agents::spawn_end(e.clone()));
       }
-      EventMsg::CollabAgentInteractionBegin(e) => {
-        self.add_to_history(multi_agents::interaction_begin(e.clone()));
-      }
+      EventMsg::CollabAgentInteractionBegin(_) => {}
       EventMsg::CollabAgentInteractionEnd(e) => {
         self.add_to_history(multi_agents::interaction_end(e.clone()));
       }
@@ -211,9 +207,7 @@ impl ChatWidget {
           self.add_to_history(multi_agents::waiting_end(e.clone()));
         }
       }
-      EventMsg::CollabCloseBegin(e) => {
-        self.add_to_history(multi_agents::close_begin(e.clone()));
-      }
+      EventMsg::CollabCloseBegin(_) => {}
       EventMsg::CollabCloseEnd(e) => {
         self.add_to_history(multi_agents::close_end(e.clone()));
       }

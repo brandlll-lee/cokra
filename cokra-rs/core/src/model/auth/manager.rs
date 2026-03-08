@@ -84,9 +84,41 @@ impl AuthManager {
     self.storage.load(provider_id).await
   }
 
+  pub async fn load_for_runtime_registration(
+    &self,
+    provider_id: &str,
+  ) -> Result<Option<StoredCredentials>> {
+    let Some(stored) = self.load(provider_id).await? else {
+      return Ok(None);
+    };
+
+    let should_refresh = match &stored.credentials {
+      Credentials::OAuth {
+        refresh_token,
+        expires_at,
+        ..
+      } => !refresh_token.is_empty() && *expires_at <= chrono::Utc::now().timestamp() as u64,
+      _ => false,
+    };
+
+    if !should_refresh {
+      return Ok(Some(stored));
+    }
+
+    // Tradeoff: runtime registration only refreshes persisted OAuth credentials.
+    // Env/config credentials bypass storage and should remain side-effect free.
+    self.refresh_oauth(provider_id).await?;
+    self.storage.load(provider_id).await
+  }
+
   /// Save credentials to storage
   pub async fn save(&self, provider_id: &str, credentials: Credentials) -> Result<()> {
     let stored = StoredCredentials::new(provider_id, credentials);
+    self.storage.save(stored).await
+  }
+
+  /// Save a fully populated stored credential record.
+  pub async fn save_stored(&self, stored: StoredCredentials) -> Result<()> {
     self.storage.save(stored).await
   }
 
@@ -192,7 +224,7 @@ impl AuthManager {
         expires_at,
         ..
       } => {
-        if *expires_at < chrono::Utc::now().timestamp() as u64 {
+        if *expires_at <= chrono::Utc::now().timestamp() as u64 {
           if refresh_token.is_empty() {
             return Err(AuthError::TokenExpired(provider));
           }
@@ -315,10 +347,14 @@ impl AuthManager {
           redirect_uri: "urn:ietf:wg:oauth:2.0:oob".to_string(),
         })
       }
-      _ => Err(AuthError::OAuthError(format!(
-        "OAuth device flow is not configured for provider {}",
-        provider_id
-      ))),
+      _ => crate::model::oauth_connect::oauth_refresh_config_for_provider(provider_id)?.ok_or_else(
+        || {
+          AuthError::OAuthError(format!(
+            "OAuth device flow is not configured for provider {}",
+            provider_id
+          ))
+        },
+      ),
     }
   }
 }
@@ -393,5 +429,38 @@ mod tests {
     unsafe {
       std::env::remove_var(env_var);
     }
+  }
+
+  #[test]
+  fn test_load_for_runtime_registration_keeps_google_metadata() {
+    let storage = std::sync::Arc::new(MemoryCredentialStorage::new());
+    let manager = AuthManager::with_storage(storage).unwrap();
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+      let mut stored = StoredCredentials::new(
+        "google-antigravity",
+        Credentials::OAuth {
+          access_token: "oauth-access".to_string(),
+          refresh_token: "oauth-refresh".to_string(),
+          expires_at: chrono::Utc::now().timestamp() as u64 + 60,
+          account_id: None,
+          enterprise_url: None,
+        },
+      );
+      stored.metadata = serde_json::json!({
+        "project_id": "proj-123",
+      });
+
+      manager.save_stored(stored).await.unwrap();
+
+      let loaded = manager
+        .load_for_runtime_registration("google-antigravity")
+        .await
+        .unwrap()
+        .expect("stored credentials");
+
+      assert_eq!(loaded.metadata["project_id"], serde_json::json!("proj-123"));
+      assert_eq!(loaded.credentials.get_value(), "oauth-access");
+    });
   }
 }

@@ -43,6 +43,8 @@ impl ToolHandler for ReadTeamMessagesHandler {
       let _ = tx_event
         .send(EventMsg::CollabMessagesRead(CollabMessagesReadEvent {
           reader_thread_id: runtime.thread_id.clone(),
+          reader_nickname: None,
+          reader_role: None,
           count: messages.len(),
         }))
         .await;

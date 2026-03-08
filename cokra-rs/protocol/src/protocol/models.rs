@@ -70,6 +70,10 @@ pub struct FunctionCallEvent {
   pub id: String,
   pub call_type: String,
   pub function: FunctionCall,
+  /// Google Gemini 3 thought signature for preserving reasoning state
+  /// Must be passed back in subsequent requests for multi-turn function calling
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub thought_signature: Option<String>,
 }
 
 /// Function call payload.
@@ -110,6 +114,7 @@ mod tests {
         name: "read_file".to_string(),
         arguments: r#"{"file_path":"demo.txt"}"#.to_string(),
       },
+      thought_signature: None,
     });
 
     let json = serde_json::to_string(&event).expect("serialize response event");

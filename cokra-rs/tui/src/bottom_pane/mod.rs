@@ -32,6 +32,7 @@ pub(crate) mod chat_composer_history;
 pub(crate) mod command_popup;
 pub(crate) mod footer;
 pub(crate) mod list_selection_view;
+pub(crate) mod oauth_connect_view;
 pub(crate) mod paste_burst;
 pub(crate) mod popup_consts;
 pub(crate) mod prompt_args;
@@ -208,6 +209,10 @@ impl BottomPane {
       request,
       self.app_event_tx.clone(),
     )));
+  }
+
+  pub(crate) fn dismiss_active_view(&mut self) {
+    self.view_stack.pop();
   }
 
   /// 1:1 codex: active view is the top of the stack.

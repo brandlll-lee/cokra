@@ -1,11 +1,27 @@
 //! Unified streaming helpers.
 
+use std::collections::HashMap;
+use std::pin::Pin;
+
+use futures::Stream;
+use futures::StreamExt;
 use serde_json::Value;
+
+use cokra_protocol::ContentDeltaEvent as ResponseContentDeltaEvent;
+use cokra_protocol::FunctionCall as ResponseFunctionCall;
+use cokra_protocol::FunctionCallEvent as ResponseFunctionCallEvent;
+use cokra_protocol::OutputItemEvent;
+use cokra_protocol::ResponseErrorEvent;
+use cokra_protocol::ResponseEvent;
+use cokra_protocol::ResponseRateLimitsSnapshot;
+use cokra_protocol::ResponseTokenUsage;
 
 use super::types::Chunk;
 use super::types::ContentDelta;
 use super::types::ToolCallDelta;
 use super::types::Usage;
+use crate::model::error::ModelError;
+use crate::model::error::Result;
 
 /// Optional binary decoder for stream payloads.
 pub trait BinaryDecoder: Send + Sync {
@@ -208,6 +224,7 @@ fn parse_chunk_value(value: &Value) -> Option<Chunk> {
             id,
             name,
             arguments,
+            thought_signature: None,
           },
         });
       }
@@ -257,6 +274,7 @@ fn parse_chunk_value(value: &Value) -> Option<Chunk> {
           .and_then(|f| f.get("arguments"))
           .and_then(Value::as_str)
           .map(ToString::to_string),
+        thought_signature: None,
       },
     });
   }
@@ -310,6 +328,415 @@ fn parse_usage(value: &Value) -> Option<Usage> {
   })
 }
 
+#[derive(Debug, Clone, Default)]
+struct FunctionCallBuffer {
+  call_id: String,
+  name: String,
+  arguments: String,
+}
+
+pub fn create_openai_responses_event_stream(
+  response: reqwest::Response,
+) -> Pin<Box<dyn Stream<Item = Result<ResponseEvent>> + Send>> {
+  Box::pin(async_stream::stream! {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let mut stream = response.bytes_stream();
+
+    if !status.is_success() {
+      let mut body = String::new();
+      while let Some(item) = stream.next().await {
+        match item {
+          Ok(bytes) => body.push_str(&String::from_utf8_lossy(&bytes)),
+          Err(err) => {
+            yield Err(ModelError::StreamError(err.to_string()));
+            return;
+          }
+        }
+      }
+      yield Err(ModelError::ApiError(format!("HTTP {}: {}", status, body)));
+      return;
+    }
+
+    if let Some(snapshot) = response_rate_limits_from_headers(&headers) {
+      yield Ok(ResponseEvent::RateLimits(snapshot));
+    }
+
+    let mut buffer = String::new();
+    let mut text_index = 0usize;
+    let mut response_id = String::new();
+    let mut function_calls = HashMap::<String, FunctionCallBuffer>::new();
+
+    while let Some(item) = stream.next().await {
+      let bytes = match item {
+        Ok(bytes) => bytes,
+        Err(err) => {
+          yield Err(ModelError::StreamError(err.to_string()));
+          return;
+        }
+      };
+
+      buffer.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
+      while let Some(idx) = buffer.find("\n\n") {
+        let raw = buffer[..idx].to_string();
+        buffer.drain(..idx + 2);
+        match parse_openai_responses_event(
+          &raw,
+          &mut response_id,
+          &mut text_index,
+          &mut function_calls,
+        ) {
+          Ok(events) => {
+            for event in events {
+              yield Ok(event);
+            }
+          }
+          Err(err) => {
+            yield Err(err);
+            return;
+          }
+        }
+      }
+    }
+
+    if !buffer.trim().is_empty() {
+      match parse_openai_responses_event(
+        &buffer,
+        &mut response_id,
+        &mut text_index,
+        &mut function_calls,
+      ) {
+        Ok(events) => {
+          for event in events {
+            yield Ok(event);
+          }
+        }
+        Err(err) => {
+          yield Err(err);
+          return;
+        }
+      }
+    }
+  })
+}
+
+pub fn response_event_stream_to_chunk_stream(
+  mut stream: Pin<Box<dyn Stream<Item = Result<ResponseEvent>> + Send>>,
+) -> Pin<Box<dyn Stream<Item = Result<Chunk>> + Send>> {
+  Box::pin(async_stream::stream! {
+    while let Some(item) = stream.next().await {
+      let event = match item {
+        Ok(event) => event,
+        Err(err) => {
+          yield Err(err);
+          return;
+        }
+      };
+
+      match event {
+        ResponseEvent::ContentDelta(delta) => {
+          if !delta.text.is_empty() {
+            yield Ok(Chunk::Content {
+              delta: ContentDelta { text: delta.text },
+            });
+          }
+        }
+        ResponseEvent::FunctionCall(call) => {
+          yield Ok(Chunk::ToolCall {
+            delta: ToolCallDelta {
+              id: Some(call.id),
+              name: Some(call.function.name),
+              arguments: Some(call.function.arguments),
+              thought_signature: None,
+            },
+          });
+        }
+        ResponseEvent::Completed { .. } | ResponseEvent::EndTurn => {
+          yield Ok(Chunk::MessageStop);
+        }
+        ResponseEvent::Error(err) => {
+          yield Err(ModelError::StreamError(err.message));
+          return;
+        }
+        _ => {}
+      }
+    }
+  })
+}
+
+fn parse_openai_responses_event(
+  raw: &str,
+  response_id: &mut String,
+  text_index: &mut usize,
+  function_calls: &mut HashMap<String, FunctionCallBuffer>,
+) -> Result<Vec<ResponseEvent>> {
+  let mut events = Vec::new();
+
+  for line in raw.lines() {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("data: ") {
+      continue;
+    }
+
+    let payload = trimmed.trim_start_matches("data: ").trim();
+    if payload == "[DONE]" || payload.is_empty() {
+      continue;
+    }
+
+    let value: Value = serde_json::from_str(payload)
+      .map_err(|err| ModelError::StreamError(format!("invalid responses event: {err}")))?;
+    let event_type = value
+      .get("type")
+      .and_then(Value::as_str)
+      .unwrap_or_default();
+
+    match event_type {
+      "response.created" => {
+        if let Some(id) = value
+          .get("response")
+          .and_then(|response| response.get("id"))
+          .and_then(Value::as_str)
+        {
+          *response_id = id.to_string();
+        }
+        events.push(ResponseEvent::Created);
+        if let Some(model) = value
+          .get("response")
+          .and_then(|response| response.get("model"))
+          .and_then(Value::as_str)
+        {
+          events.push(ResponseEvent::ServerModel(model.to_string()));
+        }
+      }
+      "response.output_item.added" => {
+        if let Some(item) = value.get("item") {
+          match item.get("type").and_then(Value::as_str) {
+            Some("message") => {
+              let id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("assistant_item")
+                .to_string();
+              events.push(ResponseEvent::OutputItemAdded(OutputItemEvent {
+                id,
+                role: Some("assistant".to_string()),
+                item_type: Some("message".to_string()),
+              }));
+            }
+            Some("function_call") => {
+              let item_id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+              let call_id = item
+                .get("call_id")
+                .and_then(Value::as_str)
+                .unwrap_or(&item_id)
+                .to_string();
+              let name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+              let arguments = item
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+              function_calls.insert(
+                item_id,
+                FunctionCallBuffer {
+                  call_id,
+                  name,
+                  arguments,
+                },
+              );
+            }
+            _ => {}
+          }
+        }
+      }
+      "response.output_item.done" => {
+        if let Some(item) = value.get("item") {
+          match item.get("type").and_then(Value::as_str) {
+            Some("message") => {
+              let id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("assistant_item")
+                .to_string();
+              events.push(ResponseEvent::OutputItemDone(OutputItemEvent {
+                id,
+                role: Some("assistant".to_string()),
+                item_type: Some("message".to_string()),
+              }));
+            }
+            Some("function_call") => {
+              let item_id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+              let mut call = function_calls.remove(&item_id).unwrap_or_default();
+              if call.call_id.is_empty() {
+                call.call_id = item
+                  .get("call_id")
+                  .and_then(Value::as_str)
+                  .unwrap_or(&item_id)
+                  .to_string();
+              }
+              if call.name.is_empty() {
+                call.name = item
+                  .get("name")
+                  .and_then(Value::as_str)
+                  .unwrap_or_default()
+                  .to_string();
+              }
+              if call.arguments.is_empty() {
+                call.arguments = item
+                  .get("arguments")
+                  .and_then(Value::as_str)
+                  .unwrap_or_default()
+                  .to_string();
+              }
+              if !call.name.is_empty() {
+                events.push(ResponseEvent::FunctionCall(ResponseFunctionCallEvent {
+                  id: call.call_id,
+                  call_type: "function".to_string(),
+                  function: ResponseFunctionCall {
+                    name: call.name,
+                    arguments: call.arguments,
+                  },
+                  thought_signature: None,
+                }));
+              }
+            }
+            _ => {}
+          }
+        }
+      }
+      "response.output_text.delta" => {
+        let delta = value
+          .get("delta")
+          .and_then(Value::as_str)
+          .unwrap_or_default()
+          .to_string();
+        if !delta.is_empty() {
+          events.push(ResponseEvent::ContentDelta(ResponseContentDeltaEvent {
+            text: delta,
+            index: *text_index,
+          }));
+          *text_index += 1;
+        }
+      }
+      "response.reasoning_summary_text.delta" => {
+        let delta = value
+          .get("delta")
+          .and_then(Value::as_str)
+          .unwrap_or_default()
+          .to_string();
+        let summary_index = value
+          .get("summary_index")
+          .and_then(Value::as_u64)
+          .unwrap_or(0) as usize;
+        if !delta.is_empty() {
+          events.push(ResponseEvent::ReasoningSummaryDelta {
+            delta,
+            summary_index,
+          });
+        }
+      }
+      "response.function_call_arguments.delta" => {
+        let item_id = value
+          .get("item_id")
+          .and_then(Value::as_str)
+          .unwrap_or_default()
+          .to_string();
+        let delta = value
+          .get("delta")
+          .and_then(Value::as_str)
+          .unwrap_or_default();
+        if let Some(call) = function_calls.get_mut(&item_id) {
+          call.arguments.push_str(delta);
+        }
+      }
+      "response.completed" | "response.incomplete" => {
+        let usage = value
+          .get("response")
+          .and_then(|response| response.get("usage"))
+          .and_then(parse_response_usage);
+        events.push(ResponseEvent::Completed {
+          response_id: response_id.clone(),
+          token_usage: usage,
+        });
+        events.push(ResponseEvent::EndTurn);
+      }
+      "error" => {
+        let message = value
+          .get("message")
+          .and_then(Value::as_str)
+          .unwrap_or("Unknown provider error")
+          .to_string();
+        events.push(ResponseEvent::Error(ResponseErrorEvent { message }));
+      }
+      _ => {}
+    }
+  }
+
+  Ok(events)
+}
+
+fn response_rate_limits_from_headers(
+  headers: &reqwest::header::HeaderMap,
+) -> Option<ResponseRateLimitsSnapshot> {
+  let requests_remaining = header_i64(headers, "x-ratelimit-remaining-requests");
+  let tokens_remaining = header_i64(headers, "x-ratelimit-remaining-tokens");
+  let reset_seconds = header_i64(headers, "x-ratelimit-reset-requests");
+
+  if requests_remaining.is_none() && tokens_remaining.is_none() && reset_seconds.is_none() {
+    return None;
+  }
+
+  Some(ResponseRateLimitsSnapshot {
+    requests_remaining,
+    tokens_remaining,
+    reset_seconds,
+  })
+}
+
+fn header_i64(headers: &reqwest::header::HeaderMap, key: &str) -> Option<i64> {
+  headers
+    .get(key)
+    .and_then(|value| value.to_str().ok())
+    .and_then(|value| value.parse::<i64>().ok())
+}
+
+fn parse_response_usage(value: &Value) -> Option<ResponseTokenUsage> {
+  let input_tokens = value
+    .get("input_tokens")
+    .and_then(Value::as_i64)
+    .unwrap_or(0);
+  let output_tokens = value
+    .get("output_tokens")
+    .and_then(Value::as_i64)
+    .unwrap_or(0);
+  let total_tokens = value
+    .get("total_tokens")
+    .and_then(Value::as_i64)
+    .unwrap_or(input_tokens + output_tokens);
+
+  if input_tokens == 0 && output_tokens == 0 && total_tokens == 0 {
+    return None;
+  }
+
+  Some(ResponseTokenUsage {
+    input_tokens,
+    output_tokens,
+    total_tokens,
+  })
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -349,5 +776,61 @@ mod tests {
     assert_eq!(events.len(), 1);
     let chunk = events[0].chunk.clone();
     assert!(matches!(chunk, Some(Chunk::Content { .. })));
+  }
+
+  #[test]
+  fn test_parse_openai_responses_event_text_and_completed() {
+    let raw = concat!(
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.2-codex\"}}\n",
+      "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\"}}\n",
+      "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n",
+      "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\"}}\n",
+      "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}\n",
+    );
+
+    let mut response_id = String::new();
+    let mut text_index = 0usize;
+    let mut function_calls = HashMap::new();
+    let events =
+      parse_openai_responses_event(raw, &mut response_id, &mut text_index, &mut function_calls)
+        .expect("parse responses event");
+
+    assert!(matches!(events[0], ResponseEvent::Created));
+    assert!(matches!(events[1], ResponseEvent::ServerModel(_)));
+    assert!(matches!(events[2], ResponseEvent::OutputItemAdded(_)));
+    assert!(matches!(events[3], ResponseEvent::ContentDelta(_)));
+    assert!(matches!(events[4], ResponseEvent::OutputItemDone(_)));
+    assert!(matches!(events[5], ResponseEvent::Completed { .. }));
+    assert!(matches!(events[6], ResponseEvent::EndTurn));
+  }
+
+  #[test]
+  fn test_parse_openai_responses_event_function_call() {
+    let raw = concat!(
+      "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"read_file\",\"arguments\":\"{\"}}\n",
+      "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"\\\"path\\\":\\\"Cargo.toml\\\"}\"}\n",
+      "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\",\"status\":\"completed\"}}\n",
+    );
+
+    let mut response_id = String::new();
+    let mut text_index = 0usize;
+    let mut function_calls = HashMap::new();
+    let events =
+      parse_openai_responses_event(raw, &mut response_id, &mut text_index, &mut function_calls)
+        .expect("parse function call event");
+
+    let function_call = events
+      .into_iter()
+      .find_map(|event| match event {
+        ResponseEvent::FunctionCall(call) => Some(call),
+        _ => None,
+      })
+      .expect("function call");
+    assert_eq!(function_call.id, "call_1");
+    assert_eq!(function_call.function.name, "read_file");
+    assert_eq!(
+      function_call.function.arguments,
+      "{\"path\":\"Cargo.toml\"}"
+    );
   }
 }

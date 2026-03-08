@@ -1,0 +1,51 @@
+diff --git a/toolchain/args/BUILD.bazel b/toolchain/args/BUILD.bazel
+--- a/toolchain/args/BUILD.bazel
++++ b/toolchain/args/BUILD.bazel
+@@ -14,8 +14,8 @@ cc_args(
+ cc_args(
+     name = "resource_dir",
+     actions = [
++        "@rules_cc//cc/toolchains/actions:compile_actions",
+         "@rules_cc//cc/toolchains/actions:link_actions",
+-        # We may need it for other actions too?
+     ],
+     args = [
+         "-resource-dir",
+@@ -29,6 +29,25 @@ cc_args(
+     ],
+ )
+ 
++cc_args(
++    name = "clang_builtin_headers_include_search_paths",
++    actions = [
++        "@rules_cc//cc/toolchains/actions:compile_actions",
++        "@rules_cc//cc/toolchains/actions:link_actions",
++    ],
++    args = [
++        "-isystem",
++        "{clang_builtin_headers_include_search_path}",
++    ],
++    format = {
++        "clang_builtin_headers_include_search_path": "//:builtin_headers",
++    },
++    data = [
++        "//:builtin_headers",
++    ],
++    allowlist_include_directories = ["//:builtin_headers"],
++)
++
+ cc_args(
+     name = "llvm_target_for_platform",
+     actions = [
+diff --git a/toolchain/BUILD.bazel b/toolchain/BUILD.bazel
+--- a/toolchain/BUILD.bazel
++++ b/toolchain/BUILD.bazel
+@@ -106,6 +106,7 @@ cc_args_list(
+     args = select({
+         "@platforms//os:macos": [],
+         "//conditions:default": [
+             "//toolchain/args:resource_dir",
++            "//toolchain/args:clang_builtin_headers_include_search_paths",
+         ],
+     }),
+ )

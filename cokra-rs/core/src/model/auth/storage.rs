@@ -64,8 +64,21 @@ impl FileCredentialStorage {
     let content = std::fs::read_to_string(&self.storage_path)
       .map_err(|e| AuthError::StorageError(format!("Failed to read auth file: {}", e)))?;
 
-    let store: CredentialStore = serde_json::from_str(&content)
-      .map_err(|e| AuthError::StorageError(format!("Failed to parse auth file: {}", e)))?;
+    if content.trim().is_empty() {
+      return Ok(CredentialStore::default());
+    }
+
+    let store: CredentialStore = match serde_json::from_str(&content) {
+      Ok(store) => store,
+      Err(err) => {
+        tracing::warn!(
+          path = %self.storage_path.display(),
+          error = %err,
+          "auth storage file is invalid; treating it as empty"
+        );
+        CredentialStore::default()
+      }
+    };
 
     Ok(store)
   }
@@ -262,5 +275,16 @@ mod tests {
     };
 
     assert_eq!(creds.get_auth_header(), "Bearer sk-test123");
+  }
+
+  #[test]
+  fn empty_auth_file_is_treated_as_empty_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("auth.json");
+    std::fs::write(&path, "").expect("write empty file");
+
+    let storage = FileCredentialStorage::new(&path);
+    let store = storage.load_file().expect("load should succeed");
+    assert!(store.credentials.is_empty());
   }
 }

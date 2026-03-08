@@ -25,6 +25,7 @@ crossterm = { workspace = true, features = ["bracketed-paste", "event-stream"] }
 # Async
 tokio = { workspace = true }
 tokio-stream = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true }
 
 # Utilities
 anyhow = { workspace = true }

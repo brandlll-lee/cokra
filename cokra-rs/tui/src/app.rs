@@ -19,8 +19,13 @@ use ratatui::text::Line;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 use cokra_core::Cokra;
+use cokra_core::model::PluginRegistry;
+use cokra_core::model::ProviderAuth;
+use cokra_core::model::oauth_connect::OAuthConnectStart;
+use cokra_core::model::oauth_connect::PendingOAuthConnect;
 use cokra_protocol::Event;
 use cokra_protocol::EventMsg;
 use cokra_protocol::ExecApprovalRequestEvent;
@@ -56,6 +61,7 @@ use crate::tui::TuiEvent;
 /// Smooth-mode streaming drains one line per tick, so this interval controls
 /// perceived typing speed for non-backlogged output.
 const COMMIT_ANIMATION_TICK: Duration = crate::tui::TARGET_FRAME_INTERVAL;
+const THREAD_EVENT_STORE_CAPACITY: usize = 512;
 
 pub struct App {
   cokra: Cokra,
@@ -82,9 +88,15 @@ pub struct App {
   backtrack_render_pending: bool,
   status_line_mode: StatusLineMode,
   queued_submissions: VecDeque<ComposerSubmission>,
+  primary_thread_id: String,
+  active_thread_id: String,
+  thread_event_stores: HashMap<String, ThreadEventStore>,
+  agent_picker_threads: HashMap<String, crate::multi_agents::AgentPickerThreadEntry>,
   background_pending_threads: HashMap<String, BackgroundPending>,
   background_approval_requests: HashMap<String, Vec<ExecApprovalRequestEvent>>,
   background_user_input_requests: HashMap<String, Vec<RequestUserInputEvent>>,
+  pending_oauth_flows: HashMap<String, PendingOAuthFlowState>,
+  did_show_welcome: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +109,54 @@ struct PendingApproval {
 struct BackgroundPending {
   approval_count: usize,
   user_input_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PendingOAuthFlowState {
+  pending: PendingOAuthConnect,
+  cancel: CancellationToken,
+}
+
+#[derive(Debug, Clone)]
+struct ThreadEventSnapshot {
+  session_configured: Option<Event>,
+  events: Vec<Event>,
+}
+
+#[derive(Debug)]
+struct ThreadEventStore {
+  session_configured: Option<Event>,
+  buffer: VecDeque<Event>,
+  capacity: usize,
+}
+
+impl ThreadEventStore {
+  fn new(capacity: usize) -> Self {
+    Self {
+      session_configured: None,
+      buffer: VecDeque::new(),
+      capacity,
+    }
+  }
+
+  fn push_event(&mut self, event: Event) {
+    if matches!(event.msg, EventMsg::SessionConfigured(_)) {
+      self.session_configured = Some(event);
+      return;
+    }
+
+    self.buffer.push_back(event);
+    if self.buffer.len() > self.capacity {
+      let _ = self.buffer.pop_front();
+    }
+  }
+
+  fn snapshot(&self) -> ThreadEventSnapshot {
+    ThreadEventSnapshot {
+      session_configured: self.session_configured.clone(),
+      events: self.buffer.iter().cloned().collect(),
+    }
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +176,15 @@ impl App {
   pub fn new(cokra: Cokra, frame_requester: FrameRequester, ui_mode: UiMode) -> Self {
     let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
     let app_event_sender = AppEventSender::new(app_event_tx);
+    let primary_thread_id = cokra
+      .thread_id()
+      .map(ToString::to_string)
+      .unwrap_or_else(|| "main".to_string());
+    let mut thread_event_stores = HashMap::new();
+    thread_event_stores.insert(
+      primary_thread_id.clone(),
+      ThreadEventStore::new(THREAD_EVENT_STORE_CAPACITY),
+    );
 
     let mut app = Self {
       cokra,
@@ -140,10 +209,23 @@ impl App {
       backtrack_render_pending: false,
       status_line_mode: StatusLineMode::Default,
       queued_submissions: VecDeque::new(),
+      primary_thread_id: primary_thread_id.clone(),
+      active_thread_id: primary_thread_id,
+      thread_event_stores,
+      agent_picker_threads: HashMap::new(),
       background_pending_threads: HashMap::new(),
       background_approval_requests: HashMap::new(),
       background_user_input_requests: HashMap::new(),
+      pending_oauth_flows: HashMap::new(),
+      did_show_welcome: false,
     };
+
+    app.remember_agent_thread(
+      app.primary_thread_id.clone(),
+      Some("main".to_string()),
+      Some("leader".to_string()),
+      false,
+    );
 
     // 1:1 codex: status line is enabled by default.
     app.chat_widget.bottom_pane.set_status_line_enabled(true);
@@ -154,6 +236,8 @@ impl App {
 
   pub(crate) async fn run(&mut self, tui: &mut Tui) -> Result<AppExitInfo> {
     let mut events = tui.event_stream();
+
+    self.insert_startup_welcome(tui)?;
 
     // Trigger an initial draw so the UI is visible before any events arrive.
     self.draw(tui)?;
@@ -184,6 +268,7 @@ impl App {
         }
         Some(app_event) = self.app_event_rx.recv() => {
           self.handle_app_event(app_event, tui).await?;
+          tui.frame_requester().schedule_frame();
         }
       }
     }
@@ -197,6 +282,19 @@ impl App {
     }
     let height = self.chat_widget.desired_height(width);
     tui.draw(height, |frame| self.render(frame))?;
+    Ok(())
+  }
+
+  fn insert_startup_welcome(&mut self, tui: &mut Tui) -> Result<()> {
+    if self.did_show_welcome {
+      return Ok(());
+    }
+    self.did_show_welcome = true;
+
+    let width = tui.terminal.size().map(|s| s.width).unwrap_or(80).max(1);
+    let ctx = crate::welcome::WelcomeContext::from_config(self.cokra.config());
+    let cell = crate::welcome::WelcomeWidget::into_history_cell(ctx);
+    self.stage_history_cell(cell, width, Some(tui));
     Ok(())
   }
 
@@ -243,77 +341,242 @@ impl App {
     provider_id: &str,
     api_key: String,
   ) -> Result<()> {
-    use cokra_core::model::ProviderConfig;
-    use cokra_core::model::providers::AnthropicProvider;
-    use cokra_core::model::providers::GitHubCopilotProvider;
-    use cokra_core::model::providers::GoogleProvider;
-    use cokra_core::model::providers::OpenAIProvider;
-    use cokra_core::model::providers::OpenRouterProvider;
+    let result = ProviderAuth::connect_api_key(
+      self.cokra.model_client().registry(),
+      self.cokra.config(),
+      provider_id,
+      api_key,
+    )
+    .await?;
+    if let Some(err) = result.save_error {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          format!("• Connected, but failed to save credentials locally: {err}").red(),
+        )]));
+    }
+    Ok(())
+  }
 
-    let config = ProviderConfig {
-      provider_id: provider_id.to_string(),
-      api_key: Some(api_key.clone()),
-      base_url: None,
-      ..Default::default()
+  fn open_oauth_connect_view(&mut self, start: OAuthConnectStart) {
+    use crate::bottom_pane::oauth_connect_view::OAuthConnectView;
+
+    let prompt = start
+      .prompt
+      .clone()
+      .unwrap_or_else(|| "Paste the authorization response:".to_string());
+    let view = OAuthConnectView::new(
+      start.pending.provider_id.clone(),
+      start.provider_name,
+      start.auth_url,
+      start.instructions,
+      prompt,
+      self.app_event_tx.clone(),
+    );
+    self.chat_widget.bottom_pane.push_view(Box::new(view));
+  }
+
+  fn cleanup_pending_oauth_flow(&mut self, provider_id: &str) {
+    if let Some(flow) = self.pending_oauth_flows.remove(provider_id) {
+      flow.cancel.cancel();
+    }
+  }
+
+  async fn open_connected_provider_models_popup(&mut self, provider_id: &str) -> Result<()> {
+    let Some(entry) = PluginRegistry::find(provider_id) else {
+      self.open_available_models_popup().await?;
+      return Ok(());
+    };
+    let Some(runtime_provider_id) = entry.primary_model_provider_id() else {
+      self.open_available_models_popup().await?;
+      return Ok(());
     };
 
-    match provider_id {
-      "openai" => {
-        let provider = OpenAIProvider::new(api_key, config.clone());
+    let providers = self
+      .cokra
+      .model_client()
+      .registry()
+      .list_connected_models_catalog()
+      .await
+      .into_iter()
+      .filter(|provider| provider.id == runtime_provider_id)
+      .collect::<Vec<_>>();
+    if providers.is_empty() {
+      self.open_available_models_popup().await?;
+      return Ok(());
+    }
+
+    self.open_all_models_popup(providers).await?;
+    Ok(())
+  }
+
+  async fn finalize_connected_provider(
+    &mut self,
+    provider_id: &str,
+    stored: cokra_core::model::auth::StoredCredentials,
+  ) -> Result<()> {
+    let result = ProviderAuth::persist_and_register(
+      self.cokra.model_client().registry(),
+      self.cokra.config(),
+      provider_id,
+      stored,
+      None,
+    )
+    .await?;
+
+    if let Some(err) = result.save_error {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          format!("• Connected, but failed to save credentials locally: {err}").red(),
+        )]));
+    }
+
+    if let Some(entry) = PluginRegistry::find(provider_id) {
+      if !result.runtime_registered {
         self
-          .cokra
-          .model_client()
-          .registry()
-          .register_with_config(provider, config)
-          .await;
+          .chat_widget
+          .add_to_history(PlainHistoryCell::new(vec![Line::from(
+            format!(
+              "• Connected auth for {}, but no runtime token was produced.",
+              entry.name
+            )
+            .red(),
+          )]));
       }
-      "anthropic" => {
-        let provider = AnthropicProvider::new(api_key, config.clone());
-        self
-          .cokra
-          .model_client()
-          .registry()
-          .register_with_config(provider, config)
-          .await;
-      }
-      "openrouter" => {
-        let provider = OpenRouterProvider::new(api_key, config.clone());
-        self
-          .cokra
-          .model_client()
-          .registry()
-          .register_with_config(provider, config)
-          .await;
-      }
-      "google" => {
-        let provider = GoogleProvider::new(api_key, config.clone());
-        self
-          .cokra
-          .model_client()
-          .registry()
-          .register_with_config(provider, config)
-          .await;
-      }
-      "github" => {
-        let provider = GitHubCopilotProvider::new(api_key, config.clone());
-        self
-          .cokra
-          .model_client()
-          .registry()
-          .register_with_config(provider, config)
-          .await;
-      }
-      _ => {
-        let provider = OpenAIProvider::new(api_key, config.clone());
-        self
-          .cokra
-          .model_client()
-          .registry()
-          .register_with_config(provider, config)
-          .await;
+
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          format!("• Connected provider: {}", entry.name).dim(),
+        )]));
+    }
+
+    self.cleanup_pending_oauth_flow(provider_id);
+    if result.runtime_registered {
+      self
+        .open_connected_provider_models_popup(provider_id)
+        .await?;
+      return Ok(());
+    }
+
+    self.open_available_models_popup().await?;
+    Ok(())
+  }
+
+  async fn start_oauth_connect(&mut self, provider_id: &str) -> Result<()> {
+    let start = ProviderAuth::start_oauth(provider_id).await?;
+    let kind = start.pending.kind;
+    self.pending_oauth_flows.insert(
+      start.pending.provider_id.clone(),
+      PendingOAuthFlowState {
+        pending: start.pending.clone(),
+        cancel: CancellationToken::new(),
+      },
+    );
+
+    self.chat_widget.add_to_history(PlainHistoryCell::new(vec![
+      Line::from(format!(
+        "• Starting OAuth connect for {}",
+        start.provider_name
+      ))
+      .dim(),
+      Line::from(start.auth_url.clone()).cyan(),
+      Line::from(start.instructions.clone()).dim(),
+    ]));
+
+    if cokra_core::model::oauth_connect::uses_local_callback(kind) {
+      let tx = self.app_event_tx.clone();
+      let flow = self.pending_oauth_flows.get(provider_id).cloned();
+      tokio::spawn(async move {
+        let Some(flow) = flow else {
+          return;
+        };
+        match cokra_core::model::oauth_connect::wait_for_local_callback(
+          &flow.pending,
+          flow.cancel.clone(),
+        )
+        .await
+        {
+          Ok(input) => {
+            tx.send(AppEvent::DismissBottomPaneView);
+            tx.send(AppEvent::OAuthCodeSubmitted {
+              provider_id: flow.pending.provider_id.clone(),
+              input,
+            });
+          }
+          Err(err) => {
+            if !flow.cancel.is_cancelled() {
+              tx.insert_history_cell(PlainHistoryCell::new(vec![Line::from(
+                format!("• Automatic localhost callback did not complete: {err}. You can still paste the redirect URL manually.").dim(),
+              )]));
+            }
+          }
+        }
+      });
+    }
+
+    if start.prompt.is_some() {
+      self.open_oauth_connect_view(start);
+      if kind != cokra_core::model::oauth_connect::OAuthProviderKind::GitHubCopilot {
+        return Ok(());
       }
     }
 
+    self
+      .chat_widget
+      .add_to_history(PlainHistoryCell::new(vec![Line::from(
+        "• Waiting for OAuth approval…".dim(),
+      )]));
+
+    let tx = self.app_event_tx.clone();
+    let flow = self.pending_oauth_flows.get(provider_id).cloned();
+    tokio::spawn(async move {
+      let Some(flow) = flow else {
+        return;
+      };
+      match ProviderAuth::complete_oauth(&flow.pending, None).await {
+        Ok(stored) => tx.send(AppEvent::OAuthCompleted {
+          provider_id: flow.pending.provider_id.clone(),
+          stored,
+        }),
+        Err(err) => tx.send(AppEvent::OAuthFailed {
+          provider_id: flow.pending.provider_id.clone(),
+          message: err.to_string(),
+        }),
+      }
+    });
+    Ok(())
+  }
+
+  async fn submit_oauth_code(&mut self, provider_id: &str, input: String) -> Result<()> {
+    self.chat_widget.bottom_pane.dismiss_active_view();
+
+    let Some(flow) = self.pending_oauth_flows.remove(provider_id) else {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          format!("• OAuth session expired for {provider_id}; start Connect again.").dim(),
+        )]));
+      return Ok(());
+    };
+    flow.cancel.cancel();
+
+    let stored = match ProviderAuth::complete_oauth(&flow.pending, Some(&input)).await {
+      Ok(stored) => stored,
+      Err(err) => {
+        self
+          .chat_widget
+          .add_to_history(PlainHistoryCell::new(vec![Line::from(
+            format!("• OAuth connect failed for {provider_id}: {err}").red(),
+          )]));
+        return Ok(());
+      }
+    };
+
+    self
+      .finalize_connected_provider(provider_id, stored)
+      .await?;
     Ok(())
   }
 
@@ -330,11 +593,47 @@ impl App {
       AppEvent::CodexOp(op) => {
         let _ = self.cokra.submit(op).await?;
       }
+      AppEvent::SelectAgentThread { thread_id } => {
+        self.select_agent_thread(tui, thread_id)?;
+      }
       AppEvent::OpenAllModelsPopup { providers } => {
-        self.open_all_models_popup(providers);
+        self.open_all_models_popup(providers).await?;
+      }
+      AppEvent::OpenModelRootPopup => {
+        self.open_model_root_popup();
+      }
+      AppEvent::OpenAvailableModelsPopup => {
+        self.open_available_models_popup().await?;
+      }
+      AppEvent::OpenConnectProvidersPopup => {
+        self.open_connect_providers_popup().await?;
+      }
+      AppEvent::OpenConnectProviderDetail { provider } => {
+        self.open_connect_provider_detail(provider);
+      }
+      AppEvent::StartOAuthConnect { provider_id } => {
+        self.start_oauth_connect(&provider_id).await?;
+      }
+      AppEvent::CancelOAuthConnect { provider_id } => {
+        if let Some(flow) = self.pending_oauth_flows.remove(&provider_id) {
+          flow.cancel.cancel();
+        }
+        self.open_available_models_popup().await?;
+      }
+      AppEvent::DismissBottomPaneView => {
+        self.chat_widget.bottom_pane.dismiss_active_view();
+      }
+      AppEvent::DisconnectProvider { provider_id } => {
+        self.disconnect_provider(&provider_id).await?;
       }
       AppEvent::OpenReasoningPopup { model_id } => {
         self.open_reasoning_popup(model_id);
+      }
+      AppEvent::OpenApiKeyEntry {
+        provider_id,
+        model_id,
+      } => {
+        self.open_api_key_entry(provider_id, model_id, None);
       }
       AppEvent::ApplyModelSelection { model_id, effort } => {
         self
@@ -359,6 +658,32 @@ impl App {
         self
           .apply_model_selection_or_connect(model_id, effort)
           .await?;
+      }
+      AppEvent::OAuthCodeSubmitted { provider_id, input } => {
+        self.submit_oauth_code(&provider_id, input).await?;
+      }
+      AppEvent::OAuthCompleted {
+        provider_id,
+        stored,
+      } => {
+        self.chat_widget.bottom_pane.dismiss_active_view();
+
+        self
+          .finalize_connected_provider(&provider_id, stored)
+          .await?;
+      }
+      AppEvent::OAuthFailed {
+        provider_id,
+        message,
+      } => {
+        if let Some(flow) = self.pending_oauth_flows.remove(&provider_id) {
+          flow.cancel.cancel();
+        }
+        self
+          .chat_widget
+          .add_to_history(PlainHistoryCell::new(vec![Line::from(
+            format!("• OAuth connect failed for {provider_id}: {message}").red(),
+          )]));
       }
       AppEvent::InsertHistoryCell(cell) => {
         self.insert_history_cell(cell, tui)?;
@@ -692,6 +1017,15 @@ impl App {
     text: String,
     text_elements: Vec<cokra_protocol::TextElement>,
   ) -> Result<()> {
+    if self.active_thread_id != self.primary_thread_id {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          "• 当前正在查看成员工作区。请先切回 @main，再向团队负责人发送新指令。".dim(),
+        )]));
+      return Ok(());
+    }
+
     if text.trim().is_empty() {
       return Ok(());
     }
@@ -715,30 +1049,389 @@ impl App {
     Ok(())
   }
 
+  fn ensure_thread_store(&mut self, thread_id: &str) -> &mut ThreadEventStore {
+    self
+      .thread_event_stores
+      .entry(thread_id.to_string())
+      .or_insert_with(|| ThreadEventStore::new(THREAD_EVENT_STORE_CAPACITY))
+  }
+
+  fn remember_agent_thread(
+    &mut self,
+    thread_id: String,
+    nickname: Option<String>,
+    role: Option<String>,
+    is_closed: bool,
+  ) {
+    self.ensure_thread_store(&thread_id);
+    let entry = self.agent_picker_threads.entry(thread_id).or_insert(
+      crate::multi_agents::AgentPickerThreadEntry {
+        nickname: None,
+        role: None,
+        is_closed,
+      },
+    );
+    if nickname.is_some() {
+      entry.nickname = nickname;
+    }
+    if role.is_some() {
+      entry.role = role;
+    }
+    entry.is_closed = is_closed;
+  }
+
+  fn remember_threads_from_snapshot(&mut self) {
+    let Some(snapshot) = self.cokra.team_snapshot() else {
+      return;
+    };
+
+    for member in snapshot.members {
+      let is_closed = matches!(member.status, cokra_protocol::AgentStatus::Completed(_));
+      self.remember_agent_thread(
+        member.thread_id,
+        member.nickname,
+        Some(member.role),
+        is_closed,
+      );
+    }
+  }
+
+  fn note_thread_event_metadata(&mut self, event: &EventMsg) -> bool {
+    match event {
+      EventMsg::CollabAgentSpawnEnd(ev) => {
+        self.remember_agent_thread(
+          ev.agent_id.clone(),
+          ev.nickname.clone(),
+          ev.role.clone(),
+          matches!(ev.status, cokra_protocol::AgentStatus::Completed(_)),
+        );
+        true
+      }
+      EventMsg::CollabCloseEnd(ev) => {
+        self.remember_agent_thread(
+          ev.receiver_thread_id.clone(),
+          ev.receiver_nickname.clone(),
+          ev.receiver_role.clone(),
+          true,
+        );
+        true
+      }
+      EventMsg::CollabWaitingEnd(ev) => {
+        for agent in &ev.agent_statuses {
+          self.remember_agent_thread(
+            agent.thread_id.clone(),
+            agent.nickname.clone(),
+            agent.role.clone(),
+            matches!(agent.status, cokra_protocol::AgentStatus::Completed(_)),
+          );
+        }
+        true
+      }
+      EventMsg::CollabTeamSnapshot(_) => {
+        self.remember_threads_from_snapshot();
+        true
+      }
+      _ => false,
+    }
+  }
+
+  fn known_agent_ref(
+    &self,
+    thread_id: &str,
+    nickname: Option<String>,
+    role: Option<String>,
+  ) -> cokra_protocol::CollabAgentRef {
+    let entry = self.agent_picker_threads.get(thread_id);
+    let nickname = nickname.or_else(|| entry.and_then(|it| it.nickname.clone()));
+    let role = role.or_else(|| entry.and_then(|it| it.role.clone()));
+    cokra_protocol::CollabAgentRef {
+      thread_id: thread_id.to_string(),
+      nickname,
+      role,
+    }
+  }
+
+  fn enrich_collab_event(&self, event: &EventMsg) -> EventMsg {
+    match event {
+      EventMsg::CollabWaitingBegin(ev) => {
+        let mut receivers = ev.receiver_agents.clone();
+        for receiver in &mut receivers {
+          if let Some(entry) = self.agent_picker_threads.get(&receiver.thread_id) {
+            if receiver.nickname.is_none() {
+              receiver.nickname = entry.nickname.clone();
+            }
+            if receiver.role.is_none() {
+              receiver.role = entry.role.clone();
+            }
+          }
+        }
+
+        for thread_id in &ev.receiver_thread_ids {
+          if receivers
+            .iter()
+            .any(|receiver| receiver.thread_id == *thread_id)
+          {
+            continue;
+          }
+          receivers.push(self.known_agent_ref(thread_id, None, None));
+        }
+
+        EventMsg::CollabWaitingBegin(cokra_protocol::CollabWaitingBeginEvent {
+          sender_thread_id: ev.sender_thread_id.clone(),
+          receiver_thread_ids: ev.receiver_thread_ids.clone(),
+          receiver_agents: receivers,
+          call_id: ev.call_id.clone(),
+        })
+      }
+      EventMsg::CollabWaitingEnd(ev) => {
+        let mut entries = if ev.agent_statuses.is_empty() {
+          ev.statuses
+            .iter()
+            .map(|(thread_id, status)| {
+              let entry = self.agent_picker_threads.get(thread_id);
+              cokra_protocol::CollabAgentStatusEntry {
+                thread_id: thread_id.clone(),
+                nickname: entry.and_then(|it| it.nickname.clone()),
+                role: entry.and_then(|it| it.role.clone()),
+                status: status.clone(),
+              }
+            })
+            .collect::<Vec<_>>()
+        } else {
+          ev.agent_statuses.clone()
+        };
+
+        for entry in &mut entries {
+          if let Some(known) = self.agent_picker_threads.get(&entry.thread_id) {
+            if entry.nickname.is_none() {
+              entry.nickname = known.nickname.clone();
+            }
+            if entry.role.is_none() {
+              entry.role = known.role.clone();
+            }
+          }
+        }
+
+        EventMsg::CollabWaitingEnd(cokra_protocol::CollabWaitingEndEvent {
+          sender_thread_id: ev.sender_thread_id.clone(),
+          call_id: ev.call_id.clone(),
+          agent_statuses: entries,
+          statuses: ev.statuses.clone(),
+        })
+      }
+      EventMsg::CollabCloseEnd(ev) => {
+        let entry = self.agent_picker_threads.get(&ev.receiver_thread_id);
+        EventMsg::CollabCloseEnd(cokra_protocol::CollabCloseEndEvent {
+          sender_thread_id: ev.sender_thread_id.clone(),
+          call_id: ev.call_id.clone(),
+          receiver_thread_id: ev.receiver_thread_id.clone(),
+          receiver_nickname: ev
+            .receiver_nickname
+            .clone()
+            .or_else(|| entry.and_then(|it| it.nickname.clone())),
+          receiver_role: ev
+            .receiver_role
+            .clone()
+            .or_else(|| entry.and_then(|it| it.role.clone())),
+          status: ev.status.clone(),
+        })
+      }
+      EventMsg::CollabMessagePosted(ev) => {
+        let sender = self.known_agent_ref(
+          &ev.sender_thread_id,
+          ev.sender_nickname.clone(),
+          ev.sender_role.clone(),
+        );
+        let recipient = ev.recipient_thread_id.as_deref().map(|thread_id| {
+          self.known_agent_ref(
+            thread_id,
+            ev.recipient_nickname.clone(),
+            ev.recipient_role.clone(),
+          )
+        });
+
+        EventMsg::CollabMessagePosted(cokra_protocol::CollabMessagePostedEvent {
+          sender_thread_id: ev.sender_thread_id.clone(),
+          sender_nickname: sender.nickname,
+          sender_role: sender.role,
+          recipient_thread_id: ev.recipient_thread_id.clone(),
+          recipient_nickname: recipient.as_ref().and_then(|agent| agent.nickname.clone()),
+          recipient_role: recipient.as_ref().and_then(|agent| agent.role.clone()),
+          message: ev.message.clone(),
+        })
+      }
+      EventMsg::CollabMessagesRead(ev) => {
+        let reader = self.known_agent_ref(
+          &ev.reader_thread_id,
+          ev.reader_nickname.clone(),
+          ev.reader_role.clone(),
+        );
+        EventMsg::CollabMessagesRead(cokra_protocol::CollabMessagesReadEvent {
+          reader_thread_id: ev.reader_thread_id.clone(),
+          reader_nickname: reader.nickname,
+          reader_role: reader.role,
+          count: ev.count,
+        })
+      }
+      _ => event.clone(),
+    }
+  }
+
+  fn clear_transcript_view(&mut self) {
+    self.transcript_cells.clear();
+    self.transcript_lines_cache.clear();
+    self.active_tail_cache_key = None;
+    self.active_tail_cache_width = 0;
+    self.active_tail_cache_lines.clear();
+    self.deferred_history_lines.clear();
+    self.transcript_cache_width = 0;
+    self.scroll_offset = 0;
+    self.has_emitted_history_lines = false;
+    self.backtrack_render_pending = false;
+  }
+
+  fn drain_replay_history_cells(&mut self, width: u16) {
+    loop {
+      match self.app_event_rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => {
+          self.stage_history_cell(cell, width, None);
+        }
+        Ok(AppEvent::StartCommitAnimation)
+        | Ok(AppEvent::StopCommitAnimation)
+        | Ok(AppEvent::CommitTick) => {
+          // Tradeoff: replay renders historical output immediately instead of
+          // recreating the original typing animation timeline.
+        }
+        Ok(_) => {
+          // Tradeoff: switching threads is a focused replay action. We ignore
+          // unrelated queued app events here so historical rebuilds stay pure.
+        }
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+      }
+    }
+  }
+
+  fn replay_thread_snapshot(&mut self, snapshot: ThreadEventSnapshot, width: u16) {
+    if let Some(event) = snapshot.session_configured {
+      let enriched = self.enrich_collab_event(&event.msg);
+      let _ = self.chat_widget.handle_event(&enriched);
+      self.drain_replay_history_cells(width);
+    }
+
+    for event in snapshot.events {
+      let enriched = self.enrich_collab_event(&event.msg);
+      let _ = self.chat_widget.handle_event(&enriched);
+      self.drain_replay_history_cells(width);
+    }
+  }
+
+  fn select_agent_thread(&mut self, tui: &mut Tui, thread_id: String) -> Result<()> {
+    if self.active_thread_id == thread_id {
+      return Ok(());
+    }
+
+    let Some(snapshot) = self
+      .thread_event_stores
+      .get(&thread_id)
+      .map(ThreadEventStore::snapshot)
+    else {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          format!("• 无法切换到线程 {thread_id}，因为还没有可回放的事件。").dim(),
+        )]));
+      return Ok(());
+    };
+
+    self.active_thread_id = thread_id.clone();
+    if self.ui_mode == UiMode::Inline {
+      let _ = tui.terminal.clear_scrollback();
+    }
+    let _ = tui.terminal.clear();
+    self.chat_widget = ChatWidget::new(self.app_event_tx.clone(), tui.frame_requester(), true);
+    self.chat_widget.bottom_pane.set_status_line_enabled(true);
+    self.clear_transcript_view();
+    self.task_running = false;
+    self.chat_widget.set_agent_turn_running(false);
+    self.pending_approval = None;
+    self.replay_thread_snapshot(snapshot, tui.terminal.last_known_screen_size.width.max(1));
+    if self.ui_mode == UiMode::Inline && !self.deferred_history_lines.is_empty() {
+      let lines = std::mem::take(&mut self.deferred_history_lines);
+      tui.insert_history_lines(lines);
+    }
+    self.sync_bottom_pane_context();
+    Ok(())
+  }
+
   async fn handle_cokra_event(&mut self, event: Event) -> Result<()> {
-    let root_thread_id = self.cokra.thread_id().map(ToString::to_string);
+    if self.note_thread_event_metadata(&event.msg) {
+      // Tradeoff: this recomputes the footer on metadata-only collab events so
+      // member nicknames appear in the status line as soon as they are known.
+      self.refresh_status_line();
+    }
+
+    let owner_thread_id =
+      event_thread_id(&event.msg).unwrap_or_else(|| self.primary_thread_id.clone());
+    self
+      .ensure_thread_store(&owner_thread_id)
+      .push_event(event.clone());
+
+    let is_active_thread = owner_thread_id == self.active_thread_id;
+    let turn_started = matches!(event.msg, EventMsg::TurnStarted(_));
     let turn_finished = matches!(
       event.msg,
       EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)
     );
 
-    if let Some(action) = self.chat_widget.handle_event(&event.msg) {
+    if !is_active_thread {
+      match &event.msg {
+        EventMsg::ExecApprovalRequest(req) => {
+          let pending = self
+            .background_pending_threads
+            .entry(req.thread_id.clone())
+            .or_default();
+          pending.approval_count += 1;
+          self
+            .background_approval_requests
+            .entry(req.thread_id.clone())
+            .or_default()
+            .push(req.clone());
+        }
+        EventMsg::RequestUserInput(req) => {
+          let pending = self
+            .background_pending_threads
+            .entry(req.thread_id.clone())
+            .or_default();
+          pending.user_input_count += 1;
+          self
+            .background_user_input_requests
+            .entry(req.thread_id.clone())
+            .or_default()
+            .push(req.clone());
+        }
+        _ => {}
+      }
+
+      if turn_finished {
+        self.background_pending_threads.remove(&owner_thread_id);
+        self.background_approval_requests.remove(&owner_thread_id);
+        self.background_user_input_requests.remove(&owner_thread_id);
+      }
+
+      self.sync_bottom_pane_context();
+      return Ok(());
+    }
+
+    if turn_started {
+      self.task_running = true;
+      self.chat_widget.set_agent_turn_running(true);
+    }
+
+    let enriched_event = self.enrich_collab_event(&event.msg);
+    if let Some(action) = self.chat_widget.handle_event(&enriched_event) {
       match action {
         ChatWidgetAction::ShowApproval(req) => {
-          if root_thread_id.as_deref() != Some(req.thread_id.as_str()) {
-            let pending = self
-              .background_pending_threads
-              .entry(req.thread_id.clone())
-              .or_default();
-            pending.approval_count += 1;
-            self
-              .background_approval_requests
-              .entry(req.thread_id.clone())
-              .or_default()
-              .push(req.clone());
-            self.sync_bottom_pane_context();
-            return Ok(());
-          }
           self.pending_approval = Some(PendingApproval {
             id: req.id.clone(),
             turn_id: Some(req.turn_id.clone()),
@@ -754,20 +1447,6 @@ impl App {
             }));
         }
         ChatWidgetAction::ShowRequestUserInput(req) => {
-          if root_thread_id.as_deref() != Some(req.thread_id.as_str()) {
-            let pending = self
-              .background_pending_threads
-              .entry(req.thread_id.clone())
-              .or_default();
-            pending.user_input_count += 1;
-            self
-              .background_user_input_requests
-              .entry(req.thread_id.clone())
-              .or_default()
-              .push(req.clone());
-            self.sync_bottom_pane_context();
-            return Ok(());
-          }
           self.chat_widget.bottom_pane.push_user_input_request(req);
         }
       }
@@ -776,18 +1455,16 @@ impl App {
     self.sync_bottom_pane_context();
 
     if turn_finished {
-      if let Some(thread_id) = event_thread_id(&event.msg)
-        && root_thread_id.as_deref() != Some(thread_id.as_str())
-      {
-        self.background_pending_threads.remove(&thread_id);
-        self.background_approval_requests.remove(&thread_id);
-        self.background_user_input_requests.remove(&thread_id);
-      }
+      self.background_pending_threads.remove(&owner_thread_id);
+      self.background_approval_requests.remove(&owner_thread_id);
+      self.background_user_input_requests.remove(&owner_thread_id);
       self.task_running = false;
       self.chat_widget.set_agent_turn_running(false);
       self.pending_approval = None;
       self.chat_widget.bottom_pane.close_approval();
-      self.submit_next_queued_submission().await?;
+      if self.active_thread_id == self.primary_thread_id {
+        self.submit_next_queued_submission().await?;
+      }
     }
 
     Ok(())
@@ -823,7 +1500,7 @@ impl App {
 
     match cmd {
       SlashCommand::Model => {
-        self.open_model_popup().await?;
+        self.open_model_root_popup();
       }
       SlashCommand::New => {
         self.app_event_tx.send(AppEvent::NewSession);
@@ -946,121 +1623,241 @@ impl App {
     Ok(())
   }
 
-  async fn open_model_popup(&mut self) -> Result<()> {
-    use crate::bottom_pane::list_selection_view::SelectionAction;
+  fn open_model_root_popup(&mut self) {
     use crate::bottom_pane::list_selection_view::SelectionItem;
     use crate::bottom_pane::list_selection_view::SelectionViewParams;
     use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 
-    let providers = self
-      .cokra
-      .model_client()
-      .registry()
-      .list_models_catalog()
-      .await;
-    if providers.is_empty() {
-      self
-        .chat_widget
-        .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-          Line::from(vec![
-            ratatui::text::Span::from("No models found. ").red(),
-            ratatui::text::Span::from(
-              "models.dev database is empty or unavailable; try again later.",
-            ),
-          ]),
-        ]));
-      return Ok(());
-    }
-
-    let current_model = self.chat_widget.model_name().to_string();
-
-    let mut all_model_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for provider in &providers {
-      for model in &provider.models {
-        let model_id = if model.starts_with(&format!("{}/", provider.id)) {
-          model.clone()
-        } else {
-          format!("{}/{}", provider.id, model)
-        };
-        all_model_ids.insert(model_id);
-      }
-    }
-
-    let find_candidate = |candidates: &[&str]| -> Option<String> {
-      candidates
-        .iter()
-        .find(|id| all_model_ids.contains(**id))
-        .map(|id| id.to_string())
-    };
-
-    let fast = find_candidate(&[
-      "openai/gpt-4o-mini",
-      "openrouter/openai/gpt-4o-mini",
-      "github/gpt-4o-mini",
-    ]);
-    let balanced = find_candidate(&["openai/gpt-4o", "openrouter/openai/gpt-4o", "github/gpt-4o"]);
-    let thorough = find_candidate(&[
-      "openai/o3",
-      "openai/o1",
-      "openrouter/openai/o1",
-      "github/o1-2024-12-17",
-    ]);
-
-    let mut items: Vec<SelectionItem> = Vec::new();
-    let mut push_auto = |label: &str, model_id: Option<String>| {
-      let Some(model_id) = model_id else {
-        return;
-      };
-      let model_for_action = model_id.clone();
-      let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-        tx.send(AppEvent::ApplyModelSelection {
-          model_id: model_for_action.clone(),
-          effort: None,
-        });
-      })];
-      items.push(SelectionItem {
-        name: label.to_string(),
-        description: Some(model_id.clone()),
-        is_current: model_id == current_model,
-        actions,
+    let items = vec![
+      SelectionItem {
+        name: "Available Models".to_string(),
+        description: Some("Browse usable models from connected providers.".to_string()),
+        actions: vec![Box::new(|tx| tx.send(AppEvent::OpenAvailableModelsPopup))],
         dismiss_on_select: true,
-        search_value: Some(model_id),
         ..Default::default()
-      });
-    };
-
-    push_auto("Auto fast", fast);
-    push_auto("Auto balanced", balanced);
-    push_auto("Auto thorough", thorough);
-
-    let providers_for_popup = providers.clone();
-    let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-      tx.send(AppEvent::OpenAllModelsPopup {
-        providers: providers_for_popup.clone(),
-      });
-    })];
-    let is_current = !items.iter().any(|item| item.is_current);
-    items.push(SelectionItem {
-      name: "All models".to_string(),
-      description: Some(format!(
-        "Choose a specific model and reasoning level (current: {current_model})"
-      )),
-      is_current,
-      actions,
-      dismiss_on_select: true,
-      ..Default::default()
-    });
+      },
+      SelectionItem {
+        name: "Connect".to_string(),
+        description: Some("Connect a provider using OAuth or API key.".to_string()),
+        actions: vec![Box::new(|tx| tx.send(AppEvent::OpenConnectProvidersPopup))],
+        dismiss_on_select: true,
+        ..Default::default()
+      },
+    ];
 
     self
       .chat_widget
       .bottom_pane
       .show_selection_view(SelectionViewParams {
-        title: Some("Select Model".to_string()),
-        subtitle: Some("Pick a quick auto mode or browse all models.".to_string()),
+        title: Some("Model".to_string()),
+        subtitle: Some("Choose whether to browse models or connect a provider.".to_string()),
         footer_hint: Some(standard_popup_hint_line()),
         items,
         ..Default::default()
       });
+  }
+
+  async fn open_available_models_popup(&mut self) -> Result<()> {
+    let providers = self
+      .cokra
+      .model_client()
+      .registry()
+      .list_connected_models_catalog()
+      .await;
+    if providers.is_empty() {
+      use crate::bottom_pane::list_selection_view::SelectionItem;
+      use crate::bottom_pane::list_selection_view::SelectionViewParams;
+      use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+      self
+        .chat_widget
+        .bottom_pane
+        .show_selection_view(SelectionViewParams {
+          title: Some("Available Models".to_string()),
+          subtitle: Some("No providers are connected yet. Go to Connect first.".to_string()),
+          footer_hint: Some(standard_popup_hint_line()),
+          items: vec![SelectionItem {
+            name: "Go to Connect".to_string(),
+            description: Some("Open provider connection menu.".to_string()),
+            actions: vec![Box::new(|tx| tx.send(AppEvent::OpenConnectProvidersPopup))],
+            dismiss_on_select: true,
+            ..Default::default()
+          }],
+          ..Default::default()
+        });
+      return Ok(());
+    }
+    self.open_all_models_popup(providers).await?;
+    Ok(())
+  }
+
+  async fn open_connect_providers_popup(&mut self) -> Result<()> {
+    use crate::bottom_pane::list_selection_view::SelectionItem;
+    use crate::bottom_pane::list_selection_view::SelectionViewParams;
+    use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+    let defs = self
+      .cokra
+      .model_client()
+      .registry()
+      .list_connect_catalog()
+      .await;
+    let mut items = Vec::new();
+    for def in defs {
+      let method_label = match def.connect_method {
+        cokra_core::model::provider::ProviderConnectMethod::ApiKey => "API key",
+        cokra_core::model::provider::ProviderConnectMethod::OAuth => "OAuth",
+        cokra_core::model::provider::ProviderConnectMethod::None => "Manual",
+      };
+      let desc = if def.authenticated {
+        format!("{method_label} • connected")
+      } else {
+        method_label.to_string()
+      };
+      let provider_id = def.id.to_string();
+      let provider = cokra_core::model::ProviderInfo::new(provider_id.clone(), def.name.clone())
+        .connect_method(def.connect_method.clone())
+        .connectable(def.connectable)
+        .env_vars(def.env_vars.clone())
+        .models(def.models.clone())
+        .authenticated(def.authenticated)
+        .visible(def.visible);
+      let actions: Vec<crate::bottom_pane::list_selection_view::SelectionAction> = vec![Box::new(
+        move |tx: &crate::app_event_sender::AppEventSender| {
+          tx.send(AppEvent::OpenConnectProviderDetail {
+            provider: provider.clone(),
+          });
+        },
+      )];
+      items.push(SelectionItem {
+        name: def.name,
+        description: Some(desc),
+        is_current: def.authenticated,
+        actions,
+        dismiss_on_select: true,
+        ..Default::default()
+      });
+    }
+
+    self
+      .chat_widget
+      .bottom_pane
+      .show_selection_view(SelectionViewParams {
+        title: Some("Connect".to_string()),
+        subtitle: Some("Connect a provider using OAuth or API key.".to_string()),
+        footer_hint: Some(standard_popup_hint_line()),
+        items,
+        is_searchable: true,
+        search_placeholder: Some("Filter providers".to_string()),
+        ..Default::default()
+      });
+    Ok(())
+  }
+
+  fn open_connect_provider_detail(&mut self, provider: cokra_core::model::ProviderInfo) {
+    use crate::bottom_pane::list_selection_view::SelectionAction;
+    use crate::bottom_pane::list_selection_view::SelectionItem;
+    use crate::bottom_pane::list_selection_view::SelectionViewParams;
+    use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+
+    let method_label = match provider.connect_method {
+      cokra_core::model::provider::ProviderConnectMethod::ApiKey => "API key",
+      cokra_core::model::provider::ProviderConnectMethod::OAuth => "OAuth",
+      cokra_core::model::provider::ProviderConnectMethod::None => "Manual",
+    };
+
+    let default_model = provider.models.first().cloned().unwrap_or_default();
+    let provider_id = provider.id.clone();
+    let connect_action: SelectionAction =
+      if provider.connect_method == cokra_core::model::provider::ProviderConnectMethod::ApiKey {
+        Box::new(move |tx| {
+          tx.send(AppEvent::OpenApiKeyEntry {
+            provider_id: provider_id.clone(),
+            model_id: default_model.clone(),
+          });
+        })
+      } else {
+        let provider_id = provider.id.clone();
+        Box::new(move |tx| {
+          tx.send(AppEvent::StartOAuthConnect {
+            provider_id: provider_id.clone(),
+          });
+        })
+      };
+
+    let mut items = vec![SelectionItem {
+      name: "Connect".to_string(),
+      description: Some(format!("Method: {method_label}")),
+      actions: vec![connect_action],
+      dismiss_on_select: true,
+      ..Default::default()
+    }];
+
+    if provider.authenticated {
+      let provider_id = provider.id.clone();
+      items.push(SelectionItem {
+        name: "Disconnect".to_string(),
+        description: Some("Remove saved credentials and disconnect provider.".to_string()),
+        actions: vec![Box::new(move |tx| {
+          tx.send(AppEvent::DisconnectProvider {
+            provider_id: provider_id.clone(),
+          });
+        })],
+        dismiss_on_select: true,
+        ..Default::default()
+      });
+    }
+
+    self
+      .chat_widget
+      .bottom_pane
+      .show_selection_view(SelectionViewParams {
+        title: Some(provider.name.clone()),
+        subtitle: Some(format!(
+          "{} • {}",
+          if provider.authenticated {
+            "Connected"
+          } else {
+            "Not connected"
+          },
+          method_label
+        )),
+        footer_note: provider
+          .models
+          .first()
+          .map(|model| Line::from(format!("Default model: {model}")).dim()),
+        footer_hint: Some(standard_popup_hint_line()),
+        items,
+        ..Default::default()
+      });
+  }
+
+  async fn disconnect_provider(&mut self, provider_id: &str) -> Result<()> {
+    use cokra_core::model::auth::AuthManager;
+
+    if let Ok(auth) = AuthManager::new() {
+      let _ = auth.remove(provider_id).await;
+    }
+    if let Some(entry) = PluginRegistry::find(provider_id) {
+      if let Some(runtime_provider_id) = entry.primary_model_provider_id() {
+        let _ = self
+          .cokra
+          .model_client()
+          .registry()
+          .remove(&runtime_provider_id)
+          .await;
+      }
+    } else {
+      let _ = self
+        .cokra
+        .model_client()
+        .registry()
+        .remove(provider_id)
+        .await;
+    }
+    self
+      .chat_widget
+      .add_to_history(PlainHistoryCell::new(vec![Line::from(
+        format!("• Disconnected provider: {provider_id}").dim(),
+      )]));
     Ok(())
   }
 
@@ -1112,7 +1909,10 @@ impl App {
       });
   }
 
-  fn open_all_models_popup(&mut self, providers: Vec<cokra_core::model::ProviderInfo>) {
+  async fn open_all_models_popup(
+    &mut self,
+    providers: Vec<cokra_core::model::ProviderInfo>,
+  ) -> Result<()> {
     use crate::bottom_pane::list_selection_view::SelectionAction;
     use crate::bottom_pane::list_selection_view::SelectionItem;
     use crate::bottom_pane::list_selection_view::SelectionViewParams;
@@ -1134,6 +1934,17 @@ impl App {
             model_id: model_for_action.clone(),
           });
         })];
+        let is_runtime_ready = provider
+          .options
+          .get("runtime_ready")
+          .and_then(serde_json::Value::as_bool)
+          .unwrap_or(true)
+          && self
+            .cokra
+            .model_client()
+            .registry()
+            .has_provider(model_id.split('/').next().unwrap_or_default())
+            .await;
         items.push(SelectionItem {
           name: model_id.clone(),
           description: (idx == 0).then_some(provider.name.clone()),
@@ -1141,6 +1952,10 @@ impl App {
           actions,
           dismiss_on_select: true,
           search_value: Some(model_id),
+          is_disabled: !is_runtime_ready,
+          disabled_reason: (!is_runtime_ready).then_some(
+            "Connected, but model runtime is not wired yet for this provider.".to_string(),
+          ),
           ..Default::default()
         });
       }
@@ -1158,6 +1973,7 @@ impl App {
         search_placeholder: Some("Type to search models".to_string()),
         ..Default::default()
       });
+    Ok(())
   }
 
   fn open_reasoning_popup(&mut self, model_id: String) {
@@ -1284,11 +2100,15 @@ impl App {
       .bottom_pane
       .set_context_window(None, used_tokens);
     self.chat_widget.bottom_pane.set_queued_user_messages(
-      self
-        .queued_submissions
-        .iter()
-        .map(|submission| submission.text.clone())
-        .collect(),
+      if self.active_thread_id == self.primary_thread_id {
+        self
+          .queued_submissions
+          .iter()
+          .map(|submission| submission.text.clone())
+          .collect()
+      } else {
+        Vec::new()
+      },
     );
     self.refresh_status_line();
   }
@@ -1299,6 +2119,22 @@ impl App {
       .values()
       .map(|pending| pending.approval_count + pending.user_input_count)
       .sum()
+  }
+
+  fn active_thread_label(&self) -> String {
+    if self.active_thread_id == self.primary_thread_id {
+      return "@main".to_string();
+    }
+
+    self
+      .agent_picker_threads
+      .get(&self.active_thread_id)
+      .and_then(|entry| entry.nickname.as_deref())
+      .map(|nickname| format!("@{nickname}"))
+      .unwrap_or_else(|| {
+        let short = self.active_thread_id.chars().take(8).collect::<String>();
+        format!("@{short}")
+      })
   }
 
   fn refresh_status_line(&mut self) {
@@ -1323,11 +2159,17 @@ impl App {
 
     let line = match self.status_line_mode {
       StatusLineMode::Minimal => Line::from(vec![
+        ratatui::text::Span::from("view: ").dim(),
+        ratatui::text::Span::from(self.active_thread_label()),
+        ratatui::text::Span::from("  •  ").dim(),
         ratatui::text::Span::from("cwd: ").dim(),
         ratatui::text::Span::from(cwd.display().to_string()),
       ]),
       StatusLineMode::Default => {
         let mut spans = Vec::new();
+        spans.push(ratatui::text::Span::from("view: ").dim());
+        spans.push(ratatui::text::Span::from(self.active_thread_label()));
+        spans.push(ratatui::text::Span::from("  •  ").dim());
         if !model.is_empty() {
           spans.push(ratatui::text::Span::from("model: ").dim());
           spans.push(ratatui::text::Span::from(model));
@@ -1441,59 +2283,102 @@ impl App {
     use crate::bottom_pane::list_selection_view::SelectionViewParams;
     use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 
-    let Some(root_thread_id) = self.cokra.thread_id().map(ToString::to_string) else {
-      self
-        .chat_widget
-        .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "• No active team runtime".dim(),
-        )]));
-      return;
-    };
-    let Some(snapshot) = self.cokra.team_snapshot() else {
-      self
-        .chat_widget
-        .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "• No active team runtime".dim(),
-        )]));
-      return;
-    };
-    let pending_map = self.background_pending_threads.clone();
+    self.remember_threads_from_snapshot();
+    self.remember_agent_thread(
+      self.primary_thread_id.clone(),
+      Some("main".to_string()),
+      Some("leader".to_string()),
+      false,
+    );
 
-    let items = snapshot
-      .members
+    if self.agent_picker_threads.is_empty() {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          "• 当前还没有可切换的团队成员。".dim(),
+        )]));
+      return;
+    }
+
+    let snapshot = self.cokra.team_snapshot();
+    let mut threads = self
+      .agent_picker_threads
+      .iter()
+      .map(|(thread_id, entry)| (thread_id.clone(), entry.clone()))
+      .collect::<Vec<_>>();
+    crate::multi_agents::sort_agent_picker_threads(&mut threads, &self.primary_thread_id);
+
+    let mut initial_selected_idx = None;
+    let items = threads
       .into_iter()
-      .map(|member| {
-        let thread_id = member.thread_id.clone();
+      .enumerate()
+      .map(|(idx, (thread_id, entry))| {
+        if thread_id == self.active_thread_id {
+          initial_selected_idx = Some(idx);
+        }
+        let is_primary = thread_id == self.primary_thread_id;
         let unread = snapshot
-          .unread_counts
-          .get(&member.thread_id)
+          .as_ref()
+          .and_then(|state| state.unread_counts.get(&thread_id))
           .copied()
           .unwrap_or(0);
-        let pending = pending_map
-          .get(&member.thread_id)
+        let pending = self
+          .background_pending_threads
+          .get(&thread_id)
           .map(|item| item.approval_count + item.user_input_count)
           .unwrap_or(0);
-        let role = member.role.clone();
-        let task = member.task.clone();
-        let status = format!("{:?}", member.status);
-        let description = Some(format!("role={role} • unread={unread} • pending={pending}"));
-        let lines = vec![
-          Line::from(format!("• Thread: {}", thread_id)),
-          Line::from(format!("• Role: {}", role)),
-          Line::from(format!("• Task: {}", task)),
-          Line::from(format!("• Status: {}", status)),
-          Line::from(format!("• Unread mailbox: {}", unread)),
-          Line::from(format!("• Background approvals: {}", pending)),
-        ];
+        let status = snapshot.as_ref().and_then(|state| {
+          state
+            .members
+            .iter()
+            .find(|member| member.thread_id == thread_id)
+            .map(|member| format!("{:?}", member.status))
+        });
+        let task = snapshot.as_ref().and_then(|state| {
+          state
+            .members
+            .iter()
+            .find(|member| member.thread_id == thread_id)
+            .map(|member| member.task.clone())
+        });
+        let mut description_parts = Vec::new();
+        if let Some(status) = status {
+          description_parts.push(status);
+        }
+        if unread > 0 {
+          description_parts.push(format!("{unread} unread"));
+        }
+        if pending > 0 {
+          description_parts.push(format!("{pending} pending"));
+        }
+        let description = if description_parts.is_empty() {
+          Some(thread_id.clone())
+        } else {
+          Some(format!("{} • {}", thread_id, description_parts.join(" • ")))
+        };
+        let selected_description = task.map(|task| format!("任务：{task}"));
+        let thread_id_for_action = thread_id.clone();
         let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-          tx.insert_history_cell(PlainHistoryCell::new(lines.clone()));
+          tx.send(AppEvent::SelectAgentThread {
+            thread_id: thread_id_for_action.clone(),
+          });
         })];
         SelectionItem {
-          name: member.thread_id,
+          name: crate::multi_agents::format_agent_picker_item_name(
+            entry.nickname.as_deref(),
+            entry.role.as_deref(),
+            is_primary,
+          ),
           description,
-          is_current: thread_id == root_thread_id,
+          selected_description,
+          is_current: thread_id == self.active_thread_id,
           actions,
           dismiss_on_select: true,
+          search_value: Some(format!(
+            "{} {}",
+            thread_id,
+            entry.nickname.clone().unwrap_or_default()
+          )),
           ..Default::default()
         }
       })
@@ -1503,14 +2388,13 @@ impl App {
       .chat_widget
       .bottom_pane
       .show_selection_view(SelectionViewParams {
-        title: Some("Team Agents".to_string()),
-        subtitle: Some(
-          "Inspect team members, unread mailbox, and background approvals.".to_string(),
-        ),
+        title: Some("Agent Teams".to_string()),
+        subtitle: Some("选择一个成员工作区进行查看；@main 继续负责分派与汇总。".to_string()),
         footer_hint: Some(standard_popup_hint_line()),
         items,
+        initial_selected_idx,
         is_searchable: true,
-        search_placeholder: Some("Filter agents".to_string()),
+        search_placeholder: Some("筛选成员".to_string()),
         ..Default::default()
       });
   }
@@ -1624,11 +2508,45 @@ impl App {
 
 fn event_thread_id(event: &EventMsg) -> Option<String> {
   match event {
+    EventMsg::Error(e) => Some(e.thread_id.clone()),
+    EventMsg::Warning(e) => Some(e.thread_id.clone()),
+    EventMsg::TokenCount(e) => Some(e.thread_id.clone()),
+    EventMsg::AgentMessage(e) => Some(e.thread_id.clone()),
+    EventMsg::AgentMessageDelta(e) => Some(e.thread_id.clone()),
+    EventMsg::AgentMessageContentDelta(e) => Some(e.thread_id.clone()),
+    EventMsg::UserMessage(e) => Some(e.thread_id.clone()),
+    EventMsg::SessionConfigured(e) => Some(e.thread_id.clone()),
+    EventMsg::ThreadNameUpdated(e) => Some(e.thread_id.clone()),
+    EventMsg::ExecCommandBegin(e) => Some(e.thread_id.clone()),
+    EventMsg::ExecCommandOutputDelta(e) => Some(e.thread_id.clone()),
+    EventMsg::ExecCommandEnd(e) => Some(e.thread_id.clone()),
     EventMsg::ExecApprovalRequest(e) => Some(e.thread_id.clone()),
     EventMsg::RequestUserInput(e) => Some(e.thread_id.clone()),
+    EventMsg::StreamError(e) => Some(e.thread_id.clone()),
     EventMsg::TurnComplete(e) => Some(e.thread_id.clone()),
     EventMsg::TurnAborted(e) => Some(e.thread_id.clone()),
     EventMsg::TurnStarted(e) => Some(e.thread_id.clone()),
+    EventMsg::ItemStarted(e) => Some(e.thread_id.clone()),
+    EventMsg::ItemCompleted(e) => Some(e.thread_id.clone()),
+    EventMsg::PlanDelta(e) => Some(e.thread_id.clone()),
+    EventMsg::ReasoningContentDelta(e) => Some(e.thread_id.clone()),
+    EventMsg::ReasoningRawContentDelta(e) => Some(e.thread_id.clone()),
+    EventMsg::CollabAgentSpawnBegin(e) => Some(e.thread_id.clone()),
+    EventMsg::CollabAgentSpawnEnd(e) => Some(e.thread_id.clone()),
+    EventMsg::CollabAgentInteractionBegin(e) => Some(e.thread_id.clone()),
+    EventMsg::CollabAgentInteractionEnd(e) => Some(e.thread_id.clone()),
+    EventMsg::CollabMessagePosted(e) => Some(e.sender_thread_id.clone()),
+    EventMsg::CollabMessagesRead(e) => Some(e.reader_thread_id.clone()),
+    EventMsg::CollabTaskUpdated(e) => Some(e.actor_thread_id.clone()),
+    EventMsg::CollabTeamSnapshot(e) => Some(e.actor_thread_id.clone()),
+    EventMsg::CollabPlanSubmitted(e) => Some(e.actor_thread_id.clone()),
+    EventMsg::CollabPlanDecision(e) => Some(e.actor_thread_id.clone()),
+    EventMsg::CollabWaitingBegin(e) => Some(e.sender_thread_id.clone()),
+    EventMsg::CollabWaitingEnd(e) => Some(e.sender_thread_id.clone()),
+    EventMsg::CollabCloseBegin(e) => Some(e.sender_thread_id.clone()),
+    EventMsg::CollabCloseEnd(e) => Some(e.sender_thread_id.clone()),
+    EventMsg::CollabResumeBegin(e) => Some(e.sender_thread_id.clone()),
+    EventMsg::CollabResumeEnd(e) => Some(e.sender_thread_id.clone()),
     _ => None,
   }
 }

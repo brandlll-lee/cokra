@@ -24,8 +24,10 @@ use cokra_protocol::ReadOnlyAccess;
 use cokra_protocol::SandboxPolicy;
 use cokra_protocol::SessionConfiguredEvent;
 use cokra_protocol::Submission;
+use cokra_protocol::ThreadId;
 use cokra_protocol::TurnAbortedEvent;
 use cokra_protocol::UserInput as ProtocolUserInput;
+use cokra_state::StateDb;
 
 use crate::agent::AgentControl;
 use crate::agent::AgentStatus;
@@ -50,6 +52,7 @@ use crate::tools::router::ToolRunContext;
 use crate::turn::TurnConfig;
 
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 64;
+const ROOT_THREAD_ID_STATE_KEY_SUFFIX: &str = "::root_thread_id";
 
 /// Turn runtime state snapshot.
 #[derive(Debug, Default)]
@@ -138,8 +141,8 @@ impl Cokra {
     let (tx_raw_event, rx_raw_event) = mpsc::channel(512);
     let (tx_event, rx_event) = mpsc::channel(1024);
 
-    let session = Arc::new(Session::new());
-    let root_thread_id = session.thread_id().cloned().unwrap_or_default();
+    let root_thread_id = resolve_or_persist_root_thread_id(&config).await?;
+    let session = Arc::new(Session::new_with_thread_id(root_thread_id.clone()));
     let thread_manager = Arc::new(ThreadManager::new(root_thread_id.clone()));
     let guards = Arc::new(crate::agent::Guards::default());
     let turn_config = build_turn_config(&config);
@@ -418,6 +421,10 @@ impl Cokra {
     self.config.cwd.clone()
   }
 
+  pub fn config(&self) -> &Config {
+    &self.config
+  }
+
   pub fn config_layer_stack(&self) -> Option<cokra_config::ConfigLayerStack> {
     self.config.config_layer_stack.clone()
   }
@@ -455,6 +462,42 @@ impl Cokra {
     }
     Ok(())
   }
+}
+
+async fn resolve_or_persist_root_thread_id(config: &Arc<Config>) -> anyhow::Result<ThreadId> {
+  let state_db = StateDb::new(StateDb::default_path_for(&config.cwd)).await?;
+  let store_key = config.cwd.display().to_string();
+  let key = format!("{store_key}{ROOT_THREAD_ID_STATE_KEY_SUFFIX}");
+
+  if let Some(thread_id) = state_db.load_json::<ThreadId>(&key).await? {
+    return Ok(thread_id);
+  }
+
+  // Migration: infer the prior root thread id from persisted team state when possible.
+  if let Some(inferred) = infer_root_thread_id_from_team_state(&state_db, &store_key).await? {
+    state_db.save_json(&key, &inferred).await?;
+    return Ok(inferred);
+  }
+
+  let thread_id = ThreadId::new();
+  state_db.save_json(&key, &thread_id).await?;
+  Ok(thread_id)
+}
+
+async fn infer_root_thread_id_from_team_state(
+  state_db: &StateDb,
+  store_key: &str,
+) -> anyhow::Result<Option<ThreadId>> {
+  let Some(team_state) = state_db
+    .load_json::<crate::agent::team_state::TeamState>(store_key)
+    .await?
+  else {
+    return Ok(None);
+  };
+
+  Ok(team_state
+    .likely_root_thread_id()
+    .and_then(|id| ThreadId::parse(&id)))
 }
 
 fn build_turn_config(config: &Config) -> TurnConfig {
@@ -2199,6 +2242,7 @@ mod tests {
       .agent_control
       .spawn_agent(
         "inspect repository".to_string(),
+        None,
         Some("explorer".to_string()),
         cokra.thread_id().cloned(),
         1,
@@ -2213,6 +2257,7 @@ mod tests {
       .agent_control
       .spawn_agent(
         "inspect again".to_string(),
+        None,
         Some("explorer".to_string()),
         cokra.thread_id().cloned(),
         1,
@@ -2940,6 +2985,43 @@ mod tests {
     let claimed_task: TeamTask = serde_json::from_str(&claimed.content).expect("claimed json");
     assert_eq!(claimed_task.status, TeamTaskStatus::InProgress);
     assert_eq!(claimed_task.title, "Implement feature");
+  }
+
+  #[tokio::test]
+  async fn test_provider_connect_catalog_marks_api_key_provider_connected() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "mock".to_string();
+    config.models.model = "mock/default".to_string();
+    config.approval.policy = ApprovalMode::Auto;
+    config.cwd = tmpdir.path().to_path_buf();
+
+    let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
+      .await
+      .expect("create cokra");
+
+    let auth = crate::model::auth::AuthManager::new().expect("auth manager");
+    let _ = auth.remove("openrouter").await;
+
+    // Reuse the TUI path's persistence semantics directly via auth manager.
+    auth
+      .save(
+        "openrouter",
+        crate::model::auth::Credentials::ApiKey {
+          key: "test-openrouter-key".to_string(),
+        },
+      )
+      .await
+      .expect("save key");
+
+    let after = cokra
+      .model_client()
+      .registry()
+      .is_connect_catalog_provider_connected("openrouter")
+      .await;
+    assert!(after);
   }
 
   #[tokio::test]

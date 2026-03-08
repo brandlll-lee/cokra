@@ -10,10 +10,14 @@
 //! - Provider implementations in [providers]
 
 pub mod client;
+pub mod connect_catalog;
 pub mod error;
 pub mod metadata;
 pub mod models_dev;
+pub mod oauth_connect;
+pub mod plugin_registry;
 pub mod provider;
+pub mod provider_auth;
 pub mod registry;
 pub mod streaming;
 pub mod transform;
@@ -28,8 +32,10 @@ pub use error::ModelError;
 pub use error::Result;
 pub use metadata::ModelMetadata;
 pub use metadata::ModelMetadataManager;
+pub use plugin_registry::PluginRegistry;
 pub use provider::ModelProvider;
 pub use provider::ProviderInfo;
+pub use provider_auth::ProviderAuth;
 pub use registry::ProviderRegistry;
 pub use streaming::AnthropicUsageParser;
 pub use streaming::OpenAIUsageParser;
@@ -40,6 +46,9 @@ pub use transform::AnthropicTransform;
 pub use transform::EmptyContentHandling;
 pub use transform::MessageTransform;
 pub use transform::OpenAICompatibleTransform;
+pub use transform::ProviderRuntimeKind;
+pub use transform::ProviderRuntimeTransform;
+pub use transform::RuntimeRequestDefaults;
 pub use transform::StreamChunk;
 pub use transform::ToolCallIdFormat;
 pub use transform::TransformConfig;

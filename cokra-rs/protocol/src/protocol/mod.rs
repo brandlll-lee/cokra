@@ -476,8 +476,10 @@ pub struct StreamErrorEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollabAgentSpawnBeginEvent {
   pub thread_id: String,
-  pub agent_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub nickname: Option<String>,
   pub role: String,
+  pub task: String,
 }
 
 /// Collab agent spawn end
@@ -485,7 +487,13 @@ pub struct CollabAgentSpawnBeginEvent {
 pub struct CollabAgentSpawnEndEvent {
   pub thread_id: String,
   pub agent_id: String,
-  pub status: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub nickname: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub role: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub task: Option<String>,
+  pub status: AgentStatus,
 }
 
 /// Collab agent interaction begin
@@ -493,6 +501,11 @@ pub struct CollabAgentSpawnEndEvent {
 pub struct CollabAgentInteractionBeginEvent {
   pub thread_id: String,
   pub agent_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub nickname: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub role: Option<String>,
+  pub message: String,
 }
 
 /// Collab agent interaction end
@@ -500,7 +513,12 @@ pub struct CollabAgentInteractionBeginEvent {
 pub struct CollabAgentInteractionEndEvent {
   pub thread_id: String,
   pub agent_id: String,
-  pub result: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub nickname: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub role: Option<String>,
+  pub message: String,
+  pub status: AgentStatus,
 }
 
 /// Item started event
@@ -534,6 +552,12 @@ impl ThreadId {
     Self {
       uuid: Uuid::new_v4(),
     }
+  }
+
+  pub fn parse(input: &str) -> Option<Self> {
+    Some(Self {
+      uuid: Uuid::parse_str(input).ok()?,
+    })
   }
 
   pub fn generate() -> String {
@@ -1132,6 +1156,25 @@ pub struct ReasoningRawContentDeltaEvent {
   pub content_index: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CollabAgentRef {
+  pub thread_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub nickname: Option<String>,
+  #[serde(default, alias = "agent_type", skip_serializing_if = "Option::is_none")]
+  pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CollabAgentStatusEntry {
+  pub thread_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub nickname: Option<String>,
+  #[serde(default, alias = "agent_type", skip_serializing_if = "Option::is_none")]
+  pub role: Option<String>,
+  pub status: AgentStatus,
+}
+
 // ---------- Additional Collaboration Events ----------
 
 /// Collab waiting begin event
@@ -1139,6 +1182,8 @@ pub struct ReasoningRawContentDeltaEvent {
 pub struct CollabWaitingBeginEvent {
   pub sender_thread_id: String,
   pub receiver_thread_ids: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub receiver_agents: Vec<CollabAgentRef>,
   pub call_id: String,
 }
 
@@ -1147,6 +1192,8 @@ pub struct CollabWaitingBeginEvent {
 pub struct CollabWaitingEndEvent {
   pub sender_thread_id: String,
   pub call_id: String,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub agent_statuses: Vec<CollabAgentStatusEntry>,
   pub statuses: std::collections::HashMap<String, AgentStatus>,
 }
 
@@ -1164,6 +1211,10 @@ pub struct CollabCloseEndEvent {
   pub call_id: String,
   pub sender_thread_id: String,
   pub receiver_thread_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub receiver_nickname: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub receiver_role: Option<String>,
   pub status: AgentStatus,
 }
 
@@ -1188,7 +1239,15 @@ pub struct CollabResumeEndEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollabMessagePostedEvent {
   pub sender_thread_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub sender_nickname: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub sender_role: Option<String>,
   pub recipient_thread_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub recipient_nickname: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub recipient_role: Option<String>,
   pub message: String,
 }
 
@@ -1196,6 +1255,10 @@ pub struct CollabMessagePostedEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollabMessagesReadEvent {
   pub reader_thread_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub reader_nickname: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub reader_role: Option<String>,
   pub count: usize,
 }
 

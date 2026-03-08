@@ -20,6 +20,7 @@ use crate::model::ModelClient;
 use crate::model::ModelError;
 use crate::model::ToolCall as ModelToolCall;
 use crate::model::ToolCallFunction;
+use crate::model::ToolCallProviderMeta;
 use crate::model::Usage;
 use crate::session::Session;
 use crate::tools::context::ToolOutput;
@@ -425,6 +426,13 @@ impl SseTurnExecutor {
         name: call.function.name.clone(),
         arguments: call.function.arguments.clone(),
       },
+      // Preserve thought_signature for Gemini 3 multi-turn function calling
+      provider_meta: call
+        .thought_signature
+        .clone()
+        .map(|sig| ToolCallProviderMeta {
+          thought_signature: Some(sig),
+        }),
     }
   }
 
@@ -698,6 +706,7 @@ mod tests {
             name: name.to_string(),
             arguments: arguments.to_string(),
           },
+          thought_signature: None,
         })),
         MockStep::Error(message) => Ok(ResponseEvent::Error(ResponseErrorEvent {
           message: message.to_string(),

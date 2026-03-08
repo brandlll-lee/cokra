@@ -325,6 +325,21 @@ where
     Ok(())
   }
 
+  /// Clear the entire visible screen and reset the cursor to the origin.
+  ///
+  /// Tradeoff: inline mode intentionally keeps terminal scrollback history, but
+  /// the active viewport should still start from a clean visible canvas instead
+  /// of rendering below build logs or shell output from the launch command.
+  pub fn clear_visible_screen(&mut self) -> io::Result<()> {
+    let home = Position { x: 0, y: 0 };
+    self.set_cursor_position(home)?;
+    self.backend.clear_region(ClearType::All)?;
+    self.set_cursor_position(home)?;
+    std::io::Write::flush(&mut self.backend)?;
+    self.previous_buffer_mut().reset();
+    Ok(())
+  }
+
   /// Clears the inactive buffer and swaps it with the current buffer
   pub fn swap_buffers(&mut self) {
     self.previous_buffer_mut().reset();

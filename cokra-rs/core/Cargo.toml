@@ -35,6 +35,8 @@ chrono = { version = "0.4", features = ["serde"] }
 pin-project = "1.0"
 async-stream = "0.3"
 tokio-util = { workspace = true }
+base64 = "0.22"
+sha2 = "0.10"
 
 [features]
 default = []

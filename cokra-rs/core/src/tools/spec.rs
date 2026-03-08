@@ -386,6 +386,10 @@ fn spawn_agent_tool() -> ToolSpec {
     "message".to_string(),
     str_field("Alias of `task` for Codex-style compatibility."),
   );
+  props.insert(
+    "nickname".to_string(),
+    str_field("Optional human-readable teammate name shown in team UI."),
+  );
   props.insert("role".to_string(), str_field("Agent role."));
   props.insert(
     "agent_type".to_string(),

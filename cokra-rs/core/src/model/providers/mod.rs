@@ -6,6 +6,7 @@ use reqwest::Client;
 use serde_json::Value;
 use serde_json::json;
 
+use super::connect_catalog::RuntimeRegistrationKind;
 use super::error::ModelError;
 use super::error::Result;
 use super::registry::ProviderRegistry;
@@ -20,16 +21,20 @@ use super::types::Message;
 use super::types::ProviderConfig;
 
 pub mod anthropic;
+pub mod codex;
 pub mod github;
 pub mod google;
+pub mod google_cloud_code;
 pub mod lmstudio;
 pub mod ollama;
 pub mod openai;
 pub mod openrouter;
 
 pub use anthropic::AnthropicProvider;
+pub use codex::OpenAICodexProvider;
 pub use github::GitHubCopilotProvider;
 pub use google::GoogleProvider;
+pub use google_cloud_code::GoogleCloudCodeProvider;
 pub use lmstudio::LMStudioProvider;
 pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
@@ -138,6 +143,8 @@ pub async fn register_all_providers(
       .await;
   }
 
+  register_stored_connect_providers(registry, config).await?;
+
   // Set default provider from config
   if !config.models.provider.is_empty() {
     let default_provider = &config.models.provider;
@@ -184,6 +191,18 @@ pub async fn register_all_providers(
             .register_with_config(p, config_to_provider_config(config, default_provider))
             .await;
         }
+        "google-gemini-cli" => {
+          let p = GoogleCloudCodeProvider::new_gemini_cli(api_key, provider_config)?;
+          registry
+            .register_with_config(p, config_to_provider_config(config, default_provider))
+            .await;
+        }
+        "google-antigravity" => {
+          let p = GoogleCloudCodeProvider::new_antigravity(api_key, provider_config)?;
+          registry
+            .register_with_config(p, config_to_provider_config(config, default_provider))
+            .await;
+        }
         "ollama" => {
           let p = OllamaProvider::new(provider_base_url(config, default_provider));
           registry
@@ -219,6 +238,190 @@ pub async fn register_all_providers(
   Ok(())
 }
 
+pub async fn register_provider_by_registration(
+  registry: &ProviderRegistry,
+  config: &cokra_config::Config,
+  registration: RuntimeRegistrationKind,
+  token: String,
+  source_entry_id: Option<&str>,
+  stored: Option<&super::auth::StoredCredentials>,
+  existing_config: Option<&ProviderConfig>,
+) -> Result<()> {
+  match registration {
+    RuntimeRegistrationKind::None => return Ok(()),
+    RuntimeRegistrationKind::OpenAI => {
+      let runtime_config = registration_config(
+        config,
+        "openai",
+        token.clone(),
+        source_entry_id,
+        stored,
+        existing_config,
+      );
+      let provider = OpenAIProvider::new(token, runtime_config.clone());
+      registry
+        .register_with_config(provider, runtime_config)
+        .await;
+    }
+    RuntimeRegistrationKind::OpenAICodex => {
+      let stored = stored.ok_or_else(|| {
+        ModelError::AuthError(
+          "OpenAI Codex runtime registration requires stored OAuth credentials".to_string(),
+        )
+      })?;
+      let runtime_config = registration_config(
+        config,
+        "openai",
+        token,
+        source_entry_id,
+        Some(stored),
+        existing_config,
+      );
+      let provider = OpenAICodexProvider::new(stored, runtime_config.clone())?;
+      registry
+        .register_with_config(provider, runtime_config)
+        .await;
+    }
+    RuntimeRegistrationKind::Anthropic => {
+      let runtime_config = registration_config(
+        config,
+        "anthropic",
+        token.clone(),
+        source_entry_id,
+        stored,
+        existing_config,
+      );
+      let provider = AnthropicProvider::new(token, runtime_config.clone());
+      registry
+        .register_with_config(provider, runtime_config)
+        .await;
+    }
+    RuntimeRegistrationKind::GitHubCopilot => {
+      let runtime_config = registration_config(
+        config,
+        "github",
+        token.clone(),
+        source_entry_id,
+        stored,
+        existing_config,
+      );
+      let provider = if let Some(stored) = stored {
+        if matches!(stored.credentials, super::auth::Credentials::OAuth { .. }) {
+          GitHubCopilotProvider::new_oauth(stored, runtime_config.clone())?
+        } else {
+          GitHubCopilotProvider::new(token, runtime_config.clone())
+        }
+      } else {
+        GitHubCopilotProvider::new(token, runtime_config.clone())
+      };
+      registry
+        .register_with_config(provider, runtime_config)
+        .await;
+    }
+    RuntimeRegistrationKind::Google => {
+      let runtime_config = registration_config(
+        config,
+        "google",
+        token.clone(),
+        source_entry_id,
+        stored,
+        existing_config,
+      );
+      let provider = GoogleProvider::new(token, runtime_config.clone());
+      registry
+        .register_with_config(provider, runtime_config)
+        .await;
+    }
+    RuntimeRegistrationKind::OpenRouter => {
+      let runtime_config = registration_config(
+        config,
+        "openrouter",
+        token.clone(),
+        source_entry_id,
+        stored,
+        existing_config,
+      );
+      let provider = OpenRouterProvider::new(token, runtime_config.clone());
+      registry
+        .register_with_config(provider, runtime_config)
+        .await;
+    }
+    RuntimeRegistrationKind::GoogleGeminiCli => {
+      let runtime_config = registration_config(
+        config,
+        "google-gemini-cli",
+        token.clone(),
+        source_entry_id,
+        stored,
+        existing_config,
+      );
+      let provider = GoogleCloudCodeProvider::new_gemini_cli(token, runtime_config.clone())?;
+      registry
+        .register_with_config(provider, runtime_config)
+        .await;
+    }
+    RuntimeRegistrationKind::GoogleAntigravity => {
+      let runtime_config = registration_config(
+        config,
+        "google-antigravity",
+        token.clone(),
+        source_entry_id,
+        stored,
+        existing_config,
+      );
+      let provider = GoogleCloudCodeProvider::new_antigravity(token, runtime_config.clone())?;
+      registry
+        .register_with_config(provider, runtime_config)
+        .await;
+    }
+  }
+  Ok(())
+}
+
+async fn register_stored_connect_providers(
+  registry: &ProviderRegistry,
+  config: &cokra_config::Config,
+) -> Result<()> {
+  let auth = match super::auth::AuthManager::new() {
+    Ok(auth) => auth,
+    Err(_) => return Ok(()),
+  };
+
+  let openai_codex_present = auth.load("openai-codex").await.ok().flatten().is_some();
+
+  for entry in super::connect_catalog::connect_provider_catalog() {
+    if entry.runtime_registration == RuntimeRegistrationKind::None {
+      continue;
+    }
+    if entry.id == "openai" && openai_codex_present {
+      continue;
+    }
+    let stored = auth
+      .load_for_runtime_registration(entry.id)
+      .await
+      .ok()
+      .flatten();
+    let Some(stored) = stored else {
+      continue;
+    };
+    let Some(token) = registration_token_for_stored(entry.runtime_registration, &stored) else {
+      continue;
+    };
+    register_provider_by_registration(
+      registry,
+      config,
+      entry.runtime_registration,
+      token,
+      Some(entry.id),
+      Some(&stored),
+      None,
+    )
+    .await?;
+  }
+
+  Ok(())
+}
+
 /// Convert Cokra config to provider config
 fn config_to_provider_config(
   config: &cokra_config::Config,
@@ -237,6 +440,121 @@ fn provider_base_url(config: &cokra_config::Config, provider_id: &str) -> Option
     return config.models.base_url.clone();
   }
   None
+}
+
+fn registration_config(
+  config: &cokra_config::Config,
+  provider_id: &str,
+  token: String,
+  source_entry_id: Option<&str>,
+  stored: Option<&super::auth::StoredCredentials>,
+  existing_config: Option<&ProviderConfig>,
+) -> ProviderConfig {
+  let mut runtime_config = existing_config.cloned().unwrap_or_default();
+  let mut headers = runtime_config.headers.clone();
+  if let Some(source_entry_id) = source_entry_id {
+    headers.insert(
+      "x-cokra-connect-source".to_string(),
+      source_entry_id.to_string(),
+    );
+  }
+  let organization = stored.and_then(stored_openai_organization_id);
+  let base_url = stored
+    .and_then(stored_github_base_url)
+    .or_else(|| existing_config.and_then(|config| config.base_url.clone()))
+    .or_else(|| provider_base_url(config, provider_id));
+  runtime_config.provider_id = provider_id.to_string();
+  runtime_config.api_key = Some(token);
+  runtime_config.base_url = base_url;
+  runtime_config.organization =
+    organization.or_else(|| existing_config.and_then(|config| config.organization.clone()));
+  runtime_config.headers = headers;
+  runtime_config
+}
+
+fn stored_openai_organization_id(stored: &super::auth::StoredCredentials) -> Option<String> {
+  stored
+    .metadata
+    .get("organization_id")
+    .and_then(serde_json::Value::as_str)
+    .map(ToString::to_string)
+    .or_else(|| match &stored.credentials {
+      super::auth::Credentials::OAuth { account_id, .. } => account_id.clone(),
+      _ => None,
+    })
+}
+
+fn stored_github_base_url(stored: &super::auth::StoredCredentials) -> Option<String> {
+  match &stored.credentials {
+    super::auth::Credentials::OAuth {
+      enterprise_url: Some(enterprise_url),
+      ..
+    } => {
+      let normalized = enterprise_url
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+      if normalized.is_empty() {
+        None
+      } else {
+        Some(format!("https://copilot-api.{normalized}"))
+      }
+    }
+    _ => None,
+  }
+}
+
+pub fn registration_token_for_stored(
+  registration: RuntimeRegistrationKind,
+  stored: &super::auth::StoredCredentials,
+) -> Option<String> {
+  match registration {
+    RuntimeRegistrationKind::OpenAICodex => match &stored.credentials {
+      super::auth::Credentials::OAuth { access_token, .. } => Some(access_token.clone()),
+      _ => None,
+    },
+    RuntimeRegistrationKind::OpenAI => {
+      let api_key = stored
+        .metadata
+        .get("api_key")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty());
+      if let Some(api_key) = api_key {
+        return Some(api_key.to_string());
+      }
+
+      match &stored.credentials {
+        super::auth::Credentials::ApiKey { key } => Some(key.clone()),
+        super::auth::Credentials::OAuth { access_token, .. } => Some(access_token.clone()),
+        super::auth::Credentials::Bearer { token } => Some(token.clone()),
+        super::auth::Credentials::DeviceCode { .. } => None,
+      }
+    }
+    RuntimeRegistrationKind::GoogleGeminiCli | RuntimeRegistrationKind::GoogleAntigravity => {
+      let access_token = match &stored.credentials {
+        super::auth::Credentials::OAuth { access_token, .. } => access_token.clone(),
+        _ => return None,
+      };
+      let project_id = stored
+        .metadata
+        .get("project_id")
+        .and_then(serde_json::Value::as_str)?;
+      Some(
+        serde_json::json!({
+          "token": access_token,
+          "projectId": project_id,
+        })
+        .to_string(),
+      )
+    }
+    _ => match &stored.credentials {
+      super::auth::Credentials::ApiKey { key } => Some(key.clone()),
+      super::auth::Credentials::OAuth { access_token, .. } => Some(access_token.clone()),
+      super::auth::Credentials::Bearer { token } => Some(token.clone()),
+      super::auth::Credentials::DeviceCode { .. } => None,
+    },
+  }
 }
 
 // =============================================================================
@@ -444,6 +762,10 @@ pub fn create_response_stream_with_usage_parser(
 #[cfg(test)]
 mod tests {
   use super::build_openai_request;
+  use super::registration_token_for_stored;
+  use crate::model::auth::Credentials;
+  use crate::model::auth::StoredCredentials;
+  use crate::model::connect_catalog::RuntimeRegistrationKind;
   use crate::model::types::ChatRequest;
   use crate::model::types::Message;
   use serde_json::json;
@@ -501,5 +823,51 @@ mod tests {
         "content": "done"
       })
     );
+  }
+
+  #[test]
+  fn registration_token_for_openai_prefers_exchanged_api_key() {
+    let mut stored = StoredCredentials::new(
+      "openai-codex",
+      Credentials::OAuth {
+        access_token: "oauth-access".to_string(),
+        refresh_token: "oauth-refresh".to_string(),
+        expires_at: 1,
+        account_id: Some("acc_123".to_string()),
+        enterprise_url: None,
+      },
+    );
+    stored.metadata = json!({
+      "api_key": "sk-chatgpt-exchanged",
+    });
+
+    let token = registration_token_for_stored(RuntimeRegistrationKind::OpenAI, &stored);
+    assert_eq!(token.as_deref(), Some("sk-chatgpt-exchanged"));
+  }
+
+  #[test]
+  fn registration_token_for_google_cloud_code_matches_pi_mono_shape() {
+    let mut stored = StoredCredentials::new(
+      "google-antigravity",
+      Credentials::OAuth {
+        access_token: "oauth-access".to_string(),
+        refresh_token: "oauth-refresh".to_string(),
+        expires_at: 1_777_777_777,
+        account_id: None,
+        enterprise_url: None,
+      },
+    );
+    stored.metadata = json!({
+      "project_id": "proj-123",
+    });
+
+    let token = registration_token_for_stored(RuntimeRegistrationKind::GoogleAntigravity, &stored)
+      .expect("google cloud code registration token");
+    let payload: serde_json::Value =
+      serde_json::from_str(&token).expect("google cloud code registration payload");
+
+    assert_eq!(payload["token"], json!("oauth-access"));
+    assert_eq!(payload["projectId"], json!("proj-123"));
+    assert_eq!(payload.as_object().map(|value| value.len()), Some(2));
   }
 }

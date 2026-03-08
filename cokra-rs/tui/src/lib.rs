@@ -46,8 +46,13 @@ pub async fn run_main(cokra: Cokra, ui_mode: UiMode) -> Result<AppExitInfo> {
   let terminal = tui::init()?;
   let mut tui = tui::Tui::new(terminal);
 
-  if ui_mode == UiMode::AltScreen {
-    tui.enter_alt_screen()?;
+  match ui_mode {
+    UiMode::AltScreen => tui.enter_alt_screen()?,
+    UiMode::Inline => {
+      // Inline should boot into a clean visible canvas, even though we keep
+      // normal scrollback semantics instead of switching to the alt screen.
+      tui.terminal.clear_visible_screen()?;
+    }
   }
 
   let frame_requester = tui.frame_requester();

@@ -27,7 +27,6 @@ use crate::exec_cell::new_active_exec_command;
 use crate::render::renderable::Renderable;
 use crate::status_indicator_widget::fmt_elapsed_compact;
 use crate::style::user_message_style;
-use crate::welcome::WelcomeWidget;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_lines;
 
@@ -396,9 +395,14 @@ fn take_prefix_by_width(text: &str, max_cols: usize) -> (String, &str, usize) {
 
 impl HistoryCell for UserHistoryCell {
   fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-    let wrap_width = width.saturating_sub(3).max(1); // "› " prefix = 2 cols + 1 margin
     let style = user_message_style();
     let element_style = style.fg(Color::Cyan);
+    let use_explicit_box = style.bg.is_none();
+    let wrap_width = if use_explicit_box {
+      width.saturating_sub(4).max(1)
+    } else {
+      width.saturating_sub(3).max(1) // "› " prefix = 2 cols + 1 margin
+    };
 
     let wrapped_remote_images = if self.remote_image_urls.is_empty() {
       None
@@ -441,7 +445,48 @@ impl HistoryCell for UserHistoryCell {
       return Vec::new();
     }
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    if use_explicit_box {
+      // Tradeoff: when terminal default colors are unavailable, bg-only styling
+      // disappears in inline scrollback. We switch to an explicit bordered block
+      // so user-authored messages still read as isolated "bubbles".
+      let border_style = Style::default().dim();
+      let horizontal = "─".repeat(width.saturating_sub(2) as usize);
+      let mut content_lines: Vec<Line<'static>> = Vec::new();
+
+      if let Some(imgs) = wrapped_remote_images {
+        content_lines.extend(imgs);
+        if wrapped_message.is_some() {
+          content_lines.push(Line::from(""));
+        }
+      }
+
+      if let Some(msg) = wrapped_message {
+        content_lines.extend(msg);
+      }
+
+      let mut lines: Vec<Line<'static>> = vec![
+        Line::from(""),
+        Line::from(vec![
+          Span::styled("╭".to_string(), border_style),
+          Span::styled(horizontal.clone(), border_style),
+          Span::styled("╮".to_string(), border_style),
+        ]),
+      ];
+      lines.extend(prefix_lines(
+        content_lines,
+        Span::styled("│ ".to_string(), border_style),
+        Span::styled("│ ".to_string(), border_style),
+      ));
+      lines.push(Line::from(vec![
+        Span::styled("╰".to_string(), border_style),
+        Span::styled(horizontal, border_style),
+        Span::styled("╯".to_string(), border_style),
+      ]));
+      lines.push(Line::from(""));
+      return lines;
+    }
+
+    let mut lines: Vec<Line<'static>> = vec![Line::from("").style(style)];
 
     if let Some(imgs) = wrapped_remote_images {
       lines.extend(prefix_lines(imgs, "  ".into(), "  ".into()));
@@ -454,6 +499,7 @@ impl HistoryCell for UserHistoryCell {
       lines.extend(prefix_lines(msg, "› ".bold().dim(), "  ".into()));
     }
 
+    lines.push(Line::from("").style(style));
     lines
   }
 
@@ -572,44 +618,15 @@ pub(crate) fn new_session_info(
   approval_policy: String,
   sandbox_mode: String,
   cwd: Option<String>,
-  is_first_session: bool,
+  _is_first_session: bool,
 ) -> SessionInfoCell {
-  let mut parts: Vec<Box<dyn HistoryCell>> = Vec::new();
-
-  if is_first_session {
-    parts.push(WelcomeWidget::into_history_cell());
-  }
-
-  parts.push(Box::new(SessionHeaderHistoryCell::new(
-    model,
-    approval_policy,
-    sandbox_mode,
-    cwd,
-  )));
-
-  if is_first_session {
-    parts.push(Box::new(PlainHistoryCell::new(vec![
-      Line::from("  To get started, describe a task or try one of these commands:").dim(),
-      Line::from(""),
-      Line::from(vec![
-        "  ".into(),
-        "/help".into(),
-        " - show available commands".dim(),
-      ]),
-      Line::from(vec![
-        "  ".into(),
-        "/model".into(),
-        " - choose model and reasoning effort".dim(),
-      ]),
-      Line::from(vec![
-        "  ".into(),
-        "/status".into(),
-        " - show current session configuration".dim(),
-      ]),
-    ])));
-  }
-
-  SessionInfoCell(CompositeHistoryCell::new(parts))
+  // Tradeoff: we intentionally keep the session banner minimal in transcript
+  // history. The richer welcome/help content still belongs to the empty-state
+  // UI, but repeating it in committed history makes every fresh terminal launch
+  // feel "dirty" compared with Claude Code.
+  SessionInfoCell(CompositeHistoryCell::new(vec![Box::new(
+    SessionHeaderHistoryCell::new(model, approval_policy, sandbox_mode, cwd),
+  )]))
 }
 
 #[derive(Debug)]
@@ -793,7 +810,7 @@ mod tests {
   }
 
   #[test]
-  fn first_session_info_includes_welcome_header_and_help() {
+  fn first_session_info_only_renders_header() {
     let cell = new_session_info(
       "openrouter/anthropic/claude-haiku-4.5".to_string(),
       "Ask".to_string(),
@@ -803,9 +820,9 @@ mod tests {
     );
 
     let rendered = lines_to_string(&cell.display_lines(80));
-    assert!(rendered.contains("Welcome to Cokra, AI Agent Team CLI Environment"));
     assert!(rendered.contains("┌─ cokra ─ openrouter/anthropic/claude-haiku-4.5"));
-    assert!(rendered.contains("/help - show available commands"));
+    assert!(!rendered.contains("Welcome to Cokra"));
+    assert!(!rendered.contains("/help - show available commands"));
   }
 
   #[test]
@@ -898,5 +915,36 @@ mod tests {
     let rendered = lines_to_string(&cell.display_lines(80));
     assert!(!rendered.contains("Worked for"));
     assert!(rendered.contains("1 in / 2 out"));
+  }
+
+  #[test]
+  fn user_history_cell_adds_visual_spacing_block() {
+    let cell = UserHistoryCell::from_text("hello world".to_string());
+    let lines = cell.display_lines(80);
+    let rendered = lines_to_string(&lines);
+
+    assert!(lines.len() >= 3);
+    assert!(
+      lines
+        .first()
+        .is_some_and(|line| line.spans.iter().all(|span| span.content.is_empty()))
+    );
+    assert!(rendered.contains("hello world"));
+    assert!(rendered.contains("╭") || rendered.contains("› hello world"));
+    assert!(
+      lines
+        .last()
+        .is_some_and(|line| line.spans.iter().all(|span| span.content.is_empty()))
+    );
+  }
+
+  #[test]
+  fn user_history_cell_falls_back_to_visible_box_when_no_terminal_bg() {
+    let cell = UserHistoryCell::from_text("boxed inline message".to_string());
+    let rendered = lines_to_string(&cell.display_lines(80));
+
+    assert!(rendered.contains("╭"));
+    assert!(rendered.contains("╰"));
+    assert!(rendered.contains("boxed inline message"));
   }
 }

@@ -169,6 +169,7 @@ impl AgentControl {
   pub async fn spawn_agent(
     &self,
     task: String,
+    nickname: Option<String>,
     role: Option<String>,
     parent_thread_id: Option<ThreadId>,
     depth: usize,
@@ -195,13 +196,20 @@ impl AgentControl {
       .send(EventMsg::CollabAgentSpawnBegin(
         CollabAgentSpawnBeginEvent {
           thread_id: parent_thread_id.to_string(),
-          agent_id: "pending".to_string(),
+          nickname: nickname.clone(),
           role: role.clone(),
+          task: task.clone(),
         },
       ))
       .await;
 
-    let thread_id = manager.spawn_thread(parent_thread_id, depth, role, task);
+    let thread_id = manager.spawn_thread(
+      parent_thread_id,
+      depth,
+      nickname.clone(),
+      role.clone(),
+      task.clone(),
+    );
     reservation.commit(thread_id.clone());
     manager.notify_thread_created(thread_id.clone());
 
@@ -210,7 +218,12 @@ impl AgentControl {
       .send(EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
         thread_id: thread_id.to_string(),
         agent_id: thread_id.to_string(),
-        status: "created".to_string(),
+        nickname,
+        role: Some(role),
+        task: Some(task),
+        // Tradeoff: emit `Running` immediately after creation so the UI stays stable
+        // and does not need a separate transient "created" state for collab agents.
+        status: cokra_protocol::AgentStatus::Running,
       }))
       .await;
 

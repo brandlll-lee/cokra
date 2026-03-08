@@ -160,6 +160,7 @@ impl ToolRouter {
     // 1:1 codex: for shell tool, pass the actual command string so TUI
     // renders "$ pwd" instead of "$ shell".
     let emitter = tool_emitter_for_call(&call, &run_ctx.cwd);
+    let emit_exec_events = should_emit_exec_events(&call.tool_name);
     let event_ctx = ToolEventCtx {
       session: run_ctx.session.as_ref(),
       tx_event: run_ctx.tx_event.clone(),
@@ -169,7 +170,9 @@ impl ToolRouter {
       tool_name: &call.tool_name,
       cwd: &run_ctx.cwd,
     };
-    emitter.begin(event_ctx.clone()).await;
+    if emit_exec_events {
+      emitter.begin(event_ctx.clone()).await;
+    }
 
     let result = self.orchestrator.run(&mut runtime, &call, &tool_ctx).await;
 
@@ -185,16 +188,20 @@ impl ToolRouter {
           )
           .await;
         }
-        emitter
-          .emit(event_ctx.clone(), ToolEventStage::Success(output.clone()))
-          .await;
+        if emit_exec_events {
+          emitter
+            .emit(event_ctx.clone(), ToolEventStage::Success(output.clone()))
+            .await;
+        }
         Ok(output)
       }
       Err(err) => {
         let fc_err = map_tool_error(err);
-        emitter
-          .emit(event_ctx.clone(), ToolEventStage::Failure(fc_err.clone()))
-          .await;
+        if emit_exec_events {
+          emitter
+            .emit(event_ctx.clone(), ToolEventStage::Failure(fc_err.clone()))
+            .await;
+        }
         Err(fc_err)
       }
     }
@@ -251,6 +258,32 @@ fn tool_emitter_for_call(call: &ToolCall, cwd: &Path) -> ToolEmitter {
     return ToolEmitter::new(call.tool_name.clone());
   };
   ToolEmitter::with_display_command(call.tool_name.clone(), display_command)
+}
+
+fn should_emit_exec_events(tool_name: &str) -> bool {
+  // Tradeoff: team/collab tools now render through dedicated notice cells instead of the
+  // generic exec transcript, because duplicating both views produced the exact UX noise the
+  // user reported: Running/✓ rows plus raw JSON outputs for the same action.
+  !matches!(
+    tool_name,
+    "spawn_agent"
+      | "send_input"
+      | "wait"
+      | "close_agent"
+      | "cleanup_team"
+      | "team_status"
+      | "send_team_message"
+      | "read_team_messages"
+      | "create_team_task"
+      | "update_team_task"
+      | "assign_team_task"
+      | "claim_team_task"
+      | "claim_next_team_task"
+      | "claim_team_messages"
+      | "handoff_team_task"
+      | "submit_team_plan"
+      | "approve_team_plan"
+  )
 }
 
 fn summarize_tool_display_command(call: &ToolCall, cwd: &Path) -> Option<String> {
@@ -510,5 +543,18 @@ fn map_tool_error(err: ToolError) -> FunctionCallError {
     ToolError::Rejected(message) => FunctionCallError::PermissionDenied(message),
     ToolError::SandboxDenied { output, .. } => FunctionCallError::Execution(output),
     ToolError::Execution(message) => FunctionCallError::Execution(message),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::should_emit_exec_events;
+
+  #[test]
+  fn collab_tools_skip_exec_transcript_events() {
+    assert!(!should_emit_exec_events("spawn_agent"));
+    assert!(!should_emit_exec_events("wait"));
+    assert!(!should_emit_exec_events("team_status"));
+    assert!(should_emit_exec_events("read_file"));
   }
 }

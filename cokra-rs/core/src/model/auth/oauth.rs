@@ -76,6 +76,21 @@ impl OAuthManager {
     Self { storage, client }
   }
 
+  async fn persist_oauth_credentials(
+    &self,
+    provider_id: &str,
+    credentials: Credentials,
+  ) -> Result<()> {
+    let mut stored = self
+      .storage
+      .load(provider_id)
+      .await?
+      .unwrap_or_else(|| StoredCredentials::new(provider_id.to_string(), credentials.clone()));
+    stored.credentials = credentials;
+    stored.stored_at = chrono::Utc::now().timestamp() as u64;
+    self.storage.save(stored).await
+  }
+
   /// Starts OAuth device flow.
   pub async fn start_device_flow(&self, config: &OAuthConfig) -> Result<DeviceCodeResponse> {
     let scope = config.scopes.join(" ");
@@ -162,11 +177,7 @@ impl OAuthManager {
           enterprise_url: None,
         };
         self
-          .storage
-          .save(StoredCredentials::new(
-            config.provider_id.clone(),
-            credentials,
-          ))
+          .persist_oauth_credentials(&config.provider_id, credentials)
           .await?;
         return Ok(token);
       }
@@ -246,11 +257,7 @@ impl OAuthManager {
       enterprise_url: None,
     };
     self
-      .storage
-      .save(StoredCredentials::new(
-        config.provider_id.clone(),
-        credentials,
-      ))
+      .persist_oauth_credentials(&config.provider_id, credentials)
       .await?;
 
     Ok(token)

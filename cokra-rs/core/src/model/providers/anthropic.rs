@@ -446,6 +446,7 @@ fn convert_anthropic_response(resp: AnthropicResponse, model: &str) -> ChatRespo
           name: name.clone(),
           arguments: input.clone(),
         },
+        provider_meta: None,
       }),
       _ => None,
     })

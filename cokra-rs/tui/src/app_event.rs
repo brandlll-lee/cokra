@@ -29,6 +29,9 @@ pub(crate) enum ExitMode {
 #[derive(Debug)]
 pub(crate) enum AppEvent {
   CodexOp(Op),
+  SelectAgentThread {
+    thread_id: String,
+  },
   InsertHistoryCell(Box<dyn HistoryCell>),
   Exit(ExitMode),
   FatalExitRequest(String),
@@ -45,7 +48,27 @@ pub(crate) enum AppEvent {
   OpenAllModelsPopup {
     providers: Vec<ProviderInfo>,
   },
+  OpenModelRootPopup,
+  OpenAvailableModelsPopup,
+  OpenConnectProvidersPopup,
+  OpenConnectProviderDetail {
+    provider: ProviderInfo,
+  },
+  StartOAuthConnect {
+    provider_id: String,
+  },
+  CancelOAuthConnect {
+    provider_id: String,
+  },
+  DismissBottomPaneView,
+  DisconnectProvider {
+    provider_id: String,
+  },
   OpenReasoningPopup {
+    model_id: String,
+  },
+  OpenApiKeyEntry {
+    provider_id: String,
     model_id: String,
   },
   ApplyModelSelection {
@@ -58,5 +81,17 @@ pub(crate) enum AppEvent {
     api_key: String,
     model_id: String,
     effort: Option<ReasoningEffortConfig>,
+  },
+  OAuthCodeSubmitted {
+    provider_id: String,
+    input: String,
+  },
+  OAuthCompleted {
+    provider_id: String,
+    stored: cokra_core::model::auth::StoredCredentials,
+  },
+  OAuthFailed {
+    provider_id: String,
+    message: String,
   },
 }

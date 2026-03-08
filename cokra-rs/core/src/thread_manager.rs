@@ -15,6 +15,7 @@ pub struct ThreadInfo {
   pub thread_id: ThreadId,
   pub parent_thread_id: Option<ThreadId>,
   pub depth: usize,
+  pub nickname: Option<String>,
   pub role: String,
   pub task: String,
   pub created_at: i64,
@@ -36,6 +37,7 @@ impl ThreadManagerState {
         thread_id: root_thread_id,
         parent_thread_id: None,
         depth: 0,
+        nickname: None,
         role: "root".to_string(),
         task: "root session".to_string(),
         created_at: Utc::now().timestamp(),
@@ -52,6 +54,7 @@ impl ThreadManagerState {
     &self,
     parent_thread_id: ThreadId,
     depth: usize,
+    nickname: Option<String>,
     role: String,
     task: String,
   ) -> ThreadId {
@@ -60,6 +63,7 @@ impl ThreadManagerState {
       thread_id: thread_id.clone(),
       parent_thread_id: Some(parent_thread_id),
       depth,
+      nickname,
       role,
       task,
       created_at: Utc::now().timestamp(),
@@ -149,10 +153,13 @@ mod tests {
     let manager = ThreadManager::new(root.clone());
     assert!(manager.list_thread_ids().contains(&root));
 
-    let child =
-      manager
-        .state()
-        .spawn_thread(root, 1, "explorer".to_string(), "read files".to_string());
+    let child = manager.state().spawn_thread(
+      root,
+      1,
+      Some("Scout".to_string()),
+      "explorer".to_string(),
+      "read files".to_string(),
+    );
 
     let ids = manager.list_thread_ids();
     assert!(ids.contains(&child));

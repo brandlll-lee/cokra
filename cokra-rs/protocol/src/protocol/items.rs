@@ -81,6 +81,8 @@ pub struct TeamMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TeamMember {
   pub thread_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub nickname: Option<String>,
   pub role: String,
   pub task: String,
   pub depth: usize,

@@ -171,6 +171,26 @@ pub struct ToolCall {
 
   /// The function to call
   pub function: ToolCallFunction,
+
+  /// Provider-specific metadata for round-trip preservation.
+  ///
+  /// Google Gemini 3 models require `thoughtSignature` to be passed back
+  /// in subsequent requests for function calling to work correctly.
+  /// This field stores such provider-specific data that needs to survive
+  /// the round-trip from response -> history -> next request.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub provider_meta: Option<ToolCallProviderMeta>,
+}
+
+/// Provider-specific metadata for tool calls.
+///
+/// Different providers attach different metadata to tool calls that must
+/// be preserved across the conversation history for proper multi-turn behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallProviderMeta {
+  /// Google Gemini thought signature for preserving reasoning state
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub thought_signature: Option<String>,
 }
 
 /// Function call in a tool call
@@ -315,7 +335,7 @@ pub struct ContentDelta {
 }
 
 /// Tool call delta in streaming
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct ToolCallDelta {
   /// ID of the tool call
   #[serde(default)]
@@ -328,6 +348,11 @@ pub struct ToolCallDelta {
   /// Arguments delta
   #[serde(default)]
   pub arguments: Option<String>,
+
+  /// Google Gemini thought signature for preserving reasoning state
+  /// Must be passed back in subsequent requests for multi-turn function calling
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub thought_signature: Option<String>,
 }
 
 /// Chunk message

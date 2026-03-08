@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 use cokra_config::Config;
 use cokra_protocol::AgentStatus as CollabAgentStatus;
+use cokra_protocol::CollabAgentRef;
+use cokra_protocol::CollabAgentStatusEntry;
 use cokra_protocol::TeamMessage;
 use cokra_protocol::TeamMessageKind;
 use cokra_protocol::TeamPlan;
@@ -399,6 +401,7 @@ impl TeamRuntime {
     &self,
     parent_thread_id: &str,
     message: String,
+    nickname: Option<String>,
     role: String,
   ) -> anyhow::Result<ThreadId> {
     let parent = self
@@ -409,6 +412,7 @@ impl TeamRuntime {
       .agent_control
       .spawn_agent(
         message.clone(),
+        nickname,
         Some(role),
         Some(parent),
         depth,
@@ -458,6 +462,42 @@ impl TeamRuntime {
     self
       .handle_for(agent_id)
       .map(|handle| handle.subscribe_status())
+  }
+
+  pub(crate) fn collab_agent_ref(&self, agent_id: &str) -> Option<CollabAgentRef> {
+    let thread = self.find_thread_info(agent_id)?;
+    Some(CollabAgentRef {
+      thread_id: thread.thread_id.to_string(),
+      nickname: thread.nickname,
+      role: Some(thread.role),
+    })
+  }
+
+  pub(crate) fn collab_agent_refs(&self, agent_ids: &[String]) -> Vec<CollabAgentRef> {
+    agent_ids
+      .iter()
+      .filter_map(|agent_id| self.collab_agent_ref(agent_id))
+      .collect()
+  }
+
+  pub(crate) fn collab_agent_status_entries(
+    &self,
+    statuses: &HashMap<String, CollabAgentStatus>,
+  ) -> Vec<CollabAgentStatusEntry> {
+    let mut entries = statuses
+      .iter()
+      .map(|(thread_id, status)| {
+        let thread = self.find_thread_info(thread_id);
+        CollabAgentStatusEntry {
+          thread_id: thread_id.clone(),
+          nickname: thread.as_ref().and_then(|info| info.nickname.clone()),
+          role: thread.map(|info| info.role),
+          status: status.clone(),
+        }
+      })
+      .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+    entries
   }
 
   fn handles_thread(&self, thread_id: &str) -> bool {

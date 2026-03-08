@@ -76,7 +76,11 @@ impl ToolHandler for SendTeamMessageHandler {
       let _ = tx_event
         .send(EventMsg::CollabMessagePosted(CollabMessagePostedEvent {
           sender_thread_id: runtime.thread_id.clone(),
+          sender_nickname: None,
+          sender_role: None,
           recipient_thread_id: args.recipient_thread_id,
+          recipient_nickname: None,
+          recipient_role: None,
           message: args.message,
         }))
         .await;

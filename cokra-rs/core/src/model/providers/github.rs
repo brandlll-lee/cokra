@@ -5,13 +5,17 @@
 use async_trait::async_trait;
 use futures::Stream;
 use reqwest::Client;
+use reqwest::RequestBuilder;
 use serde::Deserialize;
 use serde::Serialize;
 use std::pin::Pin;
 
+use super::super::auth::Credentials;
+use super::super::auth::StoredCredentials;
 use super::super::error::ModelError;
 use super::super::error::Result;
 use super::super::provider::ModelProvider;
+use super::super::transform::ProviderRuntimeTransform;
 use super::super::types::ChatRequest;
 use super::super::types::ChatResponse;
 use super::super::types::Chunk;
@@ -27,15 +31,13 @@ pub struct GitHubCopilotProvider {
   token: String,
   base_url: String,
   use_responses_api: bool,
+  oauth_mode: bool,
 }
 
 impl GitHubCopilotProvider {
   /// Create a new GitHub Copilot provider with a token
   pub fn new(token: String, config: ProviderConfig) -> Self {
-    let base_url = config
-      .base_url
-      .clone()
-      .unwrap_or_else(|| "https://api.githubcopilot.com".to_string());
+    let base_url = provider_base_url(&config, None);
 
     let client = create_client(config.timeout);
 
@@ -45,7 +47,30 @@ impl GitHubCopilotProvider {
       token,
       base_url,
       use_responses_api: true, // Use Responses API by default
+      oauth_mode: false,
     }
+  }
+
+  pub fn new_oauth(stored: &StoredCredentials, config: ProviderConfig) -> Result<Self> {
+    let Credentials::OAuth {
+      access_token,
+      enterprise_url,
+      ..
+    } = &stored.credentials
+    else {
+      return Err(ModelError::AuthError(
+        "GitHub Copilot OAuth provider requires OAuth credentials".to_string(),
+      ));
+    };
+
+    Ok(Self {
+      client: create_client(config.timeout),
+      base_url: provider_base_url(&config, enterprise_url.as_deref()),
+      config,
+      token: access_token.clone(),
+      use_responses_api: true,
+      oauth_mode: true,
+    })
   }
 
   /// Get the API endpoint URL
@@ -62,6 +87,40 @@ impl GitHubCopilotProvider {
   /// Build authorization header
   fn auth_header(&self) -> String {
     format!("Bearer {}", self.token)
+  }
+
+  fn apply_headers(&self, request: RequestBuilder, input: Option<&ChatRequest>) -> RequestBuilder {
+    let mut request = request.header("Authorization", self.auth_header()).header(
+      "User-Agent",
+      if self.oauth_mode {
+        "cokra/github-copilot-oauth"
+      } else {
+        "cokra/github-copilot"
+      },
+    );
+
+    if self.oauth_mode {
+      let initiator = input
+        .and_then(|request| request.messages.last())
+        .map(|message| match message {
+          crate::model::types::Message::User(_) => "user",
+          _ => "agent",
+        })
+        .unwrap_or("user");
+      request = request
+        .header("x-initiator", initiator)
+        .header("Openai-Intent", "conversation-edits");
+    }
+
+    if input.is_some_and(|request| request.model.contains("claude")) {
+      request = request.header("anthropic-beta", "interleaved-thinking-2025-05-14");
+    }
+
+    for (key, value) in &self.config.headers {
+      request = request.header(key, value);
+    }
+
+    request
   }
 }
 
@@ -141,6 +200,8 @@ struct ResponsesApiRequest {
   model: String,
   stream: bool,
   #[serde(skip_serializing_if = "Option::is_none")]
+  store: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   temperature: Option<f32>,
   #[serde(skip_serializing_if = "Option::is_none")]
   max_tokens: Option<u32>,
@@ -165,6 +226,7 @@ impl ModelProvider for GitHubCopilotProvider {
   }
 
   async fn chat_completion(&self, request: ChatRequest) -> Result<ChatResponse> {
+    let request = ProviderRuntimeTransform::from_config(&self.config).normalize_request(request);
     // Choose API based on model
     let use_responses = self.should_use_responses_api(&request.model);
 
@@ -205,7 +267,9 @@ impl ModelProvider for GitHubCopilotProvider {
     &self,
     request: ChatRequest,
   ) -> Result<Pin<Box<dyn Stream<Item = Result<Chunk>> + Send>>> {
+    let request = ProviderRuntimeTransform::from_config(&self.config).normalize_request(request);
     let url = self.endpoint("chat/completions");
+    let model = request.model.clone();
 
     let messages: Vec<CopilotMessage> = request
       .messages
@@ -224,7 +288,7 @@ impl ModelProvider for GitHubCopilotProvider {
 
     let body = CopilotRequest {
       messages,
-      model: request.model,
+      model,
       stream: true,
       temperature: request.temperature,
       max_tokens: request.max_tokens,
@@ -233,9 +297,7 @@ impl ModelProvider for GitHubCopilotProvider {
     };
 
     let response = self
-      .client
-      .post(&url)
-      .header("Authorization", self.auth_header())
+      .apply_headers(self.client.post(&url), Some(&request))
       .header("Content-Type", "application/json")
       .json(&body)
       .send()
@@ -279,9 +341,7 @@ impl ModelProvider for GitHubCopilotProvider {
     };
 
     let response = self
-      .client
-      .post(&url)
-      .header("Authorization", self.auth_header())
+      .apply_headers(self.client.post(&url), None)
       .header("Content-Type", "application/json")
       .json(&body)
       .send()
@@ -327,9 +387,7 @@ impl GitHubCopilotProvider {
     };
 
     let response = self
-      .client
-      .post(&url)
-      .header("Authorization", self.auth_header())
+      .apply_headers(self.client.post(&url), Some(&request))
       .header("Content-Type", "application/json")
       .json(&body)
       .send()
@@ -360,14 +418,13 @@ impl GitHubCopilotProvider {
       messages,
       model: model.clone(),
       stream: false,
+      store: ProviderRuntimeTransform::from_config(&self.config).store_flag(),
       temperature: request.temperature,
       max_tokens: request.max_tokens,
     };
 
     let response = self
-      .client
-      .post(&url)
-      .header("Authorization", self.auth_header())
+      .apply_headers(self.client.post(&url), Some(&request))
       .header("Content-Type", "application/json")
       .json(&body)
       .send()
@@ -450,4 +507,23 @@ fn convert_copilot_response(resp: CopilotResponse, model: &str) -> ChatResponse 
     },
     extra: Default::default(),
   }
+}
+
+fn provider_base_url(config: &ProviderConfig, enterprise_url: Option<&str>) -> String {
+  if let Some(base_url) = config.base_url.clone() {
+    return base_url;
+  }
+
+  if let Some(enterprise_url) = enterprise_url {
+    let normalized = enterprise_url
+      .trim()
+      .trim_start_matches("https://")
+      .trim_start_matches("http://")
+      .trim_end_matches('/');
+    if !normalized.is_empty() {
+      return format!("https://copilot-api.{normalized}");
+    }
+  }
+
+  "https://api.githubcopilot.com".to_string()
 }

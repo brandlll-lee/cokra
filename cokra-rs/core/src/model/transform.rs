@@ -18,6 +18,7 @@ use super::types::ChatResponse;
 use super::types::Choice;
 use super::types::ChoiceMessage;
 use super::types::Message;
+use super::types::ProviderConfig;
 use super::types::ToolCall;
 use super::types::ToolCallFunction;
 use super::types::Usage;
@@ -37,6 +38,111 @@ pub struct StreamChunk {
   pub usage: Option<Usage>,
   /// True when this chunk marks stream completion.
   pub done: bool,
+}
+
+/// Provider runtime family used to align request shaping with opencode's
+/// `session/llm.ts + provider/transform.ts` flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRuntimeKind {
+  Standard,
+  OpenAICodex,
+  GitHubCopilot,
+}
+
+/// Default request values supplied by the client layer before a provider call.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RuntimeRequestDefaults {
+  pub temperature: Option<f32>,
+  pub max_tokens: Option<u32>,
+}
+
+/// Runtime-aware transform for provider request defaults and parameter support.
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderRuntimeTransform {
+  runtime_kind: ProviderRuntimeKind,
+}
+
+impl ProviderRuntimeTransform {
+  pub fn from_config(config: &ProviderConfig) -> Self {
+    let connect_source = config
+      .headers
+      .get("x-cokra-connect-source")
+      .map(String::as_str);
+    Self::from_provider(config.provider_id.as_str(), connect_source)
+  }
+
+  pub fn from_provider(provider_id: &str, connect_source: Option<&str>) -> Self {
+    let runtime_kind = match connect_source {
+      // Tradeoff: runtime selection keys off `x-cokra-connect-source` because
+      // `provider_id` alone collapses multiple logical runtimes into `openai`.
+      Some("openai-codex") => ProviderRuntimeKind::OpenAICodex,
+      Some("github-copilot") => ProviderRuntimeKind::GitHubCopilot,
+      Some("github-copilot-enterprise") => ProviderRuntimeKind::GitHubCopilot,
+      _ if provider_id == "github" => ProviderRuntimeKind::GitHubCopilot,
+      _ => ProviderRuntimeKind::Standard,
+    };
+
+    Self { runtime_kind }
+  }
+
+  pub fn runtime_kind(&self) -> ProviderRuntimeKind {
+    self.runtime_kind
+  }
+
+  pub fn apply_client_defaults(
+    &self,
+    request: ChatRequest,
+    defaults: RuntimeRequestDefaults,
+  ) -> ChatRequest {
+    let mut request = self.normalize_request(request);
+
+    if request.temperature.is_none() {
+      request.temperature = self.default_temperature(defaults);
+    }
+
+    if request.max_tokens.is_none() && self.supports_max_output_tokens() {
+      request.max_tokens = defaults.max_tokens;
+    }
+
+    request
+  }
+
+  pub fn normalize_request(&self, mut request: ChatRequest) -> ChatRequest {
+    match self.runtime_kind {
+      ProviderRuntimeKind::OpenAICodex => {
+        request.temperature = None;
+        request.max_tokens = None;
+      }
+      ProviderRuntimeKind::GitHubCopilot => {
+        request.max_tokens = None;
+      }
+      ProviderRuntimeKind::Standard => {}
+    }
+
+    request
+  }
+
+  pub fn store_flag(&self) -> Option<bool> {
+    match self.runtime_kind {
+      ProviderRuntimeKind::OpenAICodex | ProviderRuntimeKind::GitHubCopilot => Some(false),
+      ProviderRuntimeKind::Standard => None,
+    }
+  }
+
+  pub fn supports_max_output_tokens(&self) -> bool {
+    !matches!(
+      self.runtime_kind,
+      ProviderRuntimeKind::OpenAICodex | ProviderRuntimeKind::GitHubCopilot
+    )
+  }
+
+  fn default_temperature(&self, defaults: RuntimeRequestDefaults) -> Option<f32> {
+    match self.runtime_kind {
+      ProviderRuntimeKind::OpenAICodex => None,
+      ProviderRuntimeKind::GitHubCopilot => Some(0.0),
+      ProviderRuntimeKind::Standard => defaults.temperature,
+    }
+  }
 }
 
 /// Message transform contract for providers.
@@ -351,6 +457,7 @@ impl MessageTransform for AnthropicTransform {
               id,
               call_type: "function".to_string(),
               function: ToolCallFunction { name, arguments },
+              provider_meta: None,
             });
           }
           _ => {}
@@ -630,6 +737,7 @@ fn replace_empty_message(message: &mut Message, replacement: &str) {
 mod tests {
   use super::*;
   use crate::model::types::Message;
+  use crate::model::types::ProviderConfig;
 
   #[test]
   fn test_normalize_tool_call_id_for_mistral() {
@@ -705,5 +813,90 @@ mod tests {
       .expect("parsed");
     assert_eq!(parsed.text, Some("hi".to_string()));
     assert!(!parsed.done);
+  }
+
+  #[test]
+  fn runtime_transform_strips_codex_unsupported_params() {
+    let mut config = ProviderConfig {
+      provider_id: "openai".to_string(),
+      ..Default::default()
+    };
+    config.headers.insert(
+      "x-cokra-connect-source".to_string(),
+      "openai-codex".to_string(),
+    );
+
+    let request = ChatRequest {
+      model: "gpt-5.2-codex".to_string(),
+      messages: vec![Message::User("hello".to_string())],
+      temperature: Some(0.2),
+      max_tokens: Some(2048),
+      ..Default::default()
+    };
+
+    let normalized = ProviderRuntimeTransform::from_config(&config).apply_client_defaults(
+      request,
+      RuntimeRequestDefaults {
+        temperature: Some(0.7),
+        max_tokens: Some(4096),
+      },
+    );
+
+    assert_eq!(normalized.temperature, None);
+    assert_eq!(normalized.max_tokens, None);
+  }
+
+  #[test]
+  fn runtime_transform_applies_copilot_defaults() {
+    let mut config = ProviderConfig {
+      provider_id: "github".to_string(),
+      ..Default::default()
+    };
+    config.headers.insert(
+      "x-cokra-connect-source".to_string(),
+      "github-copilot".to_string(),
+    );
+
+    let request = ChatRequest {
+      model: "gpt-4o".to_string(),
+      messages: vec![Message::User("hello".to_string())],
+      ..Default::default()
+    };
+
+    let normalized = ProviderRuntimeTransform::from_config(&config).apply_client_defaults(
+      request,
+      RuntimeRequestDefaults {
+        temperature: Some(0.7),
+        max_tokens: Some(4096),
+      },
+    );
+
+    assert_eq!(normalized.temperature, Some(0.0));
+    assert_eq!(normalized.max_tokens, None);
+  }
+
+  #[test]
+  fn runtime_transform_preserves_standard_defaults() {
+    let config = ProviderConfig {
+      provider_id: "anthropic".to_string(),
+      ..Default::default()
+    };
+
+    let request = ChatRequest {
+      model: "claude-sonnet-4-20250514".to_string(),
+      messages: vec![Message::User("hello".to_string())],
+      ..Default::default()
+    };
+
+    let normalized = ProviderRuntimeTransform::from_config(&config).apply_client_defaults(
+      request,
+      RuntimeRequestDefaults {
+        temperature: Some(0.7),
+        max_tokens: Some(4096),
+      },
+    );
+
+    assert_eq!(normalized.temperature, Some(0.7));
+    assert_eq!(normalized.max_tokens, Some(4096));
   }
 }

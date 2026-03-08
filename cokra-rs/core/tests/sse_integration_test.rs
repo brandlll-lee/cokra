@@ -166,6 +166,7 @@ impl ModelProvider for MockResponsesProvider {
           name: name.to_string(),
           arguments: arguments.to_string(),
         },
+        thought_signature: None,
       })),
       MockStep::End => Ok(ResponseEvent::EndTurn),
     }));

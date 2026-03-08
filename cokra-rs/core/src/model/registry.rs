@@ -8,9 +8,11 @@ use tokio::sync::RwLock;
 
 use super::ModelProvider;
 use super::ProviderConfig;
+use super::auth::AuthManager;
 use super::error::ModelError;
 use super::error::Result;
 use super::models_dev::ModelsDevClient;
+use super::plugin_registry::PluginRegistry;
 use super::provider::ProviderInfo;
 
 /// Provider Registry
@@ -316,12 +318,98 @@ impl ProviderRegistry {
           .env_vars(mdev_provider.env.clone())
           .authenticated(authenticated)
           .models(models)
+          .visible(authenticated)
           .live(false),
       );
     }
 
     results.sort_by(|a, b| a.name.cmp(&b.name));
     results
+  }
+
+  pub async fn list_connect_catalog(&self) -> Vec<ProviderInfo> {
+    let auth = AuthManager::new().ok();
+    let configs = self.configs.read().await.clone();
+    let mut providers = PluginRegistry::entries()
+      .into_iter()
+      .map(|item| {
+        ProviderInfo::new(item.id, item.name)
+          .connect_method(item.connect_method)
+          .connectable(true)
+          .env_vars(item.env_vars)
+          .models(item.default_models)
+      })
+      .collect::<Vec<_>>();
+
+    for provider in &mut providers {
+      let env_connected = provider.env_vars.iter().any(|env| {
+        std::env::var(env)
+          .ok()
+          .filter(|value| !value.is_empty())
+          .is_some()
+      });
+      let stored_connected = if let Some(auth) = &auth {
+        auth.load(&provider.id).await.ok().flatten().is_some()
+      } else {
+        false
+      };
+      let runtime_connected = PluginRegistry::find(&provider.id)
+        .and_then(|entry| {
+          entry
+            .runtime_provider_id
+            .map(|runtime_provider_id| (entry, runtime_provider_id))
+        })
+        .and_then(|(entry, runtime_provider_id)| {
+          configs
+            .get(runtime_provider_id)
+            .map(|config| (entry, config))
+        })
+        .is_some_and(|(_entry, config)| {
+          config
+            .headers
+            .get("x-cokra-connect-source")
+            .is_some_and(|source| source == &provider.id)
+        });
+      provider.authenticated = env_connected || stored_connected || runtime_connected;
+    }
+
+    providers.sort_by(|a, b| a.name.cmp(&b.name));
+    providers
+  }
+
+  pub async fn list_connected_models_catalog(&self) -> Vec<ProviderInfo> {
+    let connected = self
+      .list_connect_catalog()
+      .await
+      .into_iter()
+      .filter(|provider| provider.authenticated)
+      .collect::<Vec<_>>();
+
+    connected
+      .into_iter()
+      .filter_map(|provider| {
+        let entry = PluginRegistry::find(&provider.id)?;
+        let model_provider_id = entry.primary_model_provider_id()?;
+        let mut info = ProviderInfo::new(model_provider_id, provider.name)
+          .models(provider.models)
+          .authenticated(true)
+          .visible(true)
+          .live(false);
+        info.options = serde_json::json!({
+          "runtime_ready": entry.supports_model_runtime(),
+        });
+        Some(info)
+      })
+      .collect()
+  }
+
+  pub async fn is_connect_catalog_provider_connected(&self, provider_id: &str) -> bool {
+    self
+      .list_connect_catalog()
+      .await
+      .into_iter()
+      .find(|provider| provider.id == provider_id)
+      .is_some_and(|provider| provider.authenticated)
   }
 
   /// Trigger a background refresh of the models.dev database.
@@ -499,5 +587,82 @@ mod tests {
 
     let default = registry.get_default().await.unwrap();
     assert_eq!(default.provider_id(), "test");
+  }
+
+  #[tokio::test]
+  async fn test_connect_catalog_does_not_mark_oauth_provider_connected_from_unrelated_env() {
+    let home = tempfile::tempdir().expect("tempdir");
+
+    unsafe {
+      std::env::set_var("HOME", home.path());
+      std::env::set_var("OPENAI_API_KEY", "test-openai-key-123");
+    }
+
+    let registry = ProviderRegistry::new();
+    let providers = registry.list_connect_catalog().await;
+    let github_copilot = providers
+      .iter()
+      .find(|provider| provider.id == "github-copilot")
+      .expect("github provider");
+    let antigravity = providers
+      .iter()
+      .find(|provider| provider.id == "google-antigravity")
+      .expect("antigravity provider");
+
+    assert!(!github_copilot.authenticated);
+    assert!(!antigravity.authenticated);
+
+    unsafe {
+      std::env::remove_var("OPENAI_API_KEY");
+      std::env::remove_var("HOME");
+    }
+  }
+
+  #[tokio::test]
+  async fn test_connect_catalog_marks_runtime_registered_oauth_source_connected() {
+    let home = tempfile::tempdir().expect("tempdir");
+    unsafe {
+      std::env::set_var("HOME", home.path());
+      std::env::remove_var("OPENAI_API_KEY");
+      std::env::remove_var("OPENROUTER_API_KEY");
+      std::env::remove_var("ANTHROPIC_API_KEY");
+      std::env::remove_var("GOOGLE_API_KEY");
+    }
+
+    let registry = ProviderRegistry::new();
+    registry
+      .register_with_config(
+        TestProvider {
+          id: "openai",
+          name: "OpenAI",
+        },
+        ProviderConfig {
+          provider_id: "openai".to_string(),
+          headers: std::iter::once((
+            "x-cokra-connect-source".to_string(),
+            "openai-codex".to_string(),
+          ))
+          .collect(),
+          ..Default::default()
+        },
+      )
+      .await;
+
+    let providers = registry.list_connect_catalog().await;
+    let openai_codex = providers
+      .iter()
+      .find(|provider| provider.id == "openai-codex")
+      .expect("openai codex provider");
+    let openai = providers
+      .iter()
+      .find(|provider| provider.id == "openai")
+      .expect("openai provider");
+
+    assert!(openai_codex.authenticated);
+    assert!(!openai.authenticated);
+
+    unsafe {
+      std::env::remove_var("HOME");
+    }
   }
 }

@@ -55,6 +55,7 @@ impl TeamState {
       .into_iter()
       .map(|thread| TeamMember {
         thread_id: thread.thread_id.to_string(),
+        nickname: thread.nickname,
         role: thread.role,
         task: thread.task,
         depth: thread.depth,
@@ -376,6 +377,28 @@ impl TeamState {
     self.tasks.clear();
     self.plans.clear();
     self.messages.clear();
+  }
+
+  pub(crate) fn likely_root_thread_id(&self) -> Option<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+
+    for message in self.messages.iter() {
+      *counts.entry(message.sender_thread_id.clone()).or_default() += 2;
+      if let Some(recipient) = &message.recipient_thread_id {
+        *counts.entry(recipient.clone()).or_default() += 1;
+      }
+      if let Some(claimer) = &message.claimed_by_thread_id {
+        *counts.entry(claimer.clone()).or_default() += 1;
+      }
+      for seen in message.seen_by.iter() {
+        *counts.entry(seen.clone()).or_default() += 1;
+      }
+    }
+
+    counts
+      .into_iter()
+      .max_by_key(|(_id, count)| *count)
+      .map(|(id, _)| id)
   }
 
   fn sorted_tasks(&self) -> Vec<TeamTask> {

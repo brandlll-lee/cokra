@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 use futures::Stream;
 use reqwest::Client;
+use reqwest::RequestBuilder;
 use serde::Deserialize;
 use std::pin::Pin;
 
@@ -56,6 +57,25 @@ impl OpenAIProvider {
   fn auth_header(&self) -> String {
     format!("Bearer {}", self.api_key)
   }
+
+  fn apply_headers(&self, request: RequestBuilder) -> RequestBuilder {
+    let mut request = request.header("Authorization", self.auth_header());
+
+    if let Some(org) = self
+      .config
+      .organization
+      .as_deref()
+      .filter(|value| !value.is_empty())
+    {
+      request = request.header("OpenAI-Organization", org);
+    }
+
+    for (key, value) in &self.config.headers {
+      request = request.header(key, value);
+    }
+
+    request
+  }
 }
 
 /// Default models for OpenAI
@@ -105,9 +125,7 @@ impl ModelProvider for OpenAIProvider {
     let body = build_openai_request(request, &model);
 
     let response = self
-      .client
-      .post(&url)
-      .header("Authorization", self.auth_header())
+      .apply_headers(self.client.post(&url))
       .header("Content-Type", "application/json")
       .json(&body)
       .send()
@@ -135,9 +153,7 @@ impl ModelProvider for OpenAIProvider {
     body["stream"] = serde_json::json!(true);
 
     let response = self
-      .client
-      .post(&url)
-      .header("Authorization", self.auth_header())
+      .apply_headers(self.client.post(&url))
       .header("Content-Type", "application/json")
       .json(&body)
       .send()
@@ -151,9 +167,7 @@ impl ModelProvider for OpenAIProvider {
     let url = self.endpoint("models");
 
     let response = self
-      .client
-      .get(&url)
-      .header("Authorization", self.auth_header())
+      .apply_headers(self.client.get(&url))
       .send()
       .await
       .map_err(ModelError::NetworkError)?;
@@ -197,9 +211,7 @@ impl ModelProvider for OpenAIProvider {
     let url = self.endpoint("models");
 
     let response = self
-      .client
-      .get(&url)
-      .header("Authorization", self.auth_header())
+      .apply_headers(self.client.get(&url))
       .send()
       .await
       .map_err(ModelError::NetworkError)?;
@@ -229,5 +241,30 @@ mod tests {
     assert_eq!(OPENAI_MODELS.len(), 13);
     assert!(OPENAI_MODELS.contains(&"gpt-4o"));
     assert!(OPENAI_MODELS.contains(&"o1"));
+  }
+
+  #[test]
+  fn test_openai_provider_applies_organization_header() {
+    let provider = OpenAIProvider::new(
+      "sk-test".to_string(),
+      ProviderConfig {
+        provider_id: "openai".to_string(),
+        organization: Some("org-test".to_string()),
+        ..Default::default()
+      },
+    );
+
+    let request = provider
+      .apply_headers(provider.client.get("https://api.openai.com/v1/models"))
+      .build()
+      .expect("request should build");
+
+    assert_eq!(
+      request
+        .headers()
+        .get("OpenAI-Organization")
+        .and_then(|value| value.to_str().ok()),
+      Some("org-test")
+    );
   }
 }

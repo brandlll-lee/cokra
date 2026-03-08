@@ -92,6 +92,7 @@ impl ToolHandler for WaitHandler {
         .send(EventMsg::CollabWaitingBegin(CollabWaitingBeginEvent {
           sender_thread_id: runtime.thread_id.clone(),
           receiver_thread_ids: agent_ids.clone(),
+          receiver_agents: team_runtime.collab_agent_refs(&agent_ids),
           call_id: invocation.id.clone(),
         }))
         .await;
@@ -113,6 +114,7 @@ impl ToolHandler for WaitHandler {
         .send(EventMsg::CollabWaitingEnd(CollabWaitingEndEvent {
           sender_thread_id: runtime.thread_id.clone(),
           call_id: invocation.id.clone(),
+          agent_statuses: team_runtime.collab_agent_status_entries(&statuses),
           statuses: statuses.clone(),
         }))
         .await;
