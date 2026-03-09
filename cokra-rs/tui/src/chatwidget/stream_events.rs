@@ -27,12 +27,10 @@ impl ChatWidget {
       .stream_controller
       .get_or_insert_with(|| crate::streaming::controller::StreamController::new(wrap_width));
     controller.set_width_if_uncommitted(wrap_width);
-    let committed = controller.push(&filtered_delta);
-    if is_new || committed {
+    let _ = controller.push(&filtered_delta);
+    self.refresh_streaming_agent_preview();
+    if is_new {
       self.app_event_tx.send(AppEvent::StartCommitAnimation);
-    }
-    if committed {
-      self.run_catch_up_commit_tick();
     }
   }
 
@@ -86,26 +84,37 @@ impl ChatWidget {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::app_event::AppEvent;
   use crate::app_event_sender::AppEventSender;
   use crate::tui::FrameRequester;
   use tokio::sync::mpsc::unbounded_channel;
 
   #[test]
-  fn newline_delta_starts_commit_animation_immediately() {
+  fn agent_delta_updates_active_preview_immediately() {
     let (tx, mut rx) = unbounded_channel();
     let sender = AppEventSender::new(tx);
     let mut widget = ChatWidget::new(sender, FrameRequester::test_dummy(), false);
 
-    widget.on_agent_message_delta("item-1", "hello\n");
+    widget.on_agent_message_delta("item-1", "| A | B |\n| --- | --- |\n| 1 | 2 |");
 
-    let mut saw_start = false;
-    while let Ok(event) = rx.try_recv() {
-      if matches!(event, AppEvent::StartCommitAnimation) {
-        saw_start = true;
-      }
-    }
-
-    assert!(saw_start);
+    let lines = widget
+      .active_cell_transcript_lines(80)
+      .expect("stream preview should exist");
+    let rendered = lines
+      .iter()
+      .map(|line| {
+        line
+          .spans
+          .iter()
+          .map(|span| span.content.clone())
+          .collect::<String>()
+      })
+      .collect::<Vec<_>>()
+      .join("\n");
+    assert!(rendered.contains("┌"));
+    assert!(rendered.contains("│ 1"));
+    assert!(
+      rx.try_recv().is_ok(),
+      "stream start should still trigger UI wake-up"
+    );
   }
 }

@@ -76,6 +76,14 @@ impl StreamState {
       .map(|queued| queued.line)
       .collect()
   }
+
+  /// Drops any queued committed lines without emitting them.
+  ///
+  /// This is used by live-preview streams whose current message is rendered from the full buffer
+  /// in the active cell instead of being animated line-by-line into history.
+  pub(crate) fn discard_queued(&mut self) {
+    self.queued_lines.clear();
+  }
   /// Returns whether no lines are queued for commit.
   pub(crate) fn is_idle(&self) -> bool {
     self.queued_lines.is_empty()

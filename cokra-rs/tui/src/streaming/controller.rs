@@ -13,7 +13,6 @@ use super::StreamState;
 /// commit animation across streams.
 pub(crate) struct StreamController {
   state: StreamState,
-  finishing_after_drain: bool,
   header_emitted: bool,
 }
 
@@ -21,13 +20,20 @@ impl StreamController {
   pub(crate) fn new(width: Option<usize>) -> Self {
     Self {
       state: StreamState::new(width),
-      finishing_after_drain: false,
       header_emitted: false,
     }
   }
 
   pub(crate) fn set_width_if_uncommitted(&mut self, width: Option<usize>) {
     self.state.collector.set_width_if_uncommitted(width);
+  }
+
+  pub(crate) fn preview_lines(&self) -> Vec<Line<'static>> {
+    self.state.collector.preview_lines()
+  }
+
+  pub(crate) fn discard_queued(&mut self) {
+    self.state.discard_queued();
   }
 
   /// Push a delta; if it contains a newline, commit completed lines and start animation.
@@ -67,7 +73,6 @@ impl StreamController {
 
     // Cleanup
     self.state.clear();
-    self.finishing_after_drain = false;
     self.emit(out_lines)
   }
 

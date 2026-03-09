@@ -24,6 +24,7 @@ use cokra_protocol::RequestUserInputEvent;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPane;
+use crate::history_cell::AgentMessageCell;
 use crate::history_cell::ApprovalRequestedHistoryCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
@@ -122,13 +123,57 @@ impl ChatWidget {
   }
 
   fn flush_stream_controllers(&mut self) {
-    self
-      .transcript
-      .flush_stream_controllers(&self.app_event_tx, self.streaming_wrap_width());
+    let wrap_width = self.streaming_wrap_width();
+
+    if let Some(filter) = self.transcript.xml_tool_filter.as_mut() {
+      let remaining = filter.flush();
+      if !remaining.is_empty() {
+        let controller = self
+          .transcript
+          .stream_controller
+          .get_or_insert_with(|| crate::streaming::controller::StreamController::new(wrap_width));
+        controller.set_width_if_uncommitted(wrap_width);
+        let _ = controller.push(&remaining);
+        self.refresh_streaming_agent_preview();
+      }
+    }
+    self.transcript.xml_tool_filter = None;
+    self.transcript.stream_controller = None;
+
+    if let Some(mut controller) = self.transcript.plan_stream_controller.take()
+      && let Some(cell) = controller.finalize()
+    {
+      self.add_boxed_history(cell);
+    }
   }
 
   fn bump_active_cell_revision(&mut self) {
     self.transcript.bump_active_cell_revision();
+  }
+
+  fn refresh_streaming_agent_preview(&mut self) {
+    let Some(controller) = self.transcript.stream_controller.as_mut() else {
+      return;
+    };
+    controller.discard_queued();
+    let lines = controller.preview_lines();
+    if lines.is_empty() {
+      return;
+    }
+
+    if let Some(cell) = self
+      .transcript
+      .active_cell
+      .as_mut()
+      .and_then(|cell| cell.as_any_mut().downcast_mut::<AgentMessageCell>())
+    {
+      cell.replace_lines(lines);
+    } else {
+      self.flush_active_cell();
+      self.transcript.active_cell = Some(Box::new(AgentMessageCell::new(lines, true)));
+    }
+
+    self.bump_active_cell_revision();
   }
 
   pub(crate) fn set_agent_turn_running(&mut self, running: bool) {

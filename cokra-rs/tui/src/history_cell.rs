@@ -643,8 +643,8 @@ impl AgentMessageCell {
     }
   }
 
-  pub(crate) fn append_lines(&mut self, new_lines: Vec<Line<'static>>) {
-    self.lines.extend(new_lines);
+  pub(crate) fn replace_lines(&mut self, lines: Vec<Line<'static>>) {
+    self.lines = lines;
   }
 }
 

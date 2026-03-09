@@ -40,6 +40,31 @@ impl MarkdownStreamCollector {
     self.buffer.push_str(delta);
   }
 
+  /// Render the current buffer as a live preview for the active streaming cell.
+  ///
+  /// Tradeoff: we append a temporary trailing newline so Markdown blocks that close at EOF
+  /// (notably tables) render progressively while the stream is still in flight.
+  pub fn preview_lines(&self) -> Vec<Line<'static>> {
+    if self.buffer.is_empty() {
+      return Vec::new();
+    }
+
+    let mut source = self.buffer.clone();
+    if !source.ends_with('\n') {
+      source.push('\n');
+    }
+
+    let mut rendered: Vec<Line<'static>> = Vec::new();
+    markdown::append_markdown(&source, self.width, &mut rendered);
+    while rendered
+      .last()
+      .is_some_and(crate::render::line_utils::is_blank_line_spaces_only)
+    {
+      rendered.pop();
+    }
+    rendered
+  }
+
   /// Render the full buffer and return only the newly completed logical lines
   /// since the last commit. When the buffer does not end with a newline, the
   /// final rendered line is considered incomplete and is not emitted.
