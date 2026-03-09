@@ -6,6 +6,7 @@ use ratatui::text::Span;
 use ratatui::text::Text;
 
 use crate::markdown_render::render_markdown_text;
+use crate::markdown_render::render_markdown_text_with_width;
 use crate::terminal_palette::light_blue;
 use insta::assert_snapshot;
 
@@ -199,6 +200,30 @@ fn renders_markdown_tables_with_box_drawing() {
       "│ a    │ bb  │".to_string(),
       "│ 中文 │ z   │".to_string(),
       "└──────┴─────┘".to_string(),
+    ]
+  );
+}
+
+#[test]
+fn clamps_tables_with_prefix_width_when_wrapping_is_enabled() {
+  // When a table is nested (e.g. inside a blockquote), the prefix consumes terminal columns. We
+  // must clamp based on the post-prefix width; otherwise the general word-wrapping would break the
+  // box drawing layout.
+  let md = "> | H1 | H2 |\n> | --- | --- |\n> | 中文中文 | z |\n";
+  let text = render_markdown_text_with_width(md, Some(18));
+  let lines: Vec<String> = text
+    .lines
+    .iter()
+    .map(|l| l.spans.iter().map(|s| s.content.clone()).collect::<String>())
+    .collect();
+  assert_eq!(
+    lines,
+    vec![
+      "> ┌────────┬─────┐".to_string(),
+      "> │ H1     │ H2  │".to_string(),
+      "> ├────────┼─────┤".to_string(),
+      "> │ 中文中 │ z   │".to_string(),
+      "> └────────┴─────┘".to_string(),
     ]
   );
 }

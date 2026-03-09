@@ -119,7 +119,7 @@ where
   current_initial_indent: Vec<Span<'static>>,
   current_subsequent_indent: Vec<Span<'static>>,
   current_line_style: Style,
-  current_line_in_code_block: bool,
+  current_line_preformatted: bool,
   table_state: Option<TableRenderState>,
 }
 
@@ -145,7 +145,7 @@ where
       current_initial_indent: Vec::new(),
       current_subsequent_indent: Vec::new(),
       current_line_style: Style::default(),
-      current_line_in_code_block: false,
+      current_line_preformatted: false,
       table_state: None,
     }
   }
@@ -493,13 +493,19 @@ where
     }
 
     if let Some(max_width) = self.wrap_width {
-      clamp_table_widths(&mut col_widths, max_width);
+      // Tables are rendered as fixed-width box drawing output. When tables are nested inside a
+      // list or blockquote, the line prefix consumes part of the available width. Clamp using the
+      // post-prefix width to avoid clipping in the UI.
+      let prefix = self.prefix_spans(false);
+      let prefix_width = Line::from(prefix).width();
+      let available = max_width.saturating_sub(prefix_width).max(1);
+      clamp_table_widths(&mut col_widths, available);
     }
 
     let border_style = self.styles.table_border;
 
     let top = render_table_border(&col_widths, '┌', '┬', '┐', '─');
-    self.push_line(Line::from(Span::styled(top, border_style)));
+    self.push_preformatted_line(Line::from(Span::styled(top, border_style)));
 
     let header_rows = if state.header_rows > 0 {
       state.header_rows.min(state.rows.len())
@@ -526,16 +532,16 @@ where
         spans.push(Span::from(format!(" {} ", padded)));
         spans.push(Span::styled("│", border_style));
       }
-      self.push_line(Line::from(spans));
+      self.push_preformatted_line(Line::from(spans));
 
       if header_rows > 0 && row_idx + 1 == header_rows && row_idx + 1 < state.rows.len() {
         let sep = render_table_border(&col_widths, '├', '┼', '┤', '─');
-        self.push_line(Line::from(Span::styled(sep, border_style)));
+        self.push_preformatted_line(Line::from(Span::styled(sep, border_style)));
       }
     }
 
     let bottom = render_table_border(&col_widths, '└', '┴', '┘', '─');
-    self.push_line(Line::from(Span::styled(bottom, border_style)));
+    self.push_preformatted_line(Line::from(Span::styled(bottom, border_style)));
     self.needs_newline = true;
   }
 
@@ -634,8 +640,9 @@ where
   fn flush_current_line(&mut self) {
     if let Some(line) = self.current_line_content.take() {
       let style = self.current_line_style;
-      // NB we don't wrap code in code blocks, in order to preserve whitespace for copy/paste.
-      if !self.current_line_in_code_block
+      // NB we don't wrap preformatted lines (code blocks, tables), in order to preserve the
+      // expected layout and whitespace for copy/paste.
+      if !self.current_line_preformatted
         && let Some(width) = self.wrap_width
       {
         let opts = RtOptions::new(width)
@@ -653,11 +660,19 @@ where
       }
       self.current_initial_indent.clear();
       self.current_subsequent_indent.clear();
-      self.current_line_in_code_block = false;
+      self.current_line_preformatted = false;
     }
   }
 
   fn push_line(&mut self, line: Line<'static>) {
+    self.push_line_with_preformatted(line, self.in_code_block);
+  }
+
+  fn push_preformatted_line(&mut self, line: Line<'static>) {
+    self.push_line_with_preformatted(line, true);
+  }
+
+  fn push_line_with_preformatted(&mut self, line: Line<'static>, preformatted: bool) {
     self.flush_current_line();
     let blockquote_active = self
       .indent_stack
@@ -674,7 +689,7 @@ where
     self.current_subsequent_indent = self.prefix_spans(false);
     self.current_line_style = style;
     self.current_line_content = Some(line);
-    self.current_line_in_code_block = self.in_code_block;
+    self.current_line_preformatted = preformatted;
 
     self.pending_marker_line = false;
   }
