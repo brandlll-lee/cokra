@@ -1,8 +1,8 @@
 //! Welcome screen with cokra logo.
 //!
-//! Inline mode does not have a persistent header region like alt-screen UIs.
-//! To emulate Codex behavior, we insert these lines into the transcript as the
-//! first history cell so they appear at startup in both inline and alt-screen.
+//! Cokra preserves all inline scrollback history, including startup onboarding.
+//! We therefore commit the welcome banner as the first transcript history cell
+//! so it remains visible after later turns and session events.
 
 use cokra_config::Config;
 use ratatui::buffer::Buffer;
@@ -179,14 +179,6 @@ impl WelcomeWidget {
       lines.pop();
     }
     Box::new(PlainHistoryCell::new(lines))
-  }
-
-  pub(crate) fn startup_line_count(ctx: &WelcomeContext, width: u16) -> u16 {
-    Paragraph::new(Self::generate_lines(ctx, true))
-      .wrap(Wrap { trim: false })
-      .line_count(width.max(1))
-      .try_into()
-      .unwrap_or(0)
   }
 }
 
