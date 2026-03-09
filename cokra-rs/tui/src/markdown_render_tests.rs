@@ -182,6 +182,28 @@ fn list_item_with_inline_blockquote_on_same_line() {
 }
 
 #[test]
+fn renders_markdown_tables_with_box_drawing() {
+  let md = "| H1 | H2 |\n| --- | --- |\n| a | bb |\n| 中文 | z |\n";
+  let text = render_markdown_text(md);
+  let lines: Vec<String> = text
+    .lines
+    .iter()
+    .map(|l| l.spans.iter().map(|s| s.content.clone()).collect::<String>())
+    .collect();
+  assert_eq!(
+    lines,
+    vec![
+      "┌──────┬─────┐".to_string(),
+      "│ H1   │ H2  │".to_string(),
+      "├──────┼─────┤".to_string(),
+      "│ a    │ bb  │".to_string(),
+      "│ 中文 │ z   │".to_string(),
+      "└──────┴─────┘".to_string(),
+    ]
+  );
+}
+
+#[test]
 fn blockquote_surrounded_by_blank_lines() {
   let md = "foo\n\n> bar\n\nbaz\n";
   let text = render_markdown_text(md);

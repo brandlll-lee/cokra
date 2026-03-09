@@ -32,6 +32,7 @@ use cokra_state::StateDb;
 use crate::agent::AgentControl;
 use crate::agent::AgentStatus;
 use crate::agent::Turn;
+use crate::agent::team_runtime::build_leader_agent_teams_prompt_suffix;
 use crate::agent::team_runtime::clear_team_runtime;
 use crate::agent::team_runtime::register_team_runtime;
 use crate::agent::team_runtime::runtime_for_thread;
@@ -507,10 +508,14 @@ fn build_turn_config(config: &Config) -> TurnConfig {
   let model = config.models.model.trim();
 
   let resolved_model = resolve_model_id(provider, model);
+  let mut system_prompt = build_system_prompt();
+  if config.agents.max_threads > 1 {
+    system_prompt.push_str(build_leader_agent_teams_prompt_suffix());
+  }
 
   TurnConfig {
     model: resolved_model,
-    system_prompt: Some(build_system_prompt()),
+    system_prompt: Some(system_prompt),
     approval_policy: map_approval_policy(config),
     sandbox_policy: map_sandbox_policy(config),
     cwd: config.cwd.clone(),

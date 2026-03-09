@@ -15,7 +15,7 @@ pub struct SpawnAgentHandler;
 struct SpawnAgentArgs {
   #[serde(alias = "initial_task")]
   task: Option<String>,
-  #[serde(alias = "input")]
+  #[serde(alias = "input", alias = "prompt")]
   message: Option<String>,
   #[serde(alias = "name")]
   nickname: Option<String>,

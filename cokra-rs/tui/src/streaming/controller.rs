@@ -200,7 +200,7 @@ impl PlanStreamController {
     let mut out_lines: Vec<Line<'static>> = Vec::new();
     let is_stream_continuation = self.header_emitted;
     if !self.header_emitted {
-      out_lines.push(vec!["• ".dim(), "Proposed Plan".bold()].into());
+      out_lines.push(vec!["● ".dim(), "Proposed Plan".bold()].into());
       out_lines.push(Line::from(" "));
       self.header_emitted = true;
     }

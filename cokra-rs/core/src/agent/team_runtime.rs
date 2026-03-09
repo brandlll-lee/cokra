@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use anyhow::Context;
+use cokra_protocol::BackgroundEventEvent;
 use cokra_protocol::EventMsg;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -662,6 +663,14 @@ impl TeamRuntime {
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .insert(thread_id.to_string(), handle);
 
+    let root_tx_event_for_bg = self.root_tx_event.clone();
+    let nickname_display = thread_info
+      .as_ref()
+      .and_then(|info| info.nickname.clone())
+      .map(|value| value.trim().to_string())
+      .filter(|value| !value.is_empty())
+      .unwrap_or_else(|| "agent".to_string());
+
     tokio::spawn(async move {
       while let Some(command) = rx_cmd.recv().await {
         match command {
@@ -673,15 +682,29 @@ impl TeamRuntime {
             };
             match agent_control.process_turn(turn).await {
               Ok(result) => {
-                let final_message = if result.content.trim().is_empty() {
-                  None
-                } else {
-                  Some(result.content)
-                };
+                let has_output = !result.content.trim().is_empty();
+                let final_message = has_output.then_some(result.content);
                 let _ = status_tx.send(CollabAgentStatus::Completed(final_message));
+                let bg_msg = if has_output {
+                  format!("@{nickname_display} 已完成任务")
+                } else {
+                  format!("@{nickname_display} 已完成（无输出）")
+                };
+                let _ = root_tx_event_for_bg
+                  .send(EventMsg::BackgroundEvent(BackgroundEventEvent {
+                    message: bg_msg,
+                  }))
+                  .await;
               }
               Err(err) => {
-                let _ = status_tx.send(CollabAgentStatus::Errored(err.to_string()));
+                let err = err.to_string();
+                let _ = status_tx.send(CollabAgentStatus::Errored(err.clone()));
+                let bg_msg = format!("@{nickname_display} 失败：{err}");
+                let _ = root_tx_event_for_bg
+                  .send(EventMsg::BackgroundEvent(BackgroundEventEvent {
+                    message: bg_msg,
+                  }))
+                  .await;
               }
             }
           }
@@ -738,4 +761,36 @@ fn build_spawned_agent_system_prompt(base: &str, nickname: Option<&str>, role: &
     "- Keep outputs concise and oriented toward helping @main (key findings, clear recommendation, and any follow-up questions).\n",
   );
   out
+}
+
+/// 为主代理（leader/orchestrator）构建 agent-teams 系统提示后缀。
+/// 当 agent-teams 功能启用时，追加到主代理的系统提示末尾。
+pub(crate) fn build_leader_agent_teams_prompt_suffix() -> &'static str {
+  r#"
+
+# Agent Teams: orchestrator mode
+
+You have access to agent teams tools for spawning and managing teammate agents.
+
+## Critical rules for agent teams:
+
+1. **Always use tool calls**: You MUST use the `spawn_agent` tool to create teammates. Never pretend to spawn agents by writing XML or fake tool calls in your text output.
+
+2. **Always wait for results**: After spawning agents and sending them input, you MUST use the `wait` tool to wait for their completion. The `wait` tool returns the actual output from each agent.
+
+3. **Never fabricate agent outputs**: You do NOT know what agents will say until `wait` returns their completed status with output. Never write fake responses on behalf of your teammates.
+
+4. **Re-wait on timeout**: If `wait` returns with agents still in `Running` status, call `wait` again with a longer timeout. Do not assume the task failed.
+
+5. **Use appropriate timeouts**: For complex discussion/research tasks, use timeout_ms of 120000 (2 minutes) or higher. The default 30 seconds is often too short for LLM-powered agents.
+
+6. **Clean up**: Use `close_agent` or `cleanup_team` when the team's work is complete.
+
+## Tool usage pattern:
+1. `spawn_agent` with `task` parameter → returns agent_id
+2. `wait` with agent_ids → returns status + output when agents complete
+3. `send_input` to provide follow-up messages to specific agents
+4. `wait` again for responses
+5. `close_agent` or `cleanup_team` when done
+"#
 }

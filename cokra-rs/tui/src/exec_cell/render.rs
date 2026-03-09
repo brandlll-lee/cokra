@@ -258,7 +258,7 @@ impl ExecCell {
       if self.is_active() {
         spinner(self.active_start_time(), self.animations_enabled())
       } else {
-        "•".dim()
+        "●".dim()
       },
       " ".into(),
       if self.is_active() {

@@ -2,7 +2,7 @@
 source: tui/src/exec_cell/render.rs
 expression: rendered
 ---
-"• Explored                                                  "
+"● Explored                                                  "
 "  └ Read main.rs                                            "
 "                                                            "
 "                                                            "

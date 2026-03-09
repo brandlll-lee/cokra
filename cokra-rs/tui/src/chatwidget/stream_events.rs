@@ -1,10 +1,21 @@
 use super::*;
 use crate::history_cell::AgentMessageCell;
 use crate::streaming::commit_tick::CommitTickScope;
+use crate::xml_filter::XmlToolFilter;
+use crate::xml_filter::strip_inline_xml_tool_tags;
 use cokra_protocol::AgentMessageContent;
 
 impl ChatWidget {
   pub(super) fn on_agent_message_delta(&mut self, item_id: &str, delta: &str) {
+    let xml_filter = self
+      .transcript
+      .xml_tool_filter
+      .get_or_insert_with(XmlToolFilter::new);
+    let filtered_delta = xml_filter.filter(delta);
+    if filtered_delta.is_empty() {
+      return;
+    }
+
     self
       .transcript
       .streamed_agent_item_ids
@@ -14,7 +25,7 @@ impl ChatWidget {
       .transcript
       .stream_controller
       .get_or_insert_with(|| crate::streaming::controller::StreamController::new(None));
-    let committed = controller.push(delta);
+    let committed = controller.push(&filtered_delta);
     if is_new || committed {
       self.app_event_tx.send(AppEvent::StartCommitAnimation);
     }
@@ -35,7 +46,12 @@ impl ChatWidget {
     let mut lines = Vec::new();
     for part in content {
       match part {
-        AgentMessageContent::Text { text } => lines.push(Line::from(text.clone())),
+        AgentMessageContent::Text { text } => {
+          let filtered = strip_inline_xml_tool_tags(text);
+          if !filtered.trim().is_empty() {
+            lines.push(Line::from(filtered));
+          }
+        }
       }
     }
     if !lines.is_empty() {

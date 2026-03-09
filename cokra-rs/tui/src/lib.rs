@@ -35,6 +35,7 @@ pub(crate) mod text_formatting;
 pub(crate) mod tui;
 pub(crate) mod ui_consts;
 pub(crate) mod wrapping;
+pub(crate) mod xml_filter;
 
 pub use app::App;
 pub use app::AppExitInfo;

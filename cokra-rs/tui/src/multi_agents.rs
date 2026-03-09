@@ -418,13 +418,13 @@ fn unread_summary_line(
 }
 
 fn title_text(title: impl Into<String>) -> Line<'static> {
-  Line::from(vec!["• ".dim(), Span::from(title.into()).bold()])
+  Line::from(vec!["● ".dim(), Span::from(title.into()).bold()])
 }
 
 fn title_with_agent(prefix: &str, agent: AgentLabel<'_>) -> Line<'static> {
   let mut spans = vec![Span::from(format!("{prefix} ")).bold()];
   spans.extend(agent_label_spans(agent));
-  let mut title = vec![Span::from("• ").dim()];
+  let mut title = vec![Span::from("● ").dim()];
   title.extend(spans);
   Line::from(title)
 }

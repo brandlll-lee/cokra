@@ -1,6 +1,5 @@
 ---
 source: tui/src/markdown_render_tests.rs
-assertion_line: 857
 expression: rendered
 ---
 # H1: Markdown Streaming Test
@@ -29,11 +28,15 @@ Image: alt text
 ———
 
 Table below (alignment test):
-| Left | Center | Right |
-|:-----|:------:|------:|
-| a    |   b    |     c |
-Inline HTML: <sup>sup</sup> and <sub>sub</sub>.
-HTML block:
+
+<sup></sup><sub></sub>
+┌───────────────────────────┬────────┬───────┐
+│ Left                      │ Center │ Right │
+├───────────────────────────┼────────┼───────┤
+│ a                         │   b    │     c │
+│ Inline HTML: sup and sub. │        │       │
+│ HTML block:               │        │       │
+└───────────────────────────┴────────┴───────┘
 <div style="border:1px solid #ccc;padding:2px">inline block</div>
 Escapes: \_underscores\_, backslash \\, ticks ``code with `backtick` inside``.
 Emoji shortcodes: :sparkles: :tada: (if supported).

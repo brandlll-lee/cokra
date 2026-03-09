@@ -58,7 +58,7 @@ impl ChatWidget {
     }
     self.set_agent_turn_running(false);
     self.transcript.clear_exec_state();
-    self.transcript.streamed_agent_item_ids.clear();
+    self.transcript.clear_turn_state();
   }
 
   pub(super) fn on_turn_aborted(&mut self, event: &cokra_protocol::TurnAbortedEvent) {

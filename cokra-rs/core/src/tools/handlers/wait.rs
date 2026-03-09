@@ -20,7 +20,7 @@ use crate::tools::registry::ToolKind;
 pub struct WaitHandler;
 
 const MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
-const DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
+const DEFAULT_WAIT_TIMEOUT_MS: i64 = 120_000;
 const MAX_WAIT_TIMEOUT_MS: i64 = 3_600_000;
 
 #[derive(Debug, Deserialize)]

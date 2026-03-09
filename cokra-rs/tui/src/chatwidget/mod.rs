@@ -146,7 +146,7 @@ impl ChatWidget {
 
   pub(crate) fn open_resume_picker(&mut self) {
     self.add_to_history(PlainHistoryCell::new(vec![Line::from(
-      "• /resume is not yet implemented.".dim(),
+      "● /resume is not yet implemented.".dim(),
     )]));
   }
 
@@ -216,7 +216,7 @@ impl ChatWidget {
       EventMsg::SessionConfigured(e) => self.on_session_configured(e),
       EventMsg::ThreadNameUpdated(e) => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
-          "• Thread renamed: {}",
+          "● Thread renamed: {}",
           e.name
         ))]));
       }

@@ -339,7 +339,7 @@ impl App {
         self
           .chat_widget
           .add_to_history(PlainHistoryCell::new(vec![Line::from(
-            format!("• Failed to wire provider runtime for {provider_id}: {err}").red(),
+            format!("● Failed to wire provider runtime for {provider_id}: {err}").red(),
           )]));
         // Tradeoff: don't early-return here; if wiring fails we still want to fall back
         // to the provider's connect flow so users can re-auth / reconfigure in-TUI.
@@ -355,7 +355,7 @@ impl App {
             self
               .chat_widget
               .add_to_history(PlainHistoryCell::new(vec![Line::from(
-                format!("• OAuth connect failed for {provider_id}: {err}").red(),
+                format!("● OAuth connect failed for {provider_id}: {err}").red(),
               )]));
           }
           return Ok(());
@@ -400,7 +400,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("• Connected, but failed to save credentials locally: {err}").red(),
+          format!("● Connected, but failed to save credentials locally: {err}").red(),
         )]));
     }
     Ok(())
@@ -476,7 +476,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("• Connected, but failed to save credentials locally: {err}").red(),
+          format!("● Connected, but failed to save credentials locally: {err}").red(),
         )]));
     }
 
@@ -486,7 +486,7 @@ impl App {
           .chat_widget
           .add_to_history(PlainHistoryCell::new(vec![Line::from(
             format!(
-              "• Connected auth for {}, but no runtime token was produced.",
+              "● Connected auth for {}, but no runtime token was produced.",
               entry.name
             )
             .red(),
@@ -496,7 +496,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("• Connected provider: {}", entry.name).dim(),
+          format!("● Connected provider: {}", entry.name).dim(),
         )]));
     }
 
@@ -525,7 +525,7 @@ impl App {
 
     self.chat_widget.add_to_history(PlainHistoryCell::new(vec![
       Line::from(format!(
-        "• Starting OAuth connect for {}",
+        "● Starting OAuth connect for {}",
         start.provider_name
       ))
       .dim(),
@@ -556,7 +556,7 @@ impl App {
           Err(err) => {
             if !flow.cancel.is_cancelled() {
               tx.insert_history_cell(PlainHistoryCell::new(vec![Line::from(
-                format!("• Automatic localhost callback did not complete: {err}. You can still paste the redirect URL manually.").dim(),
+                format!("● Automatic localhost callback did not complete: {err}. You can still paste the redirect URL manually.").dim(),
               )]));
             }
           }
@@ -574,7 +574,7 @@ impl App {
     self
       .chat_widget
       .add_to_history(PlainHistoryCell::new(vec![Line::from(
-        "• Waiting for OAuth approval…".dim(),
+        "● Waiting for OAuth approval…".dim(),
       )]));
 
     let tx = self.app_event_tx.clone();
@@ -604,7 +604,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("• OAuth session expired for {provider_id}; start Connect again.").dim(),
+          format!("● OAuth session expired for {provider_id}; start Connect again.").dim(),
         )]));
       return Ok(());
     };
@@ -616,7 +616,7 @@ impl App {
         self
           .chat_widget
           .add_to_history(PlainHistoryCell::new(vec![Line::from(
-            format!("• OAuth connect failed for {provider_id}: {err}").red(),
+            format!("● OAuth connect failed for {provider_id}: {err}").red(),
           )]));
         return Ok(());
       }
@@ -730,7 +730,7 @@ impl App {
         self
           .chat_widget
           .add_to_history(PlainHistoryCell::new(vec![Line::from(
-            format!("• OAuth connect failed for {provider_id}: {message}").red(),
+            format!("● OAuth connect failed for {provider_id}: {message}").red(),
           )]));
       }
       AppEvent::InsertHistoryCell(cell) => {
@@ -788,14 +788,14 @@ impl App {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from("• New session".dim()),
+            Line::from("● New session".dim()),
           ]));
       }
       AppEvent::ForkCurrentSession => {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from("• Fork current session (not implemented)".dim()),
+            Line::from("● Fork current session (not implemented)".dim()),
           ]));
       }
       AppEvent::SetStatusLineMode(mode) => {
@@ -808,7 +808,7 @@ impl App {
           self
             .chat_widget
             .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-              Line::from(format!("• Status line: {label}")).dim(),
+              Line::from(format!("● Status line: {label}")).dim(),
             ]));
         }
         self.status_line_mode = mode;
@@ -1069,7 +1069,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "• 当前正在查看成员工作区。请先切回 @main，再向团队负责人发送新指令。".dim(),
+          "● 当前正在查看成员工作区。请先切回 @main，再向团队负责人发送新指令。".dim(),
         )]));
       return Ok(());
     }
@@ -1387,7 +1387,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("• 无法切换到线程 {thread_id}，因为还没有可回放的事件。").dim(),
+          format!("● 无法切换到线程 {thread_id}，因为还没有可回放的事件。").dim(),
         )]));
       return Ok(());
     };
@@ -1564,7 +1564,7 @@ impl App {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from("• Context compacted".dim()),
+            Line::from("● Context compacted".dim()),
           ]));
       }
       SlashCommand::Quit | SlashCommand::Exit => {
@@ -1579,13 +1579,13 @@ impl App {
           .cloned()
           .unwrap_or_else(|| self.cokra.cwd());
         let lines = vec![
-          Line::from(format!("• Model: {model}")),
-          Line::from(format!("• Cwd: {}", cwd.display())),
+          Line::from(format!("● Model: {model}")),
+          Line::from(format!("● Cwd: {}", cwd.display())),
           Line::from(format!(
-            "• Tokens: {} input, {} output, {} total",
+            "● Tokens: {} input, {} output, {} total",
             usage.input_tokens, usage.output_tokens, usage.total_tokens
           )),
-          Line::from(format!("• Task running: {}", self.task_running)),
+          Line::from(format!("● Task running: {}", self.task_running)),
         ];
         self
           .chat_widget
@@ -1596,13 +1596,13 @@ impl App {
           self
             .chat_widget
             .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-              Line::from("• No config layer stack available.".dim()),
+              Line::from("● No config layer stack available.".dim()),
             ]));
           return Ok(());
         };
 
         let mut lines = Vec::new();
-        lines.push(Line::from("• Config layers (high → low):".to_string()));
+        lines.push(Line::from("● Config layers (high → low):".to_string()));
         for layer in stack.layers_high_to_low() {
           let mut header = String::new();
           match &layer.source {
@@ -1631,7 +1631,7 @@ impl App {
         }
 
         let origins = stack.origins();
-        lines.push(Line::from(format!("• Origins keys: {}", origins.len())));
+        lines.push(Line::from(format!("● Origins keys: {}", origins.len())));
 
         self
           .chat_widget
@@ -1647,7 +1647,7 @@ impl App {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from("• /diff is not yet implemented.".dim()),
+            Line::from("● /diff is not yet implemented.".dim()),
           ]));
       }
       SlashCommand::Agent => {
@@ -1664,7 +1664,7 @@ impl App {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from(format!("• /{}  — not yet implemented.", cmd.command()).dim()),
+            Line::from(format!("● /{}  — not yet implemented.", cmd.command()).dim()),
           ]));
       }
     }
@@ -1904,7 +1904,7 @@ impl App {
     self
       .chat_widget
       .add_to_history(PlainHistoryCell::new(vec![Line::from(
-        format!("• Disconnected provider: {provider_id}").dim(),
+        format!("● Disconnected provider: {provider_id}").dim(),
       )]));
     Ok(())
   }
@@ -2122,7 +2122,7 @@ impl App {
     self
       .chat_widget
       .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-        Line::from(format!("• Model changed to {model_id}")),
+        Line::from(format!("● Model changed to {model_id}")),
       ]));
     Ok(())
   }
@@ -2299,7 +2299,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "• No active team runtime".dim(),
+          "● No active team runtime".dim(),
         )]));
       return;
     };
@@ -2307,7 +2307,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "• No active team runtime".dim(),
+          "● No active team runtime".dim(),
         )]));
       return;
     };
@@ -2336,7 +2336,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "• 当前还没有可切换的团队成员。".dim(),
+          "● 当前还没有可切换的团队成员。".dim(),
         )]));
       return;
     }
@@ -2525,7 +2525,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "• No background approvals pending".dim(),
+          "● No background approvals pending".dim(),
         )]));
       return;
     }

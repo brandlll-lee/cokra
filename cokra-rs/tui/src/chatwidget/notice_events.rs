@@ -32,12 +32,12 @@ impl ChatWidget {
       | EventMsg::ListRemoteSkillsResponse(_) => {}
       EventMsg::ContextCompacted(_) => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "• Context compacted".dim(),
+          "● Context compacted".dim(),
         )]));
       }
       EventMsg::ThreadRolledBack(e) => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
-          "• Thread rolled back {n} turn{s}",
+          "● Thread rolled back {n} turn{s}",
           n = e.num_turns,
           s = if e.num_turns == 1 { "" } else { "s" },
         ))]));
@@ -56,7 +56,7 @@ impl ChatWidget {
       }
       EventMsg::McpStartupUpdate(e) => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
-          "• MCP server {}: {:?}",
+          "● MCP server {}: {:?}",
           e.server, e.status
         ))]));
       }
@@ -72,49 +72,49 @@ impl ChatWidget {
       }
       EventMsg::McpToolCallBegin(e) => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
-          "• Calling {}.{}",
+          "● Calling {}.{}",
           e.invocation.server, e.invocation.tool
         ))]));
       }
       EventMsg::McpToolCallEnd(e) => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
-          "• {}.{} completed ({}ms)",
+          "● {}.{} completed ({}ms)",
           e.invocation.server, e.invocation.tool, e.duration_ms
         ))]));
       }
       EventMsg::WebSearchBegin(_) => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "• Searching the web...".dim(),
+          "● Searching the web...".dim(),
         )]));
       }
       EventMsg::WebSearchEnd(e) => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
-          "• Searched: {}",
+          "● Searched: {}",
           e.query
         ))]));
       }
       EventMsg::TerminalInteraction(e) => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
-          "• Terminal input: {}",
+          "● Terminal input: {}",
           e.stdin.trim()
         ))]));
       }
       EventMsg::ViewImageToolCall(e) => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
-          "• Viewed image: {}",
+          "● Viewed image: {}",
           e.path.display()
         ))]));
       }
       EventMsg::ElicitationRequest(e) => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
-          "• {} requests input: {}",
+          "● {} requests input: {}",
           e.server_name, e.message
         ))]));
       }
       EventMsg::ApplyPatchApprovalRequest(e) => {
         let file_count = e.changes.len();
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
-          "• Patch approval requested ({file_count} file{s})",
+          "● Patch approval requested ({file_count} file{s})",
           s = if file_count == 1 { "" } else { "s" },
         ))]));
       }
@@ -131,7 +131,7 @@ impl ChatWidget {
       }
       EventMsg::UndoStarted(e) => {
         let msg = e.message.as_deref().unwrap_or("Undoing...");
-        self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!("• {msg}"))]));
+        self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!("● {msg}"))]));
       }
       EventMsg::UndoCompleted(e) => {
         let msg = e.message.as_deref().unwrap_or(if e.success {
@@ -139,12 +139,12 @@ impl ChatWidget {
         } else {
           "Undo failed"
         });
-        self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!("• {msg}"))]));
+        self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!("● {msg}"))]));
       }
       EventMsg::PatchApplyBegin(e) => {
         let file_count = e.changes.len();
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
-          "• Applying patch ({file_count} file{s}){auto}",
+          "● Applying patch ({file_count} file{s}){auto}",
           s = if file_count == 1 { "" } else { "s" },
           auto = if e.auto_approved {
             " [auto-approved]"
@@ -156,18 +156,18 @@ impl ChatWidget {
       EventMsg::PatchApplyEnd(e) => {
         let status_str = if e.success { "succeeded" } else { "failed" };
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
-          "• Patch apply {status_str}"
+          "● Patch apply {status_str}"
         ))]));
       }
       EventMsg::RemoteSkillDownloaded(e) => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
-          "• Skill downloaded: {}",
+          "● Skill downloaded: {}",
           e.name
         ))]));
       }
       EventMsg::SkillsUpdateAvailable => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(
-          Span::from("• Skills update available").style(light_blue()),
+          Span::from("● Skills update available").style(light_blue()),
         )]));
       }
       EventMsg::PlanUpdate(plan) => {
@@ -196,7 +196,7 @@ impl ChatWidget {
       }
       EventMsg::ExitedReviewMode(_) => {
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "• Exited review mode".dim(),
+          "● Exited review mode".dim(),
         )]));
       }
       EventMsg::ReasoningContentDelta(_) | EventMsg::ReasoningRawContentDelta(_) => {}

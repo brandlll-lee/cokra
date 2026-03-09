@@ -13,6 +13,7 @@ use crate::streaming::commit_tick::CommitTickScope;
 use crate::streaming::commit_tick::run_commit_tick;
 use crate::streaming::controller::PlanStreamController;
 use crate::streaming::controller::StreamController;
+use crate::xml_filter::XmlToolFilter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ActiveCellTranscriptKey {
@@ -29,6 +30,7 @@ pub(super) struct ActiveTranscriptState {
   pub(super) chunking_policy: AdaptiveChunkingPolicy,
   pub(super) pending_exec_calls: HashMap<String, ExecCall>,
   pub(super) streamed_agent_item_ids: HashSet<String>,
+  pub(super) xml_tool_filter: Option<XmlToolFilter>,
   animations_enabled: bool,
 }
 
@@ -42,6 +44,7 @@ impl ActiveTranscriptState {
       chunking_policy: AdaptiveChunkingPolicy::default(),
       pending_exec_calls: HashMap::new(),
       streamed_agent_item_ids: HashSet::new(),
+      xml_tool_filter: None,
       animations_enabled,
     }
   }
@@ -57,6 +60,16 @@ impl ActiveTranscriptState {
   }
 
   pub(super) fn flush_stream_controllers(&mut self, app_event_tx: &AppEventSender) {
+    if let Some(filter) = self.xml_tool_filter.as_mut() {
+      let remaining = filter.flush();
+      if !remaining.is_empty() {
+        let controller = self
+          .stream_controller
+          .get_or_insert_with(|| StreamController::new(None));
+        let _ = controller.push(&remaining);
+      }
+    }
+
     if let Some(mut controller) = self.stream_controller.take()
       && let Some(cell) = controller.finalize()
     {
@@ -93,6 +106,7 @@ impl ActiveTranscriptState {
     self.stream_controller = None;
     self.plan_stream_controller = None;
     self.streamed_agent_item_ids.clear();
+    self.xml_tool_filter = None;
   }
 
   pub(super) fn clear_exec_state(&mut self) {

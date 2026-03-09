@@ -133,7 +133,7 @@ impl HistoryCell for RequestUserInputResultCell {
       .count();
     let unanswered = total.saturating_sub(answered);
 
-    let mut header = vec!["•".dim(), " ".into(), "Questions".bold()];
+    let mut header = vec!["●".dim(), " ".into(), "Questions".bold()];
     header.push(format!(" {answered}/{total} answered").dim());
     if self.interrupted {
       header.push(" (submitted early)".cyan());
@@ -151,7 +151,7 @@ impl HistoryCell for RequestUserInputResultCell {
       let mut question_lines = wrap_with_prefix(
         &question.question,
         width,
-        "  • ".into(),
+        "  ● ".into(),
         "    ".into(),
         Style::default(),
       );
@@ -654,7 +654,7 @@ impl HistoryCell for AgentMessageCell {
       &self.lines,
       RtOptions::new(width.max(1) as usize)
         .initial_indent(if self.is_first_line {
-          "• ".dim().into()
+          "● ".dim().into()
         } else {
           "  ".into()
         })
@@ -720,7 +720,7 @@ impl HistoryCell for ApprovalRequestedHistoryCell {
     word_wrap_lines(
       &[Line::from(format!("Awaiting approval: {}", self.command))],
       RtOptions::new(width.max(1) as usize)
-        .initial_indent("• ".dim().into())
+        .initial_indent("● ".dim().into())
         .subsequent_indent("  ".into()),
     )
   }
