@@ -51,6 +51,10 @@ impl MarkdownStreamCollector {
     } else {
       return Vec::new();
     };
+    let source = trim_unterminated_trailing_table_block(&source);
+    if source.is_empty() {
+      return Vec::new();
+    }
     let mut rendered: Vec<Line<'static>> = Vec::new();
     markdown::append_markdown(&source, self.width, &mut rendered);
     let mut complete_line_count = rendered.len();
@@ -105,6 +109,85 @@ impl MarkdownStreamCollector {
   }
 }
 
+fn trim_unterminated_trailing_table_block(source: &str) -> String {
+  let segments: Vec<&str> = source.split_inclusive('\n').collect();
+  if segments.is_empty() {
+    return String::new();
+  }
+
+  let logical_lines: Vec<&str> = segments
+    .iter()
+    .map(|segment| segment.strip_suffix('\n').unwrap_or(segment))
+    .collect();
+
+  if logical_lines
+    .last()
+    .is_some_and(|line| line.trim().is_empty())
+  {
+    return source.to_string();
+  }
+
+  let Some(last_non_table_idx) = logical_lines
+    .iter()
+    .rposition(|line| !looks_like_table_line(line) && !looks_like_table_separator(line))
+  else {
+    return if is_unterminated_table_block(&logical_lines) {
+      String::new()
+    } else {
+      source.to_string()
+    };
+  };
+
+  let trailing = &logical_lines[last_non_table_idx + 1..];
+  if trailing.is_empty() {
+    return source.to_string();
+  }
+
+  if is_unterminated_table_block(trailing) {
+    segments[..=last_non_table_idx].concat()
+  } else {
+    source.to_string()
+  }
+}
+
+fn is_unterminated_table_block(lines: &[&str]) -> bool {
+  match lines {
+    [header] => looks_like_table_line(header),
+    [header, separator, rest @ ..] => {
+      looks_like_table_line(header)
+        && looks_like_table_separator(separator)
+        && rest.iter().all(|line| looks_like_table_line(line))
+    }
+    [] => false,
+  }
+}
+
+fn looks_like_table_line(line: &str) -> bool {
+  let trimmed = line.trim();
+  if trimmed.is_empty() {
+    return false;
+  }
+  let pipe_count = trimmed.chars().filter(|c| *c == '|').count();
+  pipe_count >= 2 && !looks_like_table_separator(trimmed)
+}
+
+fn looks_like_table_separator(line: &str) -> bool {
+  let trimmed = line.trim();
+  if trimmed.is_empty() {
+    return false;
+  }
+
+  let normalized = trimmed.trim_matches('|');
+  if normalized.is_empty() {
+    return false;
+  }
+
+  normalized.split('|').all(|cell| {
+    let cell = cell.trim();
+    !cell.is_empty() && cell.chars().all(|ch| matches!(ch, '-' | ':' | ' ')) && cell.contains('-')
+  })
+}
+
 #[cfg(test)]
 pub(crate) fn simulate_stream_markdown_for_tests(
   deltas: &[&str],
@@ -146,6 +229,51 @@ mod tests {
     c.push_delta("Line without newline");
     let out = c.finalize_and_drain();
     assert_eq!(out.len(), 1);
+  }
+
+  #[tokio::test]
+  async fn defers_table_block_until_it_is_complete() {
+    let mut c = super::MarkdownStreamCollector::new(Some(40));
+    c.push_delta("| H1 | H2 |\n");
+    assert!(
+      c.commit_complete_lines().is_empty(),
+      "table header should not commit before separator arrives"
+    );
+
+    c.push_delta("| --- | --- |\n");
+    assert!(
+      c.commit_complete_lines().is_empty(),
+      "table block should remain buffered until it is closed"
+    );
+
+    c.push_delta("| a | b |\n");
+    assert!(
+      c.commit_complete_lines().is_empty(),
+      "table rows should remain buffered while the trailing table block is open"
+    );
+
+    // pulldown-cmark/GFM keeps consuming rows until the table is closed by a blank line or EOF.
+    c.push_delta("\n");
+    let out = c.commit_complete_lines();
+    let rendered: Vec<String> = out
+      .iter()
+      .map(|l| {
+        l.spans
+          .iter()
+          .map(|s| s.content.clone())
+          .collect::<String>()
+      })
+      .collect();
+    assert_eq!(
+      rendered,
+      vec![
+        "┌─────┬─────┐".to_string(),
+        "│ H1  │ H2  │".to_string(),
+        "├─────┼─────┤".to_string(),
+        "│ a   │ b   │".to_string(),
+        "└─────┴─────┘".to_string(),
+      ]
+    );
   }
 
   #[tokio::test]
