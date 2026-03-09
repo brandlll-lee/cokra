@@ -19,6 +19,17 @@ impl MarkdownStreamCollector {
     }
   }
 
+  /// Sets the target width used for markdown rendering.
+  ///
+  /// Tradeoff: we only allow changing width before any lines are committed. Once we have emitted
+  /// committed lines, reflowing would desynchronize previously committed output (notably tables)
+  /// from newly rendered lines.
+  pub fn set_width_if_uncommitted(&mut self, width: Option<usize>) {
+    if self.committed_line_count == 0 {
+      self.width = width;
+    }
+  }
+
   pub fn clear(&mut self) {
     self.buffer.clear();
     self.committed_line_count = 0;

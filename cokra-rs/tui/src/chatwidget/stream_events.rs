@@ -21,10 +21,12 @@ impl ChatWidget {
       .streamed_agent_item_ids
       .insert(item_id.to_string());
     let is_new = self.transcript.stream_controller.is_none();
+    let wrap_width = self.streaming_wrap_width();
     let controller = self
       .transcript
       .stream_controller
-      .get_or_insert_with(|| crate::streaming::controller::StreamController::new(None));
+      .get_or_insert_with(|| crate::streaming::controller::StreamController::new(wrap_width));
+    controller.set_width_if_uncommitted(wrap_width);
     let committed = controller.push(&filtered_delta);
     if is_new || committed {
       self.app_event_tx.send(AppEvent::StartCommitAnimation);
@@ -61,10 +63,12 @@ impl ChatWidget {
 
   pub(super) fn on_plan_delta(&mut self, delta: &str) {
     let is_new = self.transcript.plan_stream_controller.is_none();
+    let wrap_width = self.streaming_wrap_width();
     let controller = self
       .transcript
       .plan_stream_controller
-      .get_or_insert_with(|| crate::streaming::controller::PlanStreamController::new(None));
+      .get_or_insert_with(|| crate::streaming::controller::PlanStreamController::new(wrap_width));
+    controller.set_width_if_uncommitted(wrap_width);
     let committed = controller.push(delta);
     if is_new || committed {
       self.app_event_tx.send(AppEvent::StartCommitAnimation);

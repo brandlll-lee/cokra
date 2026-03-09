@@ -26,6 +26,10 @@ impl StreamController {
     }
   }
 
+  pub(crate) fn set_width_if_uncommitted(&mut self, width: Option<usize>) {
+    self.state.collector.set_width_if_uncommitted(width);
+  }
+
   /// Push a delta; if it contains a newline, commit completed lines and start animation.
   pub(crate) fn push(&mut self, delta: &str) -> bool {
     let state = &mut self.state;
@@ -121,6 +125,10 @@ impl PlanStreamController {
       header_emitted: false,
       top_padding_emitted: false,
     }
+  }
+
+  pub(crate) fn set_width_if_uncommitted(&mut self, width: Option<usize>) {
+    self.state.collector.set_width_if_uncommitted(width);
   }
 
   /// Push a delta; if it contains a newline, commit completed lines and start animation.

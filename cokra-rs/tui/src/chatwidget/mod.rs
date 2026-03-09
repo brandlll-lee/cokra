@@ -40,6 +40,8 @@ pub use self::session::TokenUsage;
 pub(crate) use self::transcript::ActiveCellTranscriptKey;
 use self::transcript::ActiveTranscriptState;
 
+use std::cell::Cell;
+
 #[derive(Debug)]
 pub(crate) enum ChatWidgetAction {
   ShowApproval(ExecApprovalRequestEvent),
@@ -51,6 +53,7 @@ pub(crate) struct ChatWidget {
   pub(crate) bottom_pane: BottomPane,
   session: SessionState,
   app_event_tx: AppEventSender,
+  last_render_width: Cell<u16>,
 }
 
 impl ChatWidget {
@@ -64,6 +67,7 @@ impl ChatWidget {
       bottom_pane: BottomPane::new(app_event_tx.clone(), frame_requester, animations_enabled),
       session: SessionState::default(),
       app_event_tx,
+      last_render_width: Cell::new(0),
     }
   }
 
@@ -95,6 +99,15 @@ impl ChatWidget {
     self.transcript.active_cell_transcript_lines(width)
   }
 
+  fn streaming_wrap_width(&self) -> Option<usize> {
+    let width = self.last_render_width.get();
+    if width == 0 {
+      return None;
+    }
+    // Reserve the agent gutter ("● " / "  ") so markdown tables are clamped before display.
+    Some(width.saturating_sub(2).max(1) as usize)
+  }
+
   fn flush_active_cell(&mut self) {
     self.transcript.flush_active_cell(&self.app_event_tx);
   }
@@ -109,7 +122,9 @@ impl ChatWidget {
   }
 
   fn flush_stream_controllers(&mut self) {
-    self.transcript.flush_stream_controllers(&self.app_event_tx);
+    self
+      .transcript
+      .flush_stream_controllers(&self.app_event_tx, self.streaming_wrap_width());
   }
 
   fn bump_active_cell_revision(&mut self) {
@@ -305,6 +320,7 @@ impl ChatWidget {
 
 impl Renderable for ChatWidget {
   fn render(&self, area: Rect, buf: &mut Buffer) {
+    self.last_render_width.set(area.width);
     self.as_renderable().render(area, buf);
   }
 

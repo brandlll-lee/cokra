@@ -59,13 +59,18 @@ impl ActiveTranscriptState {
     }
   }
 
-  pub(super) fn flush_stream_controllers(&mut self, app_event_tx: &AppEventSender) {
+  pub(super) fn flush_stream_controllers(
+    &mut self,
+    app_event_tx: &AppEventSender,
+    wrap_width: Option<usize>,
+  ) {
     if let Some(filter) = self.xml_tool_filter.as_mut() {
       let remaining = filter.flush();
       if !remaining.is_empty() {
         let controller = self
           .stream_controller
-          .get_or_insert_with(|| StreamController::new(None));
+          .get_or_insert_with(|| StreamController::new(wrap_width));
+        controller.set_width_if_uncommitted(wrap_width);
         let _ = controller.push(&remaining);
       }
     }
