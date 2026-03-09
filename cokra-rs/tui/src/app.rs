@@ -15,6 +15,7 @@ use crossterm::event::KeyModifiers;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::prelude::Stylize;
+use ratatui::prelude::Widget;
 use ratatui::text::Line;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -97,7 +98,6 @@ pub struct App {
   background_approval_requests: HashMap<String, Vec<ExecApprovalRequestEvent>>,
   background_user_input_requests: HashMap<String, Vec<RequestUserInputEvent>>,
   pending_oauth_flows: HashMap<String, PendingOAuthFlowState>,
-  did_show_welcome: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -218,7 +218,6 @@ impl App {
       background_approval_requests: HashMap::new(),
       background_user_input_requests: HashMap::new(),
       pending_oauth_flows: HashMap::new(),
-      did_show_welcome: false,
     };
 
     app.remember_agent_thread(
@@ -237,8 +236,6 @@ impl App {
 
   pub(crate) async fn run(&mut self, tui: &mut Tui) -> Result<AppExitInfo> {
     let mut events = tui.event_stream();
-
-    self.insert_startup_welcome(tui)?;
 
     // Trigger an initial draw so the UI is visible before any events arrive.
     self.draw(tui)?;
@@ -281,21 +278,17 @@ impl App {
     if self.ui_mode == UiMode::AltScreen && self.transcript_cache_width != width {
       self.rebuild_transcript_cache(width);
     }
-    let height = self.chat_widget.desired_height(width);
+    let height = if self.should_render_startup_welcome() {
+      let ctx = crate::welcome::WelcomeContext::from_config(self.cokra.config());
+      let welcome_height = crate::welcome::WelcomeWidget::startup_line_count(&ctx, width);
+      let bottom_height = self.chat_widget.bottom_pane.desired_height(width);
+      welcome_height
+        .saturating_add(bottom_height)
+        .max(bottom_height)
+    } else {
+      self.chat_widget.desired_height(width)
+    };
     tui.draw(height, |frame| self.render(frame))?;
-    Ok(())
-  }
-
-  fn insert_startup_welcome(&mut self, tui: &mut Tui) -> Result<()> {
-    if self.did_show_welcome {
-      return Ok(());
-    }
-    self.did_show_welcome = true;
-
-    let width = tui.terminal.size().map(|s| s.width).unwrap_or(80).max(1);
-    let ctx = crate::welcome::WelcomeContext::from_config(self.cokra.config());
-    let cell = crate::welcome::WelcomeWidget::into_history_cell(ctx);
-    self.stage_history_cell(cell, width, Some(tui));
     Ok(())
   }
 
@@ -2253,6 +2246,26 @@ impl App {
     let area = frame.area();
     self.history_width = area.width;
 
+    if self.should_render_startup_welcome() {
+      let bottom_height = self
+        .chat_widget
+        .bottom_pane
+        .desired_height(area.width)
+        .min(area.height);
+      let chunks =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(bottom_height)]).split(area);
+      let ctx = crate::welcome::WelcomeContext::from_config(self.cokra.config());
+      crate::welcome::WelcomeWidget::new(ctx).render(chunks[0], frame.buffer_mut());
+      self
+        .chat_widget
+        .bottom_pane
+        .render(chunks[1], frame.buffer_mut(), self.task_running);
+      if let Some((x, y)) = self.chat_widget.bottom_pane.cursor_pos(chunks[1]) {
+        frame.set_cursor_position((x, y));
+      }
+      return;
+    }
+
     match self.ui_mode {
       UiMode::Inline => {
         // 1:1 codex: inline viewport only renders the live chat surface.
@@ -2292,6 +2305,10 @@ impl App {
         }
       }
     }
+  }
+
+  fn should_render_startup_welcome(&self) -> bool {
+    self.transcript_cells.is_empty() && self.chat_widget.active_cell_transcript_key().is_none()
   }
 
   fn show_team_dashboard(&mut self) {

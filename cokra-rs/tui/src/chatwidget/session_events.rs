@@ -7,15 +7,13 @@ impl ChatWidget {
     let is_first = !self.session.has_seen_session_configured;
     self.session.has_seen_session_configured = true;
     self.session.set_model_name(event.model.clone());
-    if !is_first {
-      self.add_to_history(new_session_info(
-        event.model.clone(),
-        event.approval_policy.clone(),
-        event.sandbox_mode.clone(),
-        None,
-        false,
-      ));
-    }
+    self.add_to_history(new_session_info(
+      event.model.clone(),
+      event.approval_policy.clone(),
+      event.sandbox_mode.clone(),
+      None,
+      is_first,
+    ));
   }
 
   pub(super) fn on_turn_started(&mut self, event: &cokra_protocol::TurnStartedEvent) {

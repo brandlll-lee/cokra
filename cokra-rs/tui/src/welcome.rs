@@ -180,6 +180,14 @@ impl WelcomeWidget {
     }
     Box::new(PlainHistoryCell::new(lines))
   }
+
+  pub(crate) fn startup_line_count(ctx: &WelcomeContext, width: u16) -> u16 {
+    Paragraph::new(Self::generate_lines(ctx, true))
+      .wrap(Wrap { trim: false })
+      .line_count(width.max(1))
+      .try_into()
+      .unwrap_or(0)
+  }
 }
 
 impl Widget for WelcomeWidget {

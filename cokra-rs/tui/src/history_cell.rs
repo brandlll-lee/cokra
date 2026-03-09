@@ -618,15 +618,26 @@ pub(crate) fn new_session_info(
   approval_policy: String,
   sandbox_mode: String,
   cwd: Option<String>,
-  _is_first_session: bool,
+  is_first_session: bool,
 ) -> SessionInfoCell {
-  // Tradeoff: we intentionally keep the session banner minimal in transcript
-  // history. The richer welcome/help content still belongs to the empty-state
-  // UI, but repeating it in committed history makes every fresh terminal launch
-  // feel "dirty" compared with Claude Code.
-  SessionInfoCell(CompositeHistoryCell::new(vec![Box::new(
-    SessionHeaderHistoryCell::new(model, approval_policy, sandbox_mode, cwd),
-  )]))
+  let mut parts: Vec<Box<dyn HistoryCell>> = vec![Box::new(SessionHeaderHistoryCell::new(
+    model,
+    approval_policy,
+    sandbox_mode,
+    cwd,
+  ))];
+
+  if is_first_session {
+    parts.push(Box::new(PlainHistoryCell::new(vec![
+      Line::from("  To get started, describe a task or try one of these commands:"),
+      Line::from(""),
+      Line::from("  /help - show available commands"),
+      Line::from("  /model - choose model and reasoning effort"),
+      Line::from("  /status - show current session configuration"),
+    ])));
+  }
+
+  SessionInfoCell(CompositeHistoryCell::new(parts))
 }
 
 #[derive(Debug)]
@@ -856,7 +867,7 @@ mod tests {
   }
 
   #[test]
-  fn first_session_info_only_renders_header() {
+  fn first_session_info_renders_header_and_help() {
     let cell = new_session_info(
       "openrouter/anthropic/claude-haiku-4.5".to_string(),
       "Ask".to_string(),
@@ -867,8 +878,9 @@ mod tests {
 
     let rendered = lines_to_string(&cell.display_lines(80));
     assert!(rendered.contains("┌─ cokra ─ openrouter/anthropic/claude-haiku-4.5"));
+    assert!(rendered.contains("To get started, describe a task or try one of these commands:"));
+    assert!(rendered.contains("/help - show available commands"));
     assert!(!rendered.contains("Welcome to Cokra"));
-    assert!(!rendered.contains("/help - show available commands"));
   }
 
   #[test]
