@@ -21,8 +21,10 @@ use super::super::types::ChatResponse;
 use super::super::types::Chunk;
 use super::super::types::ListModelsResponse;
 use super::super::types::ProviderConfig;
+use super::build_openai_request;
 use super::create_client;
 use super::create_response_stream;
+use super::parse_openai_response;
 
 /// GitHub Copilot provider
 pub struct GitHubCopilotProvider {
@@ -162,54 +164,10 @@ pub const GITHUB_MODELS: &[&str] = &[
 
 // GitHub Copilot API types
 
-#[derive(Debug, Serialize)]
-struct CopilotRequest {
-  messages: Vec<CopilotMessage>,
-  model: String,
-  stream: bool,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  temperature: Option<f32>,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  max_tokens: Option<u32>,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  top_p: Option<f32>,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  n: Option<u32>,
-}
-
 #[derive(Debug, Serialize, Clone)]
 struct CopilotMessage {
   role: String,
   content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CopilotResponse {
-  id: String,
-  choices: Vec<CopilotChoice>,
-  #[allow(dead_code)]
-  model: String,
-  usage: CopilotUsage,
-}
-
-#[derive(Debug, Deserialize)]
-struct CopilotChoice {
-  message: CopilotResponseMessage,
-  finish_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CopilotResponseMessage {
-  role: String,
-  content: Option<String>,
-  tool_calls: Option<Vec<serde_json::Value>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CopilotUsage {
-  prompt_tokens: u32,
-  completion_tokens: u32,
-  total_tokens: u32,
 }
 
 // Responses API types
@@ -250,36 +208,37 @@ impl ModelProvider for GitHubCopilotProvider {
     // Choose API based on model
     let use_responses = self.should_use_responses_api(&request.model);
 
-    let messages: Vec<CopilotMessage> = request
-      .messages
-      .iter()
-      .map(|m| match m {
-        crate::model::types::Message::System(s) => CopilotMessage {
-          role: "system".to_string(),
-          content: s.clone(),
-        },
-        crate::model::types::Message::User(s) => CopilotMessage {
-          role: "user".to_string(),
-          content: s.clone(),
-        },
-        crate::model::types::Message::Assistant { content, .. } => CopilotMessage {
-          role: "assistant".to_string(),
-          content: content.clone().unwrap_or_default(),
-        },
-        crate::model::types::Message::Tool {
-          tool_call_id,
-          content,
-        } => CopilotMessage {
-          role: "user".to_string(),
-          content: format!("[Tool Result for {}]: {}", tool_call_id, content),
-        },
-      })
-      .collect();
-
     if use_responses {
+      // Responses API does not currently support the full OpenAI-compatible tool schema in
+      // GitHub Copilot, so we keep a simplified text-only message format here.
+      let messages: Vec<CopilotMessage> = request
+        .messages
+        .iter()
+        .map(|m| match m {
+          crate::model::types::Message::System(s) => CopilotMessage {
+            role: "system".to_string(),
+            content: s.clone(),
+          },
+          crate::model::types::Message::User(s) => CopilotMessage {
+            role: "user".to_string(),
+            content: s.clone(),
+          },
+          crate::model::types::Message::Assistant { content, .. } => CopilotMessage {
+            role: "assistant".to_string(),
+            content: content.clone().unwrap_or_default(),
+          },
+          crate::model::types::Message::Tool {
+            tool_call_id,
+            content,
+          } => CopilotMessage {
+            role: "user".to_string(),
+            content: format!("[Tool Result for {}]: {}", tool_call_id, content),
+          },
+        })
+        .collect();
       self.chat_completion_responses(request, messages).await
     } else {
-      self.chat_completion_chat(request, messages).await
+      self.chat_completion_chat(request).await
     }
   }
 
@@ -290,34 +249,11 @@ impl ModelProvider for GitHubCopilotProvider {
     let request = ProviderRuntimeTransform::from_config(&self.config).normalize_request(request);
     let url = self.endpoint("chat/completions");
     let model = request.model.clone();
-
-    let messages: Vec<CopilotMessage> = request
-      .messages
-      .iter()
-      .map(|m| CopilotMessage {
-        role: match m {
-          crate::model::types::Message::System(_) => "system",
-          crate::model::types::Message::User(_) => "user",
-          crate::model::types::Message::Assistant { .. } => "assistant",
-          crate::model::types::Message::Tool { .. } => "user",
-        }
-        .to_string(),
-        content: m.text().unwrap_or("").to_string(),
-      })
-      .collect();
-
-    let body = CopilotRequest {
-      messages,
-      model,
-      stream: true,
-      temperature: request.temperature,
-      max_tokens: request.max_tokens,
-      top_p: request.top_p,
-      n: Some(1),
-    };
+    let header_input = request.clone();
+    let body = build_openai_request(request, &model);
 
     let response = self
-      .apply_headers(self.client.post(&url), Some(&request))
+      .apply_headers(self.client.post(&url), Some(&header_input))
       .header("Content-Type", "application/json")
       .json(&body)
       .send()
@@ -371,21 +307,17 @@ impl ModelProvider for GitHubCopilotProvider {
     // Try a simple request to validate
     let url = self.endpoint("chat/completions");
 
-    let body = CopilotRequest {
-      messages: vec![CopilotMessage {
-        role: "user".to_string(),
-        content: "Hi".to_string(),
-      }],
+    let request = ChatRequest {
       model: "gpt-4o-mini".to_string(),
+      messages: vec![crate::model::types::Message::User("Hi".to_string())],
       stream: false,
       temperature: Some(0.0),
-      max_tokens: Some(10),
-      top_p: None,
-      n: None,
+      ..Default::default()
     };
+    let body = build_openai_request(request.clone(), "gpt-4o-mini");
 
     let response = self
-      .apply_headers(self.client.post(&url), None)
+      .apply_headers(self.client.post(&url), Some(&request))
       .header("Content-Type", "application/json")
       .json(&body)
       .send()
@@ -412,26 +344,14 @@ impl ModelProvider for GitHubCopilotProvider {
 
 impl GitHubCopilotProvider {
   /// Chat completion using the Chat API
-  async fn chat_completion_chat(
-    &self,
-    request: ChatRequest,
-    messages: Vec<CopilotMessage>,
-  ) -> Result<ChatResponse> {
+  async fn chat_completion_chat(&self, request: ChatRequest) -> Result<ChatResponse> {
     let url = self.endpoint("chat/completions");
     let model = request.model.clone();
-
-    let body = CopilotRequest {
-      messages,
-      model: model.clone(),
-      stream: false,
-      temperature: request.temperature,
-      max_tokens: request.max_tokens,
-      top_p: request.top_p,
-      n: Some(1),
-    };
+    let header_input = request.clone();
+    let body = build_openai_request(request, &model);
 
     let response = self
-      .apply_headers(self.client.post(&url), Some(&request))
+      .apply_headers(self.client.post(&url), Some(&header_input))
       .header("Content-Type", "application/json")
       .json(&body)
       .send()
@@ -444,9 +364,8 @@ impl GitHubCopilotProvider {
       return Err(ModelError::ApiError(format!("HTTP {}: {}", status, body)));
     }
 
-    let copilot_response: CopilotResponse = response.json().await?;
-
-    Ok(convert_copilot_response(copilot_response, &model))
+    let text = response.text().await.unwrap_or_default();
+    Ok(parse_openai_response(&text)?)
   }
 
   /// Chat completion using the Responses API (for o1 models)
@@ -511,45 +430,6 @@ impl GitHubCopilotProvider {
       usage: crate::model::types::Usage::default(),
       extra: Default::default(),
     })
-  }
-}
-
-/// Convert Copilot response to ChatResponse
-fn convert_copilot_response(resp: CopilotResponse, model: &str) -> ChatResponse {
-  ChatResponse {
-    id: resp.id,
-    object_type: "chat.completion".to_string(),
-    created: chrono::Utc::now().timestamp() as u64,
-    model: model.to_string(),
-    choices: resp
-      .choices
-      .into_iter()
-      .map(|c| crate::model::types::Choice {
-        index: 0,
-        message: crate::model::types::ChoiceMessage {
-          role: c.message.role,
-          content: c.message.content,
-          tool_calls: c.message.tool_calls.and_then(|vals| {
-            let parsed: Vec<crate::model::types::ToolCall> = vals
-              .into_iter()
-              .filter_map(|v| serde_json::from_value(v).ok())
-              .collect();
-            if parsed.is_empty() {
-              None
-            } else {
-              Some(parsed)
-            }
-          }),
-        },
-        finish_reason: c.finish_reason,
-      })
-      .collect(),
-    usage: crate::model::types::Usage {
-      input_tokens: resp.usage.prompt_tokens,
-      output_tokens: resp.usage.completion_tokens,
-      total_tokens: resp.usage.total_tokens,
-    },
-    extra: Default::default(),
   }
 }
 
