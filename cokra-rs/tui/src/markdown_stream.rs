@@ -143,6 +143,8 @@ fn trim_unterminated_trailing_table_block(source: &str) -> String {
     return source.to_string();
   }
 
+  // Tradeoff: this is a narrow streaming heuristic, not a full Markdown parser.
+  // We only defer a trailing table-shaped block so regular completed text keeps flowing.
   if is_unterminated_table_block(trailing) {
     segments[..=last_non_table_idx].concat()
   } else {
