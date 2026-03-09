@@ -648,18 +648,64 @@ impl AgentMessageCell {
   }
 }
 
+fn is_box_drawing_table_line(line: &Line<'_>) -> bool {
+  let s: String = line
+    .spans
+    .iter()
+    .map(|span| span.content.as_ref())
+    .collect();
+  let t = s.trim_start();
+  let Some(first) = t.chars().next() else {
+    return false;
+  };
+  match first {
+    '┌' | '├' | '└' => {
+      t.contains('─') && (t.contains('┐') || t.contains('┤') || t.contains('┘'))
+    }
+    '│' => t.chars().filter(|c| *c == '│').count() >= 2,
+    _ => false,
+  }
+}
+
+fn prefix_single_line(line: &Line<'static>, prefix: &Line<'static>) -> Line<'static> {
+  let mut spans = prefix.spans.clone();
+  spans.extend(line.spans.clone());
+  Line::from_iter(spans).style(line.style)
+}
+
 impl HistoryCell for AgentMessageCell {
   fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-    word_wrap_lines(
-      &self.lines,
-      RtOptions::new(width.max(1) as usize)
-        .initial_indent(if self.is_first_line {
-          "● ".dim().into()
-        } else {
-          "  ".into()
-        })
-        .subsequent_indent("  ".into()),
-    )
+    let width = width.max(1) as usize;
+    let bullet_indent: Line<'static> = "● ".dim().into();
+    let plain_indent: Line<'static> = "  ".into();
+
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut first = self.is_first_line;
+
+    for line in &self.lines {
+      let initial_indent = if first {
+        bullet_indent.clone()
+      } else {
+        plain_indent.clone()
+      };
+
+      if is_box_drawing_table_line(line) {
+        // Do not wrap preformatted box-drawing tables. Wrapping fragments borders/cells and makes
+        // content appear to disappear in narrow viewports.
+        out.push(prefix_single_line(line, &initial_indent));
+      } else {
+        out.extend(word_wrap_lines(
+          std::iter::once(line.clone()),
+          RtOptions::new(width)
+            .initial_indent(initial_indent)
+            .subsequent_indent(plain_indent.clone()),
+        ));
+      }
+
+      first = false;
+    }
+
+    out
   }
 
   fn is_stream_continuation(&self) -> bool {
