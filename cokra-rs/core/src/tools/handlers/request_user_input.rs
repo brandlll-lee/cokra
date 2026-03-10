@@ -64,8 +64,6 @@ impl ToolHandler for RequestUserInputHandler {
         "failed to serialize request_user_input response: {err}"
       ))
     })?;
-    let mut out = ToolOutput::success(content);
-    out.id = invocation.id;
-    Ok(out)
+    Ok(ToolOutput::success(content).with_id(invocation.id))
   }
 }

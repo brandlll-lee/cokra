@@ -97,7 +97,6 @@ impl ToolHandler for SendInputHandler {
         FunctionCallError::Fatal(format!("failed to serialize send_input result: {err}"))
       })?,
     );
-    out.id = invocation.id;
-    Ok(out)
+    Ok(out.with_id(invocation.id))
   }
 }

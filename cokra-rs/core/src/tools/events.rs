@@ -96,10 +96,10 @@ impl ToolEmitter {
         // shows human output (not JSON) without coupling the UI layer to tool payloads.
         // This is the narrowest place that knows both "tool output format" and "UI event".
         let (exit_code, display_output) =
-          if let Some(envelope) = try_parse_model_structured_exec_output(&output.content) {
+          if let Some(envelope) = try_parse_model_structured_exec_output(&output.text_content()) {
             (envelope.metadata.exit_code, envelope.output)
           } else {
-            (if output.is_error { 1 } else { 0 }, output.content)
+            (if output.is_error() { 1 } else { 0 }, output.text_content())
           };
 
         emit_event(
@@ -141,7 +141,7 @@ impl ToolEmitter {
   ) -> Result<String, FunctionCallError> {
     match result {
       Ok(output) => {
-        let content = output.content.clone();
+        let content = output.text_content();
         self.emit(ctx, ToolEventStage::Success(output)).await;
         Ok(content)
       }
@@ -188,11 +188,7 @@ mod tests {
     let _ = emitter
       .finish(
         ctx,
-        Ok(ToolOutput {
-          id: "call-1".to_string(),
-          content: "ok".to_string(),
-          is_error: false,
-        }),
+        Ok(ToolOutput::success("ok").with_id("call-1")),
       )
       .await;
 

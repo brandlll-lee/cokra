@@ -120,13 +120,13 @@ impl ToolSpec {
 pub fn build_specs() -> Vec<ToolSpec> {
   vec![
     shell_tool(),
+    unified_exec_tool(),
     apply_patch_tool(),
     read_file_tool(),
     write_file_tool(),
     list_dir_tool(),
     grep_files_tool(),
     search_tool(),
-    mcp_tool(),
     spawn_agent_tool(),
     send_input_tool(),
     wait_tool(),
@@ -206,6 +206,25 @@ fn shell_tool() -> ToolSpec {
       "The working directory to execute the command in. Always set this instead of using cd.",
     ),
   );
+  props.insert(
+    "sandbox_permissions".to_string(),
+    str_field("Optional sandbox mode: use_default, with_additional_permissions, or require_escalated."),
+  );
+  props.insert(
+    "justification".to_string(),
+    str_field("Short approval justification when requesting escalated or additional permissions."),
+  );
+  props.insert(
+    "prefix_rule".to_string(),
+    JsonSchema::Array {
+      items: Box::new(str_field("Command prefix segment.")),
+      description: Some("Optional reusable command prefix rule, for example [\"cargo\", \"test\"].".to_string()),
+    },
+  );
+  props.insert(
+    "additional_permissions".to_string(),
+    permission_profile_schema(),
+  );
   ToolSpec::new(
     "shell",
     "Runs a shell command and returns its output. Use the dedicated read_file, list_dir, and grep_files tools instead of shell commands like cat, ls, find, or grep for reading files and exploring the filesystem.",
@@ -214,6 +233,110 @@ fn shell_tool() -> ToolSpec {
     ToolHandlerType::Function,
     mutating_permissions(),
   )
+}
+
+fn unified_exec_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "command".to_string(),
+    JsonSchema::Array {
+      items: Box::new(str_field("Program or argument segment.")),
+      description: Some("Full argv as an array. The first element must be the program.".to_string()),
+    },
+  );
+  props.insert(
+    "timeout_ms".to_string(),
+    int_field("The timeout for the command in milliseconds."),
+  );
+  props.insert(
+    "workdir".to_string(),
+    str_field(
+      "The working directory to execute the command in. Always set this instead of using cd.",
+    ),
+  );
+  props.insert(
+    "sandbox_permissions".to_string(),
+    str_field("Optional sandbox mode: use_default, with_additional_permissions, or require_escalated."),
+  );
+  props.insert(
+    "justification".to_string(),
+    str_field("Short approval justification when requesting escalated or additional permissions."),
+  );
+  props.insert(
+    "prefix_rule".to_string(),
+    JsonSchema::Array {
+      items: Box::new(str_field("Command prefix segment.")),
+      description: Some("Optional reusable command prefix rule, for example [\"cargo\", \"test\"].".to_string()),
+    },
+  );
+  props.insert(
+    "additional_permissions".to_string(),
+    permission_profile_schema(),
+  );
+  ToolSpec::new(
+    "unified_exec",
+    "Runs a pre-tokenized local command and returns its output. Use this when the command must be passed as argv instead of a shell string.",
+    obj(props, &["command"]),
+    None,
+    ToolHandlerType::Function,
+    mutating_permissions(),
+  )
+}
+
+fn permission_profile_schema() -> JsonSchema {
+  let mut network_props = BTreeMap::new();
+  network_props.insert(
+    "enabled".to_string(),
+    bool_field("Whether network access is requested."),
+  );
+
+  let mut fs_props = BTreeMap::new();
+  fs_props.insert(
+    "read".to_string(),
+    JsonSchema::Array {
+      items: Box::new(str_field("Readable path.")),
+      description: Some("Additional readable filesystem paths.".to_string()),
+    },
+  );
+  fs_props.insert(
+    "write".to_string(),
+    JsonSchema::Array {
+      items: Box::new(str_field("Writable path.")),
+      description: Some("Additional writable filesystem paths.".to_string()),
+    },
+  );
+
+  let mut props = BTreeMap::new();
+  props.insert(
+    "network".to_string(),
+    JsonSchema::Object {
+      properties: network_props,
+      required: Some(Vec::new()),
+      additional_properties: Some(false.into()),
+    },
+  );
+  props.insert(
+    "file_system".to_string(),
+    JsonSchema::Object {
+      properties: fs_props,
+      required: Some(Vec::new()),
+      additional_properties: Some(false.into()),
+    },
+  );
+  props.insert(
+    "macos".to_string(),
+    JsonSchema::Object {
+      properties: BTreeMap::new(),
+      required: Some(Vec::new()),
+      additional_properties: None,
+    },
+  );
+
+  JsonSchema::Object {
+    properties: props,
+    required: Some(Vec::new()),
+    additional_properties: Some(false.into()),
+  }
 }
 
 fn apply_patch_tool() -> ToolSpec {
@@ -350,28 +473,6 @@ fn search_tool() -> ToolSpec {
     obj(props, &["query"]),
     None,
     ToolHandlerType::Function,
-    default_permissions(),
-  )
-}
-
-fn mcp_tool() -> ToolSpec {
-  let mut props = BTreeMap::new();
-  props.insert("server".to_string(), str_field("MCP server name"));
-  props.insert("tool".to_string(), str_field("MCP tool name"));
-  props.insert(
-    "arguments".to_string(),
-    JsonSchema::Object {
-      properties: BTreeMap::new(),
-      required: Some(Vec::new()),
-      additional_properties: None,
-    },
-  );
-  ToolSpec::new(
-    "mcp",
-    "Invoke an MCP tool",
-    obj(props, &["server", "tool"]),
-    None,
-    ToolHandlerType::Mcp,
     default_permissions(),
   )
 }

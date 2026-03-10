@@ -22,8 +22,6 @@ impl ToolHandler for DynamicToolHandler {
 
   fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
     let args: SearchArgs = invocation.parse_arguments()?;
-    let mut out = ToolOutput::success(format!("search query accepted: {}", args.query));
-    out.id = invocation.id;
-    Ok(out)
+    Ok(ToolOutput::success(format!("search query accepted: {}", args.query)).with_id(invocation.id))
   }
 }

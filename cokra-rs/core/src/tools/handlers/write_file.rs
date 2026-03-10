@@ -53,9 +53,7 @@ impl ToolHandler for WriteFileHandler {
       FunctionCallError::Execution(format!("failed to write {}: {e}", path.display()))
     })?;
 
-    let mut out = ToolOutput::success(format!("wrote {}", path.display()));
-    out.id = invocation.id;
-    Ok(out)
+    Ok(ToolOutput::success(format!("wrote {}", path.display())).with_id(invocation.id))
   }
 }
 
@@ -74,17 +72,19 @@ mod tests {
     let inv = ToolInvocation {
       id: "1".to_string(),
       name: "write_file".to_string(),
-      arguments: serde_json::json!({
-        "file_path": path.display().to_string(),
-        "content": "hello"
-      })
-      .to_string(),
+      payload: crate::tools::context::ToolPayload::Function {
+        arguments: serde_json::json!({
+          "file_path": path.display().to_string(),
+          "content": "hello"
+        })
+        .to_string(),
+      },
       cwd: std::env::temp_dir(),
       runtime: None,
     };
 
     let out = WriteFileHandler.handle(inv).expect("write file");
-    assert!(!out.is_error);
+    assert!(!out.is_error());
     let written = fs::read_to_string(&path).expect("read written file");
     assert_eq!(written, "hello".to_string());
 
@@ -96,11 +96,13 @@ mod tests {
     let inv = ToolInvocation {
       id: "2".to_string(),
       name: "write_file".to_string(),
-      arguments: serde_json::json!({
-        "file_path": "relative/file.txt",
-        "content": "hello"
-      })
-      .to_string(),
+      payload: crate::tools::context::ToolPayload::Function {
+        arguments: serde_json::json!({
+          "file_path": "relative/file.txt",
+          "content": "hello"
+        })
+        .to_string(),
+      },
       cwd: std::env::temp_dir(),
       runtime: None,
     };

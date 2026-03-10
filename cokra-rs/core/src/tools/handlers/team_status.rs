@@ -40,7 +40,6 @@ impl ToolHandler for TeamStatusHandler {
     let mut out = ToolOutput::success(serde_json::to_string(&snapshot).map_err(|err| {
       FunctionCallError::Fatal(format!("failed to serialize team status: {err}"))
     })?);
-    out.id = invocation.id;
-    Ok(out)
+    Ok(out.with_id(invocation.id))
   }
 }

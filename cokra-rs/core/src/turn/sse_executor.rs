@@ -393,13 +393,13 @@ impl SseTurnExecutor {
 
       while let Some(output_res) = in_flight.next().await {
         let (call_id, output) = output_res?;
-        let output_call_id = if output.id.is_empty() {
+        let output_call_id = if output.id().is_empty() {
           call_id.clone()
         } else {
-          output.id
+          output.id().to_string()
         };
 
-        let truncated_content = truncate_text(&output.content, truncation_policy);
+        let truncated_content = truncate_text(&output.text_content(), truncation_policy);
         let tool_msg = ModelMessage::Tool {
           tool_call_id: output_call_id,
           content: truncated_content,
@@ -411,7 +411,7 @@ impl SseTurnExecutor {
           .append_response_item(ResponseItem::FunctionCallOutput {
             call_id,
             output: tool_msg.text().unwrap_or_default().to_string(),
-            is_error: output.is_error,
+            is_error: output.is_error(),
           })
           .await;
       }
@@ -466,11 +466,7 @@ impl SseTurnExecutor {
     let args = match serde_json::from_str::<serde_json::Value>(&call.function.arguments) {
       Ok(v) => v,
       Err(err) => {
-        let output = ToolOutput {
-          id: call.id.clone(),
-          content: format!("invalid tool arguments: {err}"),
-          is_error: true,
-        };
+        let output = ToolOutput::error(format!("invalid tool arguments: {err}")).with_id(&call.id);
         return Ok((call.id, output));
       }
     };
@@ -503,15 +499,11 @@ impl SseTurnExecutor {
     {
       Ok(output) => output,
       Err(err) if err.is_fatal() => return Err(TurnError::Fatal(err.to_string())),
-      Err(err) => ToolOutput {
-        id: call.id.clone(),
-        content: err.to_string(),
-        is_error: true,
-      },
+      Err(err) => ToolOutput::error(err.to_string()).with_id(&call.id),
     };
 
-    if output.id.is_empty() {
-      output.id = call.id.clone();
+    if output.id().is_empty() {
+      output = output.with_id(call.id.clone());
     }
 
     Ok((call.id, output))

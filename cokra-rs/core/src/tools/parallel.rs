@@ -116,11 +116,7 @@ mod tests {
       tokio::time::sleep(std::time::Duration::from_millis(30)).await;
       self.current.fetch_sub(1, Ordering::SeqCst);
 
-      Ok(ToolOutput {
-        id: invocation.id,
-        content: "ok".to_string(),
-        is_error: false,
-      })
+      Ok(ToolOutput::success("ok").with_id(invocation.id))
     }
   }
 

@@ -58,7 +58,6 @@ impl ToolHandler for ClaimTeamMessagesHandler {
     let mut out = ToolOutput::success(serde_json::to_string(&messages).map_err(|err| {
       FunctionCallError::Fatal(format!("failed to serialize claimed queue messages: {err}"))
     })?);
-    out.id = invocation.id;
-    Ok(out)
+    Ok(out.with_id(invocation.id))
   }
 }

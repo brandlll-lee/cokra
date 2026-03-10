@@ -41,7 +41,15 @@ impl ExecCell {
   }
 
   pub(crate) fn with_added_call(&self, call: ExecCall) -> Option<Self> {
-    if self.is_exploring_cell() && Self::is_exploring_call(&call) {
+    // Only merge additional exploring calls into an *active* exploring group.
+    //
+    // Rationale (inline streaming UX):
+    // - If we keep reusing a completed "Explored" group for later tool calls, the same
+    //   on-screen block is repeatedly rewritten (header flips Exploring/Explored, read lines
+    //   get re-grouped, etc.). That reads as "output changing" instead of "output appending".
+    // - Freezing completed groups matches the expected "log-like" behavior: once a block is
+    //   shown as explored, it should not be retroactively modified by later tool activity.
+    if self.is_active() && self.is_exploring_cell() && Self::is_exploring_call(&call) {
       let mut calls = self.calls.clone();
       calls.push(call);
       Some(Self {
@@ -143,5 +151,48 @@ impl ExecCell {
       call.tool_name.as_str(),
       "read_file" | "list_dir" | "grep_files" | "search_tool"
     )
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn exploring_call(command_id: &str, tool_name: &str, command: &str, active: bool) -> ExecCall {
+    ExecCall {
+      command_id: command_id.to_string(),
+      tool_name: tool_name.to_string(),
+      command: command.to_string(),
+      cwd: PathBuf::from("."),
+      output: if active {
+        None
+      } else {
+        Some(CommandOutput {
+          exit_code: 0,
+          output: String::new(),
+        })
+      },
+      start_time: active.then(Instant::now),
+      duration: (!active).then(|| Duration::from_millis(1)),
+    }
+  }
+
+  #[test]
+  fn exploring_exec_cells_only_merge_while_active() {
+    let active = ExecCell::new(exploring_call("c1", "list_dir", "cokra-rs", true), false);
+    assert!(
+      active
+        .with_added_call(exploring_call("c2", "read_file", "PROJECT_STRUCTURE.md", true))
+        .is_some(),
+      "active exploring group should merge additional exploring calls"
+    );
+
+    let inactive = ExecCell::new(exploring_call("c1", "list_dir", "cokra-rs", false), false);
+    assert!(
+      inactive
+        .with_added_call(exploring_call("c2", "read_file", "PROJECT_STRUCTURE.md", true))
+        .is_none(),
+      "completed exploring group should not be reopened/rewritten by later exploring calls"
+    );
   }
 }

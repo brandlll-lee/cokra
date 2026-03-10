@@ -18,6 +18,7 @@ use crate::exec::ExecError;
 use crate::exec::ExecExpiration;
 use crate::exec::ExecParams;
 use crate::exec::ExecToolCallOutput;
+use crate::exec::PermissionProfile;
 use crate::exec::SandboxPermissions;
 use crate::exec::WindowsSandboxLevel;
 use crate::exec::execute_command;
@@ -57,6 +58,12 @@ pub struct ShellCommandRequest {
   pub env: HashMap<String, String>,
   /// Justification for the command.
   pub justification: Option<String>,
+  /// Suggested reusable escalation prefix.
+  pub prefix_rule: Option<Vec<String>>,
+  /// Sandbox permission mode.
+  pub sandbox_permissions: SandboxPermissions,
+  /// Additional sandbox permissions.
+  pub additional_permissions: Option<PermissionProfile>,
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +83,12 @@ pub struct ShellRequest {
   pub env: HashMap<String, String>,
   /// Justification for the command.
   pub justification: Option<String>,
+  /// Suggested reusable escalation prefix.
+  pub prefix_rule: Option<Vec<String>>,
+  /// Sandbox permission mode.
+  pub sandbox_permissions: SandboxPermissions,
+  /// Additional sandbox permissions.
+  pub additional_permissions: Option<PermissionProfile>,
 }
 
 // ---------------------------------------------------------------------------
@@ -101,23 +114,87 @@ impl ShellRuntime {
   /// Build `ExecParams` from a `ShellCommandRequest`.
   fn build_exec_params(&self, req: &ShellCommandRequest) -> ExecParams {
     let argv = self.shell.derive_exec_args(&req.command, true);
-    let timeout = req
-      .timeout_ms
+    self.build_exec_params_for_argv(
+      argv,
+      req.cwd.clone(),
+      req.timeout_ms,
+      req.env.clone(),
+      req.justification.clone(),
+      req.prefix_rule.clone(),
+      req.sandbox_permissions,
+      req.additional_permissions.clone(),
+    )
+  }
+
+  fn build_exec_params_for_argv(
+    &self,
+    command: Vec<String>,
+    cwd: PathBuf,
+    timeout_ms: Option<u64>,
+    env: HashMap<String, String>,
+    justification: Option<String>,
+    prefix_rule: Option<Vec<String>>,
+    sandbox_permissions: SandboxPermissions,
+    additional_permissions: Option<PermissionProfile>,
+  ) -> ExecParams {
+    let timeout = timeout_ms
       .map(|ms| ExecExpiration::Timeout(Duration::from_millis(ms)))
       .unwrap_or(ExecExpiration::DefaultTimeout);
 
     ExecParams {
-      command: argv,
-      cwd: req.cwd.clone(),
+      command,
+      cwd,
       expiration: timeout,
-      env: req.env.clone(),
+      env,
       network: None,
       network_attempt_id: None,
-      sandbox_permissions: SandboxPermissions::Default,
+      sandbox_permissions,
+      additional_permissions,
       windows_sandbox_level: WindowsSandboxLevel::Disabled,
-      justification: req.justification.clone(),
+      justification,
+      prefix_rule,
       arg0: None,
     }
+  }
+}
+
+#[async_trait]
+impl Approvable<ShellRequest> for ShellRuntime {
+  type ApprovalKey = String;
+
+  fn approval_keys(&self, req: &ShellRequest) -> Vec<Self::ApprovalKey> {
+    vec![format!("shell:{}", req.command.join(" "))]
+  }
+
+  fn exec_approval_requirement(
+    &self,
+    req: &ShellRequest,
+  ) -> Option<ExecApprovalRequirement> {
+    Some(eval_exec_approval(
+      &req.command,
+      &cokra_protocol::SandboxPolicy::DangerFullAccess,
+      self.approval_policy.clone(),
+      req.sandbox_permissions,
+    ))
+  }
+
+  async fn start_approval_async(
+    &mut self,
+    req: &ShellRequest,
+    ctx: ApprovalCtx<'_>,
+  ) -> ReviewDecision {
+    ctx
+      .session
+      .request_exec_approval(
+        ctx.turn.thread_id.clone(),
+        ctx.turn.turn_id.clone(),
+        ctx.call_id.to_string(),
+        "shell".to_string(),
+        req.command.join(" "),
+        ctx.turn.cwd.clone(),
+        ctx.turn.tx_event.clone(),
+      )
+      .await
   }
 }
 
@@ -138,7 +215,7 @@ impl Approvable<ShellCommandRequest> for ShellRuntime {
       &argv,
       &cokra_protocol::SandboxPolicy::DangerFullAccess,
       self.approval_policy.clone(),
-      SandboxPermissions::Default,
+      req.sandbox_permissions,
     ))
   }
 
@@ -191,10 +268,12 @@ impl ToolRuntime<ShellCommandRequest, ExecToolCallOutput> for ShellRuntime {
         env: exec_params.env.clone(),
         expiration: exec_params.expiration.clone(),
         sandbox_permissions: exec_params.sandbox_permissions,
+        additional_permissions: exec_params.additional_permissions.clone(),
         windows_sandbox_level: exec_params.windows_sandbox_level,
         network: exec_params.network,
         network_attempt_id: exec_params.network_attempt_id.clone(),
         justification: exec_params.justification.clone(),
+        prefix_rule: exec_params.prefix_rule.clone(),
         arg0: exec_params.arg0.clone(),
       },
       policy: attempt.policy.clone(),
@@ -224,6 +303,66 @@ impl ToolRuntime<ShellCommandRequest, ExecToolCallOutput> for ShellRuntime {
       })?;
 
     Ok(output)
+  }
+}
+
+#[async_trait]
+impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
+  async fn run(
+    &mut self,
+    req: &ShellRequest,
+    attempt: &SandboxAttempt<'_>,
+    _ctx: &ToolCtx<'_>,
+  ) -> Result<ExecToolCallOutput, ToolError> {
+    let exec_params = self.build_exec_params_for_argv(
+      req.command.clone(),
+      req.cwd.clone(),
+      req.timeout_ms,
+      req.env.clone(),
+      req.justification.clone(),
+      req.prefix_rule.clone(),
+      req.sandbox_permissions,
+      req.additional_permissions.clone(),
+    );
+
+    let transform_result = SandboxManager::transform(SandboxTransformRequest {
+      command_spec: CommandSpec {
+        command: exec_params.command.clone(),
+        cwd: exec_params.cwd.clone(),
+        env: exec_params.env.clone(),
+        expiration: exec_params.expiration.clone(),
+        sandbox_permissions: exec_params.sandbox_permissions,
+        additional_permissions: exec_params.additional_permissions.clone(),
+        windows_sandbox_level: exec_params.windows_sandbox_level,
+        network: exec_params.network,
+        network_attempt_id: exec_params.network_attempt_id.clone(),
+        justification: exec_params.justification.clone(),
+        prefix_rule: exec_params.prefix_rule.clone(),
+        arg0: exec_params.arg0.clone(),
+      },
+      policy: attempt.policy.clone(),
+    })
+    .map_err(|e| ToolError::Execution(e.to_string()))?;
+
+    execute_command(&transform_result.exec_params)
+      .await
+      .map_err(|e| match e {
+        ExecError::SpawnFailed { message, .. } => {
+          if attempt.sandbox != SandboxKind::None && looks_like_sandbox_denial(&message) {
+            ToolError::SandboxDenied {
+              output: message,
+              network_policy_reason: None,
+            }
+          } else {
+            ToolError::Execution(message)
+          }
+        }
+        ExecError::SandboxDenied { output } => ToolError::SandboxDenied {
+          output,
+          network_policy_reason: None,
+        },
+        ExecError::Other(msg) => ToolError::Execution(msg),
+      })
   }
 }
 
@@ -264,11 +403,13 @@ pub async fn process_shell_command(
     cwd,
     env,
     expiration: timeout,
-    sandbox_permissions: SandboxPermissions::Default,
+    sandbox_permissions: SandboxPermissions::UseDefault,
+    additional_permissions: None,
     windows_sandbox_level: WindowsSandboxLevel::Disabled,
     network: None,
     network_attempt_id: None,
     justification: None,
+    prefix_rule: None,
     arg0: None,
   };
 

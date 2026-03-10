@@ -7,6 +7,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::exec::format_exec_output_for_model_structured;
 use crate::exec::SandboxPermissions;
 use crate::exec_policy::eval_exec_approval;
 use crate::session::Session;
@@ -32,6 +33,8 @@ use crate::tools::sandboxing::ToolTurnContext;
 use crate::tools::spec::ToolSpec;
 use crate::tools::validation::ToolCall as ValidationToolCall;
 use crate::tools::validation::ToolValidator;
+use crate::truncate::DEFAULT_TOOL_OUTPUT_TOKENS;
+use crate::truncate::TruncationPolicy;
 use cokra_protocol::AskForApproval;
 use cokra_protocol::EventMsg;
 use cokra_protocol::ReviewDecision;
@@ -39,9 +42,14 @@ use cokra_protocol::SandboxPolicy;
 
 use crate::agent::team_runtime::runtime_for_thread;
 use crate::tools::context::FunctionCallError;
+use crate::tools::context::ShellToolCallParams;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
+use crate::tools::context::ToolPayload;
 use crate::tools::context::ToolRuntimeContext;
+use crate::tools::runtimes::shell::ShellCommandRequest;
+use crate::tools::runtimes::shell::ShellRequest;
+use crate::tools::runtimes::shell::ShellRuntime;
 
 #[derive(Clone, Debug)]
 pub struct ToolCall {
@@ -211,7 +219,9 @@ impl ToolRouter {
     let invocation = ToolInvocation {
       id: call.call_id.clone(),
       name: call.tool_name.clone(),
-      arguments: call.args.to_string(),
+      payload: ToolPayload::Function {
+        arguments: call.args.to_string(),
+      },
       // cwd is unused for is_mutating checks, but required by struct.
       cwd: PathBuf::from("."),
       runtime: None,
@@ -390,7 +400,7 @@ impl Approvable<ToolCall> for RegistryToolRuntime {
         &argv,
         &self.sandbox_policy,
         self.approval_policy.clone(),
-        SandboxPermissions::Default,
+        SandboxPermissions::UseDefault,
       ));
     }
 
@@ -471,12 +481,19 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
     attempt: &SandboxAttempt<'_>,
     ctx: &ToolCtx<'_>,
   ) -> Result<ToolOutput, ToolError> {
+    if matches!(
+      req.tool_name.as_str(),
+      "shell" | "container.exec" | "local_shell" | "unified_exec"
+    ) {
+      return run_shell_tool_call(req, self.approval_policy.clone(), attempt, ctx).await;
+    }
+
     // 1:1 codex: thread session-level cwd into ToolInvocation so handlers
     // resolve paths against the correct working directory.
     let invocation = ToolInvocation {
       id: req.call_id.clone(),
       name: req.tool_name.clone(),
-      arguments: req.args.to_string(),
+      payload: invocation_payload_for_call(req),
       cwd: ctx.turn.cwd.clone(),
       runtime: self.runtime.as_ref().map(|runtime| {
         Arc::new(ToolRuntimeContext {
@@ -536,6 +553,116 @@ fn looks_like_sandbox_denial(message: &str) -> bool {
   lower.contains("sandbox denied")
     || lower.contains("permission denied")
     || lower.contains("operation not permitted")
+}
+
+async fn run_shell_tool_call(
+  req: &ToolCall,
+  approval_policy: AskForApproval,
+  attempt: &SandboxAttempt<'_>,
+  ctx: &ToolCtx<'_>,
+) -> Result<ToolOutput, ToolError> {
+  let shell = ctx.session.user_shell().await;
+  let mut runtime = ShellRuntime::new(shell, approval_policy);
+
+  let exec_output = match invocation_payload_for_call(req) {
+    ToolPayload::LocalShell { params } => {
+      let shell_req = ShellRequest {
+        command: params.command,
+        cwd: params
+          .workdir
+          .as_deref()
+          .map(PathBuf::from)
+          .unwrap_or_else(|| ctx.turn.cwd.clone()),
+        timeout_ms: params.timeout_ms,
+        env: Default::default(),
+        justification: params.justification,
+        prefix_rule: params.prefix_rule,
+        sandbox_permissions: params
+          .sandbox_permissions
+          .unwrap_or(SandboxPermissions::UseDefault),
+        additional_permissions: params.additional_permissions,
+      };
+      runtime.run(&shell_req, attempt, ctx).await?
+    }
+    ToolPayload::Function { .. } => {
+      #[derive(serde::Deserialize)]
+      struct ShellArgs {
+        command: String,
+        timeout_ms: Option<u64>,
+        workdir: Option<String>,
+        sandbox_permissions: Option<SandboxPermissions>,
+        prefix_rule: Option<Vec<String>>,
+        additional_permissions: Option<crate::exec::PermissionProfile>,
+        justification: Option<String>,
+      }
+
+      let args = serde_json::from_value::<ShellArgs>(req.args.clone())
+        .map_err(|err| ToolError::Execution(format!("invalid shell arguments: {err}")))?;
+      let shell_req = ShellCommandRequest {
+        command: args.command,
+        cwd: args
+          .workdir
+          .as_deref()
+          .map(PathBuf::from)
+          .unwrap_or_else(|| ctx.turn.cwd.clone()),
+        timeout_ms: args.timeout_ms,
+        env: Default::default(),
+        justification: args.justification,
+        prefix_rule: args.prefix_rule,
+        sandbox_permissions: args
+          .sandbox_permissions
+          .unwrap_or(SandboxPermissions::UseDefault),
+        additional_permissions: args.additional_permissions,
+      };
+      runtime.run(&shell_req, attempt, ctx).await?
+    }
+    ToolPayload::Mcp { .. } | ToolPayload::Custom { .. } => {
+      return Err(ToolError::Execution(format!(
+        "unsupported shell payload for {}",
+        req.tool_name
+      )));
+    }
+  };
+
+  Ok(
+    ToolOutput::success(format_exec_output_for_model_structured(
+      &exec_output,
+      TruncationPolicy::Tokens(DEFAULT_TOOL_OUTPUT_TOKENS),
+    ))
+    .with_id(req.call_id.clone())
+    .with_success(exec_output.exit_code == 0),
+  )
+}
+
+fn invocation_payload_for_call(call: &ToolCall) -> ToolPayload {
+  if let Some((server, tool)) = parse_mcp_tool_name(&call.tool_name) {
+    return ToolPayload::Mcp {
+      server,
+      tool,
+      raw_arguments: call.args.to_string(),
+    };
+  }
+
+  if matches!(
+    call.tool_name.as_str(),
+    "local_shell" | "unified_exec" | "container.exec"
+  ) && let Ok(params) = serde_json::from_value::<ShellToolCallParams>(call.args.clone())
+  {
+    return ToolPayload::LocalShell { params };
+  }
+
+  ToolPayload::Function {
+    arguments: call.args.to_string(),
+  }
+}
+
+fn parse_mcp_tool_name(tool_name: &str) -> Option<(String, String)> {
+  let stripped = tool_name.strip_prefix("mcp__")?;
+  let (server, tool) = stripped.split_once("__")?;
+  if server.is_empty() || tool.is_empty() {
+    return None;
+  }
+  Some((server.to_string(), tool.to_string()))
 }
 
 fn map_tool_error(err: ToolError) -> FunctionCallError {

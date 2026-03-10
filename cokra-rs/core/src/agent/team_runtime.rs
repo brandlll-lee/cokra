@@ -626,7 +626,7 @@ impl TeamRuntime {
           .unwrap_or("default"),
       ));
     }
-    let (tool_registry, tool_router) = build_default_tools(self.config.as_ref());
+    let (tool_registry, tool_router) = build_default_tools(self.config.as_ref()).await?;
     let (tx_raw_event, mut rx_raw_event) = mpsc::channel(CHILD_EVENT_CHANNEL_CAPACITY);
     let root_tx_event = self.root_tx_event.clone();
     tokio::spawn(async move {

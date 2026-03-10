@@ -78,9 +78,7 @@ impl ToolHandler for ReadFileHandler {
     }
 
     let collected = read_slice(&path, offset, limit).await?;
-    let mut out = ToolOutput::success(collected.join("\n"));
-    out.id = id;
-    Ok(out)
+    Ok(ToolOutput::success(collected.join("\n")).with_id(id))
   }
 }
 
@@ -248,10 +246,12 @@ mod tests {
     let invocation = ToolInvocation {
       id: "2".to_string(),
       name: "read_file".to_string(),
-      arguments: serde_json::json!({
-        "file_path": "relative/path.rs"
-      })
-      .to_string(),
+      payload: crate::tools::context::ToolPayload::Function {
+        arguments: serde_json::json!({
+          "file_path": "relative/path.rs"
+        })
+        .to_string(),
+      },
       cwd: std::env::temp_dir(),
       runtime: None,
     };

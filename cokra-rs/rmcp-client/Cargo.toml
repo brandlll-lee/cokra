@@ -9,10 +9,12 @@ rust-version.workspace = true
 
 [dependencies]
 # MCP
-rmcp = { workspace = true }
+rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client"] }
 
 # Runtime
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "time", "sync"] }
+reqwest = { workspace = true }
+futures = "0.3"
 
 # Serialization
 serde = { workspace = true }

@@ -171,8 +171,7 @@ impl ToolHandler for SpawnAgentHandler {
         FunctionCallError::Fatal(format!("failed to serialize spawn result: {err}"))
       })?,
     );
-    out.id = invocation.id;
-    Ok(out)
+    Ok(out.with_id(invocation.id))
   }
 }
 

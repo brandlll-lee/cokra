@@ -521,7 +521,7 @@ mod tests {
       &vec_str(&["wc", "-l", "file.txt"]),
       &ws_policy(),
       AskForApproval::OnRequest,
-      SandboxPermissions::Default,
+      SandboxPermissions::UseDefault,
     );
     assert!(matches!(req, ExecApprovalRequirement::Skip { .. }));
   }
@@ -532,7 +532,7 @@ mod tests {
       &vec_str(&["ls", "-la"]),
       &ws_policy(),
       AskForApproval::UnlessTrusted,
-      SandboxPermissions::Default,
+      SandboxPermissions::UseDefault,
     );
     assert!(matches!(req, ExecApprovalRequirement::Skip { .. }));
   }
@@ -543,7 +543,7 @@ mod tests {
       &vec_str(&["cargo", "build"]),
       &ws_policy(),
       AskForApproval::OnRequest,
-      SandboxPermissions::Default,
+      SandboxPermissions::UseDefault,
     );
     // 1:1 codex: non-escalated in restricted sandbox → Skip (sandbox enforces)
     assert!(matches!(req, ExecApprovalRequirement::Skip { .. }));
@@ -555,7 +555,7 @@ mod tests {
       &vec_str(&["rm", "-rf", "/"]),
       &SandboxPolicy::DangerFullAccess,
       AskForApproval::OnRequest,
-      SandboxPermissions::Default,
+      SandboxPermissions::UseDefault,
     );
     assert!(matches!(req, ExecApprovalRequirement::NeedsApproval { .. }));
   }
@@ -566,7 +566,7 @@ mod tests {
       &vec_str(&["rm", "-rf", "/"]),
       &ws_policy(),
       AskForApproval::Never,
-      SandboxPermissions::Default,
+      SandboxPermissions::UseDefault,
     );
     assert!(matches!(req, ExecApprovalRequirement::Forbidden { .. }));
   }
@@ -579,7 +579,7 @@ mod tests {
       &vec_str(&["bash", "-c", "pwd"]),
       &ws_policy(),
       AskForApproval::Never,
-      SandboxPermissions::Default,
+      SandboxPermissions::UseDefault,
     );
     // "bash" is not in known-safe list (we don't parse bash -c here),
     // and it's not dangerous, so it falls to Never → Skip.
@@ -592,7 +592,7 @@ mod tests {
       &vec_str(&["bash", "-c", "pwd"]),
       &ws_policy(),
       AskForApproval::OnFailure,
-      SandboxPermissions::Default,
+      SandboxPermissions::UseDefault,
     );
     assert!(matches!(
       req,
@@ -608,7 +608,7 @@ mod tests {
       &vec_str(&["bash", "-c", "pwd"]),
       &SandboxPolicy::DangerFullAccess,
       AskForApproval::OnRequest,
-      SandboxPermissions::Default,
+      SandboxPermissions::UseDefault,
     );
     assert!(matches!(req, ExecApprovalRequirement::Skip { .. }));
   }
@@ -620,7 +620,7 @@ mod tests {
       &vec_str(&["python", "script.py"]),
       &ws_policy(),
       AskForApproval::OnRequest,
-      SandboxPermissions::Default,
+      SandboxPermissions::UseDefault,
     );
     assert!(matches!(req, ExecApprovalRequirement::Skip { .. }));
   }
@@ -642,7 +642,7 @@ mod tests {
       &vec_str(&["cargo", "build"]),
       &SandboxPolicy::DangerFullAccess,
       AskForApproval::UnlessTrusted,
-      SandboxPermissions::Default,
+      SandboxPermissions::UseDefault,
     );
     assert!(matches!(req, ExecApprovalRequirement::NeedsApproval { .. }));
   }
@@ -653,7 +653,7 @@ mod tests {
       &["apply_patch".to_string(), "file.patch".to_string()],
       &SandboxPolicy::DangerFullAccess,
       AskForApproval::OnRequest,
-      SandboxPermissions::Default,
+      SandboxPermissions::UseDefault,
     );
     assert!(matches!(req, ExecApprovalRequirement::Forbidden { .. }));
   }
@@ -664,7 +664,7 @@ mod tests {
       &["/usr/bin/apply_patch".to_string()],
       &SandboxPolicy::DangerFullAccess,
       AskForApproval::OnRequest,
-      SandboxPermissions::Default,
+      SandboxPermissions::UseDefault,
     );
     assert!(matches!(req, ExecApprovalRequirement::Forbidden { .. }));
   }

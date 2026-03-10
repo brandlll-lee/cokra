@@ -82,7 +82,6 @@ impl ToolHandler for CloseAgentHandler {
         FunctionCallError::Fatal(format!("failed to serialize close_agent result: {err}"))
       })?,
     );
-    out.id = invocation.id;
-    Ok(out)
+    Ok(out.with_id(invocation.id))
   }
 }

@@ -94,9 +94,7 @@ impl ToolHandler for ListDirHandler {
     output.push(format!("Absolute path: {}", path.display()));
     output.extend(entries);
 
-    let mut out = ToolOutput::success(output.join("\n"));
-    out.id = id;
-    Ok(out)
+    Ok(ToolOutput::success(output.join("\n")).with_id(id))
   }
 }
 

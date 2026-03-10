@@ -26,8 +26,9 @@ impl ToolHandler for ApplyPatchHandler {
 
   fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
     let args: ApplyPatchArgs = invocation.parse_arguments()?;
-    let mut out = ToolOutput::success(format!("apply_patch accepted ({} bytes)", args.patch.len()));
-    out.id = invocation.id;
-    Ok(out)
+    Ok(
+      ToolOutput::success(format!("apply_patch accepted ({} bytes)", args.patch.len()))
+        .with_id(invocation.id),
+    )
   }
 }

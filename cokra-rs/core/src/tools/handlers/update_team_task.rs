@@ -64,7 +64,6 @@ impl ToolHandler for UpdateTeamTaskHandler {
     let mut out = ToolOutput::success(serde_json::to_string(&task).map_err(|err| {
       FunctionCallError::Fatal(format!("failed to serialize updated team task: {err}"))
     })?);
-    out.id = invocation.id;
-    Ok(out)
+    Ok(out.with_id(invocation.id))
   }
 }

@@ -3,8 +3,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::sync::mpsc;
 
+use crate::exec::PermissionProfile;
+use crate::exec::SandboxPermissions;
 use crate::session::Session;
 use cokra_protocol::EventMsg;
 
@@ -16,7 +20,7 @@ use cokra_protocol::EventMsg;
 pub struct ToolInvocation {
   pub id: String,
   pub name: String,
-  pub arguments: String,
+  pub payload: ToolPayload,
   /// Session-level working directory. Handlers that accept file paths should
   /// use this for resolution instead of the process-level cwd.
   pub cwd: PathBuf,
@@ -46,16 +50,32 @@ impl ToolInvocation {
   /// 1:1 codex: parse failures are `RespondToModel` so the LLM sees the
   /// error message and can self-correct, rather than aborting the turn.
   pub fn parse_arguments<T: DeserializeOwned>(&self) -> Result<T, FunctionCallError> {
-    serde_json::from_str(&self.arguments).map_err(|e| {
+    serde_json::from_str(self.raw_arguments()?).map_err(|e| {
       FunctionCallError::RespondToModel(format!("invalid arguments for {}: {e}", self.name))
     })
   }
 
   /// 1:1 codex: same RespondToModel treatment for raw Value parsing.
   pub fn parse_arguments_value(&self) -> Result<serde_json::Value, FunctionCallError> {
-    serde_json::from_str(&self.arguments).map_err(|e| {
+    serde_json::from_str(self.raw_arguments()?).map_err(|e| {
       FunctionCallError::RespondToModel(format!("invalid arguments for {}: {e}", self.name))
     })
+  }
+
+  pub fn raw_arguments(&self) -> Result<&str, FunctionCallError> {
+    match &self.payload {
+      ToolPayload::Function { arguments } | ToolPayload::Mcp { raw_arguments: arguments, .. } => {
+        Ok(arguments)
+      }
+      ToolPayload::Custom { .. } => Err(FunctionCallError::RespondToModel(format!(
+        "{} is a custom tool and does not accept JSON arguments",
+        self.name
+      ))),
+      ToolPayload::LocalShell { .. } => Err(FunctionCallError::RespondToModel(format!(
+        "{} uses local shell params, not JSON arguments",
+        self.name
+      ))),
+    }
   }
 
   /// 1:1 codex TurnContext::resolve_path — resolve an optional path against
@@ -76,28 +96,146 @@ impl ToolInvocation {
   }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShellToolCallParams {
+  pub command: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub workdir: Option<String>,
+  #[serde(default, alias = "timeout", skip_serializing_if = "Option::is_none")]
+  pub timeout_ms: Option<u64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub sandbox_permissions: Option<SandboxPermissions>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub prefix_rule: Option<Vec<String>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub additional_permissions: Option<PermissionProfile>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub justification: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ToolPayload {
+  Function {
+    arguments: String,
+  },
+  Custom {
+    input: String,
+  },
+  LocalShell {
+    params: ShellToolCallParams,
+  },
+  Mcp {
+    server: String,
+    tool: String,
+    raw_arguments: String,
+  },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolOutputBody {
+  Text {
+    text: String,
+  },
+}
+
+impl ToolOutputBody {
+  pub fn to_text(&self) -> String {
+    match self {
+      Self::Text { text } => text.clone(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpToolCallResult {
+  pub content: Vec<serde_json::Value>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub structured_content: Option<serde_json::Value>,
+  #[serde(default)]
+  pub is_error: bool,
+}
+
 /// Standard output from a tool.
 #[derive(Debug, Clone)]
-pub struct ToolOutput {
-  pub id: String,
-  pub content: String,
-  pub is_error: bool,
+pub enum ToolOutput {
+  Function {
+    id: String,
+    body: ToolOutputBody,
+    success: Option<bool>,
+  },
+  Mcp {
+    id: String,
+    result: Result<McpToolCallResult, String>,
+  },
 }
 
 impl ToolOutput {
   pub fn success(content: impl Into<String>) -> Self {
-    Self {
+    Self::Function {
       id: String::new(),
-      content: content.into(),
-      is_error: false,
+      body: ToolOutputBody::Text {
+        text: content.into(),
+      },
+      success: Some(true),
     }
   }
 
   pub fn error(content: impl Into<String>) -> Self {
-    Self {
+    Self::Function {
       id: String::new(),
-      content: content.into(),
-      is_error: true,
+      body: ToolOutputBody::Text {
+        text: content.into(),
+      },
+      success: Some(false),
+    }
+  }
+
+  pub fn with_id(self, id: impl Into<String>) -> Self {
+    match self {
+      Self::Function { body, success, .. } => Self::Function {
+        id: id.into(),
+        body,
+        success,
+      },
+      Self::Mcp { result, .. } => Self::Mcp {
+        id: id.into(),
+        result,
+      },
+    }
+  }
+
+  pub fn with_success(self, success: bool) -> Self {
+    match self {
+      Self::Function { id, body, .. } => Self::Function {
+        id,
+        body,
+        success: Some(success),
+      },
+      other => other,
+    }
+  }
+
+  pub fn id(&self) -> &str {
+    match self {
+      Self::Function { id, .. } | Self::Mcp { id, .. } => id,
+    }
+  }
+
+  pub fn text_content(&self) -> String {
+    match self {
+      Self::Function { body, .. } => body.to_text(),
+      Self::Mcp { result, .. } => match result {
+        Ok(result) => serde_json::to_string(result).unwrap_or_else(|_| "{}".to_string()),
+        Err(message) => message.clone(),
+      },
+    }
+  }
+
+  pub fn is_error(&self) -> bool {
+    match self {
+      Self::Function { success, .. } => success == &Some(false),
+      Self::Mcp { result, .. } => result.is_err(),
     }
   }
 }

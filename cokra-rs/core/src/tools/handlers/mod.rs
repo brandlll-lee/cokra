@@ -29,17 +29,19 @@ pub mod write_file;
 
 use std::sync::Arc;
 
+use crate::mcp::McpConnectionManager;
 use crate::tools::registry::ToolRegistry;
 
-pub fn register_builtin_handlers(registry: &mut ToolRegistry) {
-  registry.register_handler("shell", Arc::new(shell::ShellHandler));
+pub fn register_builtin_handlers(registry: &mut ToolRegistry, mcp_manager: Arc<McpConnectionManager>) {
   registry.register_handler("apply_patch", Arc::new(apply_patch::ApplyPatchHandler));
   registry.register_handler("read_file", Arc::new(read_file::ReadFileHandler));
   registry.register_handler("write_file", Arc::new(write_file::WriteFileHandler));
   registry.register_handler("list_dir", Arc::new(list_dir::ListDirHandler));
   registry.register_handler("grep_files", Arc::new(grep_files::GrepFilesHandler));
   registry.register_handler("search_tool", Arc::new(dynamic::DynamicToolHandler));
-  registry.register_handler("mcp", Arc::new(mcp::McpHandler));
+  for tool_name in mcp_manager.tool_names() {
+    registry.register_handler(tool_name, Arc::new(mcp::McpHandler::new(Arc::clone(&mcp_manager))));
+  }
   registry.register_handler("spawn_agent", Arc::new(spawn_agent::SpawnAgentHandler));
   registry.register_handler("send_input", Arc::new(send_input::SendInputHandler));
   registry.register_handler("wait", Arc::new(wait::WaitHandler));

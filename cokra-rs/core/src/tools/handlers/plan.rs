@@ -22,8 +22,6 @@ impl ToolHandler for PlanHandler {
 
   fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
     let args: PlanArgs = invocation.parse_arguments()?;
-    let mut out = ToolOutput::success(args.text);
-    out.id = invocation.id;
-    Ok(out)
+    Ok(ToolOutput::success(args.text).with_id(invocation.id))
   }
 }

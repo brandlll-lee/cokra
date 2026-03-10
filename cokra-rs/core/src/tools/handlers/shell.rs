@@ -77,10 +77,11 @@ impl ToolHandler for ShellHandler {
           &output,
           TruncationPolicy::Tokens(DEFAULT_TOOL_OUTPUT_TOKENS),
         );
-        let mut out = ToolOutput::success(content);
-        out.id = invocation.id;
-        out.is_error = output.exit_code != 0;
-        Ok(out)
+        Ok(
+          ToolOutput::success(content)
+            .with_id(invocation.id)
+            .with_success(output.exit_code == 0),
+        )
       }
       Err(exec_error) => {
         let message = format_exec_error(&exec_error);

@@ -161,7 +161,7 @@ impl Cokra {
       );
     }
 
-    let (tool_registry, tool_router) = build_default_tools(&config);
+    let (tool_registry, tool_router) = build_default_tools(&config).await?;
     let agent_control = Arc::new(AgentControl::new(
       Uuid::new_v4().to_string(),
       model_client.clone(),
@@ -2317,7 +2317,8 @@ mod tests {
       .await
       .expect("spawn tool should succeed");
 
-    let spawned: serde_json::Value = serde_json::from_str(&spawn.content).expect("spawn json");
+    let spawned: serde_json::Value =
+      serde_json::from_str(&spawn.text_content()).expect("spawn json");
     let agent_id = spawned
       .get("agent_id")
       .and_then(serde_json::Value::as_str)
@@ -2341,7 +2342,8 @@ mod tests {
       .await
       .expect("wait tool should succeed");
 
-    let statuses: serde_json::Value = serde_json::from_str(&wait.content).expect("wait json");
+    let statuses: serde_json::Value =
+      serde_json::from_str(&wait.text_content()).expect("wait json");
     assert_eq!(statuses[&agent_id]["Completed"], "mock reply");
 
     let close = cokra
@@ -2360,7 +2362,8 @@ mod tests {
       .await
       .expect("close tool should succeed");
 
-    let closed: serde_json::Value = serde_json::from_str(&close.content).expect("close json");
+    let closed: serde_json::Value =
+      serde_json::from_str(&close.text_content()).expect("close json");
     assert_eq!(closed["status"], "Shutdown");
   }
 
@@ -2394,7 +2397,8 @@ mod tests {
       })
       .await
       .expect("spawn tool should succeed");
-    let spawned: serde_json::Value = serde_json::from_str(&spawn.content).expect("spawn json");
+    let spawned: serde_json::Value =
+      serde_json::from_str(&spawn.text_content()).expect("spawn json");
     let agent_id = spawned["agent_id"].as_str().expect("agent id").to_string();
 
     let _ = cokra
@@ -2431,7 +2435,7 @@ mod tests {
       })
       .await
       .expect("create task should succeed");
-    let task: TeamTask = serde_json::from_str(&created.content).expect("task json");
+    let task: TeamTask = serde_json::from_str(&created.text_content()).expect("task json");
     assert_eq!(task.status, TeamTaskStatus::Pending);
     assert_eq!(task.assignee_thread_id.as_deref(), Some(agent_id.as_str()));
 
@@ -2460,7 +2464,7 @@ mod tests {
     )
     .await;
     let messages: Vec<cokra_protocol::TeamMessage> =
-      serde_json::from_str(&read.content).expect("messages json");
+      serde_json::from_str(&read.text_content()).expect("messages json");
     assert_eq!(messages.len(), 1);
     assert!(messages[0].unread);
 
@@ -2475,7 +2479,8 @@ mod tests {
       }),
     )
     .await;
-    let updated_task: TeamTask = serde_json::from_str(&updated.content).expect("updated task json");
+    let updated_task: TeamTask =
+      serde_json::from_str(&updated.text_content()).expect("updated task json");
     assert_eq!(updated_task.status, TeamTaskStatus::Completed);
 
     let status = cokra
@@ -2490,7 +2495,8 @@ mod tests {
       })
       .await
       .expect("team status should succeed");
-    let snapshot: TeamSnapshot = serde_json::from_str(&status.content).expect("snapshot json");
+    let snapshot: TeamSnapshot =
+      serde_json::from_str(&status.text_content()).expect("snapshot json");
     assert!(
       snapshot
         .members
@@ -2537,7 +2543,7 @@ mod tests {
       })
       .await
       .expect("create task");
-    let task: TeamTask = serde_json::from_str(&created.content).expect("task json");
+    let task: TeamTask = serde_json::from_str(&created.text_content()).expect("task json");
     assert_eq!(task.title, "Persistent task");
 
     let _ = cokra
@@ -2573,7 +2579,8 @@ mod tests {
       })
       .await
       .expect("team status");
-    let snapshot: TeamSnapshot = serde_json::from_str(&status.content).expect("snapshot json");
+    let snapshot: TeamSnapshot =
+      serde_json::from_str(&status.text_content()).expect("snapshot json");
     assert!(
       snapshot
         .tasks
@@ -2643,7 +2650,8 @@ mod tests {
       })
       .await
       .expect("team status");
-    let snapshot: TeamSnapshot = serde_json::from_str(&status.content).expect("snapshot json");
+    let snapshot: TeamSnapshot =
+      serde_json::from_str(&status.text_content()).expect("snapshot json");
     assert!(snapshot.tasks.is_empty());
     let unread_total: usize = snapshot.unread_counts.values().copied().sum();
     assert_eq!(unread_total, 0);
@@ -2679,7 +2687,7 @@ mod tests {
       })
       .await
       .expect("create task");
-    let task: TeamTask = serde_json::from_str(&created.content).expect("task json");
+    let task: TeamTask = serde_json::from_str(&created.text_content()).expect("task json");
 
     let claimed = cokra
       .execute_tool(crate::model::ToolCall {
@@ -2697,7 +2705,8 @@ mod tests {
       })
       .await
       .expect("claim task");
-    let claimed_task: TeamTask = serde_json::from_str(&claimed.content).expect("claimed json");
+    let claimed_task: TeamTask =
+      serde_json::from_str(&claimed.text_content()).expect("claimed json");
     assert_eq!(claimed_task.status, TeamTaskStatus::InProgress);
     assert_eq!(
       claimed_task.assignee_thread_id,
@@ -2741,7 +2750,8 @@ mod tests {
       })
       .await
       .expect("spawn");
-    let spawned: serde_json::Value = serde_json::from_str(&spawn.content).expect("spawn json");
+    let spawned: serde_json::Value =
+      serde_json::from_str(&spawn.text_content()).expect("spawn json");
     let agent_id = spawned["agent_id"].as_str().expect("agent id").to_string();
     let _ = cokra
       .execute_tool(crate::model::ToolCall {
@@ -2772,7 +2782,7 @@ mod tests {
     )
     .await;
     let plan: cokra_protocol::TeamPlan =
-      serde_json::from_str(&submitted.content).expect("plan json");
+      serde_json::from_str(&submitted.text_content()).expect("plan json");
 
     let target = tmpdir.path().join("plan-gated.txt");
     let blocked = execute_tool_as_thread_result(
@@ -2846,7 +2856,8 @@ mod tests {
       })
       .await
       .expect("spawn");
-    let spawned: serde_json::Value = serde_json::from_str(&spawn.content).expect("spawn json");
+    let spawned: serde_json::Value =
+      serde_json::from_str(&spawn.text_content()).expect("spawn json");
     let agent_id = spawned["agent_id"].as_str().expect("agent id").to_string();
     let _ = cokra
       .execute_tool(crate::model::ToolCall {
@@ -2887,7 +2898,7 @@ mod tests {
     )
     .await;
     let channel_messages: Vec<cokra_protocol::TeamMessage> =
-      serde_json::from_str(&channel_messages.content).expect("channel messages json");
+      serde_json::from_str(&channel_messages.text_content()).expect("channel messages json");
     assert!(channel_messages.iter().any(|message| {
       message.kind == cokra_protocol::TeamMessageKind::Channel
         && message.route_key.as_deref() == Some("research")
@@ -2918,7 +2929,7 @@ mod tests {
     )
     .await;
     let claimed: Vec<cokra_protocol::TeamMessage> =
-      serde_json::from_str(&claimed.content).expect("claimed json");
+      serde_json::from_str(&claimed.text_content()).expect("claimed json");
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].kind, cokra_protocol::TeamMessageKind::Queue);
     assert_eq!(claimed[0].route_key.as_deref(), Some("review"));
@@ -2952,7 +2963,8 @@ mod tests {
       })
       .await
       .expect("spawn");
-    let spawned: serde_json::Value = serde_json::from_str(&spawn.content).expect("spawn json");
+    let spawned: serde_json::Value =
+      serde_json::from_str(&spawn.text_content()).expect("spawn json");
     let alex_id = spawned["agent_id"].as_str().expect("agent id").to_string();
     let _ = cokra
       .execute_tool(crate::model::ToolCall {
@@ -2980,7 +2992,7 @@ mod tests {
       })
       .await
       .expect("create");
-    let task: TeamTask = serde_json::from_str(&created.content).expect("task json");
+    let task: TeamTask = serde_json::from_str(&created.text_content()).expect("task json");
 
     let _ = cokra
       .execute_tool(crate::model::ToolCall {
@@ -3017,7 +3029,8 @@ mod tests {
       })
       .await
       .expect("handoff");
-    let handed_task: TeamTask = serde_json::from_str(&handed.content).expect("handoff json");
+    let handed_task: TeamTask =
+      serde_json::from_str(&handed.text_content()).expect("handoff json");
     assert_eq!(handed_task.status, TeamTaskStatus::Review);
     assert_eq!(
       handed_task.assignee_thread_id.as_deref(),
@@ -3031,7 +3044,8 @@ mod tests {
       serde_json::json!({}),
     )
     .await;
-    let claimed_task: TeamTask = serde_json::from_str(&claimed.content).expect("claimed json");
+    let claimed_task: TeamTask =
+      serde_json::from_str(&claimed.text_content()).expect("claimed json");
     assert_eq!(claimed_task.status, TeamTaskStatus::InProgress);
     assert_eq!(claimed_task.title, "Implement feature");
   }

@@ -30,8 +30,6 @@ impl ToolHandler for CleanupTeamHandler {
     }
     team_runtime.clear_state().await;
 
-    let mut out = ToolOutput::success("{\"status\":\"cleaned\"}".to_string());
-    out.id = invocation.id;
-    Ok(out)
+    Ok(ToolOutput::success("{\"status\":\"cleaned\"}".to_string()).with_id(invocation.id))
   }
 }

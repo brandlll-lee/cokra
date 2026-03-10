@@ -40,13 +40,68 @@ const IO_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 // ---------------------------------------------------------------------------
 
 /// Sandbox permission level for a command execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SandboxPermissions {
   /// Normal sandbox restrictions apply.
   #[default]
-  Default,
+  UseDefault,
+  /// Request a narrower sandbox with extra explicit permissions.
+  WithAdditionalPermissions,
   /// Escalated permissions (e.g. after user approval on sandbox denial).
   RequireEscalated,
+}
+
+impl SandboxPermissions {
+  pub fn requires_additional_permissions(self) -> bool {
+    matches!(self, Self::WithAdditionalPermissions)
+  }
+
+  pub fn requires_escalated_permissions(self) -> bool {
+    matches!(self, Self::RequireEscalated)
+  }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileSystemPermissions {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub read: Option<Vec<String>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub write: Option<Vec<String>>,
+}
+
+impl FileSystemPermissions {
+  pub fn is_empty(&self) -> bool {
+    self.read.is_none() && self.write.is_none()
+  }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkPermissions {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub enabled: Option<bool>,
+}
+
+impl NetworkPermissions {
+  pub fn is_empty(&self) -> bool {
+    self.enabled.is_none()
+  }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionProfile {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub network: Option<NetworkPermissions>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub file_system: Option<FileSystemPermissions>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub macos: Option<serde_json::Value>,
+}
+
+impl PermissionProfile {
+  pub fn is_empty(&self) -> bool {
+    self.network.is_none() && self.file_system.is_none() && self.macos.is_none()
+  }
 }
 
 /// Format exec output into codex-style structured payload for model consumption.
@@ -181,10 +236,14 @@ pub struct ExecParams {
   pub network_attempt_id: Option<String>,
   /// Sandbox permission level.
   pub sandbox_permissions: SandboxPermissions,
+  /// Additional sandbox permissions requested for the command.
+  pub additional_permissions: Option<PermissionProfile>,
   /// Windows sandbox level (fixed Disabled for now).
   pub windows_sandbox_level: WindowsSandboxLevel,
   /// Human-readable justification for why the command is being run.
   pub justification: Option<String>,
+  /// Suggested reusable command prefix after escalation approval.
+  pub prefix_rule: Option<Vec<String>>,
   /// Override argv[0] display name.
   pub arg0: Option<String>,
 }
@@ -198,9 +257,11 @@ impl Default for ExecParams {
       env: HashMap::new(),
       network: None,
       network_attempt_id: None,
-      sandbox_permissions: SandboxPermissions::Default,
+      sandbox_permissions: SandboxPermissions::UseDefault,
+      additional_permissions: None,
       windows_sandbox_level: WindowsSandboxLevel::Disabled,
       justification: None,
+      prefix_rule: None,
       arg0: None,
     }
   }

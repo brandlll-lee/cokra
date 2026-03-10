@@ -90,11 +90,11 @@ impl ToolHandler for GrepFilesHandler {
     };
 
     let mut out = ToolOutput::success(content);
-    if search_results.is_empty() {
-      out.is_error = true;
-    }
-    out.id = invocation.id;
-    Ok(out)
+    Ok(
+      out
+        .with_success(!search_results.is_empty())
+        .with_id(invocation.id),
+    )
   }
 }
 

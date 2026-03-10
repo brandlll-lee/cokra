@@ -35,8 +35,6 @@ impl ToolHandler for ViewImageHandler {
       )));
     }
 
-    let mut out = ToolOutput::success(format!("image ready: {}", path.display()));
-    out.id = invocation.id;
-    Ok(out)
+    Ok(ToolOutput::success(format!("image ready: {}", path.display())).with_id(invocation.id))
   }
 }

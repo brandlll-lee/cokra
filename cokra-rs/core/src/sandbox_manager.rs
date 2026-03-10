@@ -13,6 +13,7 @@ use cokra_protocol::SandboxPolicy;
 
 use crate::exec::ExecExpiration;
 use crate::exec::ExecParams;
+use crate::exec::PermissionProfile;
 use crate::exec::SandboxPermissions;
 use crate::exec::WindowsSandboxLevel;
 
@@ -47,6 +48,8 @@ pub struct CommandSpec {
   pub expiration: ExecExpiration,
   /// Sandbox permissions requested by the tool.
   pub sandbox_permissions: SandboxPermissions,
+  /// Additional sandbox permissions requested by the tool.
+  pub additional_permissions: Option<PermissionProfile>,
   /// Windows sandbox level.
   pub windows_sandbox_level: WindowsSandboxLevel,
   /// Network proxy placeholder.
@@ -55,6 +58,8 @@ pub struct CommandSpec {
   pub network_attempt_id: Option<String>,
   /// Justification.
   pub justification: Option<String>,
+  /// Suggested reusable approval prefix.
+  pub prefix_rule: Option<Vec<String>>,
   /// Override argv[0].
   pub arg0: Option<String>,
 }
@@ -71,8 +76,10 @@ impl CommandSpec {
       network: self.network,
       network_attempt_id: self.network_attempt_id,
       sandbox_permissions: self.sandbox_permissions,
+      additional_permissions: self.additional_permissions,
       windows_sandbox_level: self.windows_sandbox_level,
       justification: self.justification,
+      prefix_rule: self.prefix_rule,
       arg0: self.arg0,
     }
   }
@@ -137,9 +144,9 @@ impl std::error::Error for SandboxTransformError {}
 ///
 /// - `DangerFullAccess` → no sandbox, identity transform
 /// - `ExternalSandbox` → no sandbox, identity transform (external manages it)
-/// - `WorkspaceWrite` / `ReadOnly` → currently falls back to host execution
-///   (no bwrap/landlock yet), but guarantees the shell binary is visible
-///   because we run on the host rootfs.
+/// - `WorkspaceWrite` / `ReadOnly` → policy-only mode for now. We still run
+///   directly on the host rootfs because cokra does not yet enforce bwrap,
+///   landlock, seatbelt, or Windows restricted-token isolation here.
 ///
 /// ## Future (post-Spec 2)
 ///
@@ -151,20 +158,17 @@ pub struct SandboxManager;
 impl SandboxManager {
   /// Transform a `CommandSpec` + `SandboxPolicy` into executable `ExecParams`.
   ///
-  /// ## Spec 2.2 — WorkspaceWrite guarantees
+  /// ## Current behavior for restricted policies
   ///
-  /// In WorkspaceWrite/ReadOnly mode, shell binaries and their dependencies
-  /// MUST be executable. Currently we achieve this by running on the host
-  /// rootfs (no isolation). When bwrap/landlock is implemented, we must
-  /// bind-mount /bin, /usr, /lib, /lib64 at minimum.
+  /// In `WorkspaceWrite` and `ReadOnly`, cokra currently preserves policy
+  /// metadata but executes on the host. These modes should not be described
+  /// as isolated until a real sandbox backend is wired in.
   ///
-  /// ## Spec 2.3 — Fallback strategy
+  /// ## Fallback strategy
   ///
-  /// If sandbox transform cannot guarantee executability (e.g. bwrap not
-  /// installed), we fall back to `ResolvedSandboxKind::None` (host execution)
-  /// for `DangerFullAccess` and `ExternalSandbox`. For `WorkspaceWrite` and
-  /// `ReadOnly`, we currently always fall back to host execution with a
-  /// warning logged.
+  /// `DangerFullAccess` and `ExternalSandbox` are already host execution.
+  /// `WorkspaceWrite` and `ReadOnly` currently also degrade to host execution
+  /// until restricted sandbox backends land.
   pub fn transform(
     request: SandboxTransformRequest,
   ) -> Result<SandboxTransformResult, SandboxTransformError> {
@@ -189,15 +193,11 @@ impl SandboxManager {
         })
       }
       SandboxPolicy::WorkspaceWrite { .. } | SandboxPolicy::ReadOnly { .. } => {
-        // Spec 2.2: For now, run on host rootfs to guarantee shell
-        // binary visibility. Future: bwrap/landlock with bind-mounts.
-        //
-        // Spec 2.3: This IS the fallback — host execution.
-        // When bwrap is implemented, this branch will attempt sandbox
-        // transform first, and only fall back to host if bwrap is
-        // missing.
+        // Current state: policy-only restricted mode. We preserve the selected
+        // sandbox policy in metadata, but execution is still on the host until
+        // a real backend is implemented.
         tracing::debug!(
-          "sandbox policy {:?} — falling back to host execution (no bwrap/landlock yet)",
+          "sandbox policy {:?} — policy-only mode, executing on host (no bwrap/landlock yet)",
           policy_kind_str(&policy)
         );
 
@@ -234,11 +234,13 @@ mod tests {
       cwd: PathBuf::from("/tmp"),
       env: HashMap::new(),
       expiration: ExecExpiration::DefaultTimeout,
-      sandbox_permissions: SandboxPermissions::Default,
+      sandbox_permissions: SandboxPermissions::UseDefault,
+      additional_permissions: None,
       windows_sandbox_level: WindowsSandboxLevel::Disabled,
       network: None,
       network_attempt_id: None,
       justification: None,
+      prefix_rule: None,
       arg0: None,
     }
   }
