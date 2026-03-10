@@ -27,7 +27,7 @@ impl ChatWidget {
 
     let merged_exec_cell = self
       .transcript
-      .active_cell
+      .active_exec_cell
       .as_ref()
       .and_then(|cell| cell.as_any().downcast_ref::<ExecCell>())
       .and_then(|cell| cell.with_added_call(call.clone()));
@@ -35,15 +35,15 @@ impl ChatWidget {
     if let Some(merged_exec_cell) = merged_exec_cell {
       if let Some(cell) = self
         .transcript
-        .active_cell
+        .active_exec_cell
         .as_mut()
         .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
       {
         *cell = merged_exec_cell;
       }
     } else {
-      self.flush_active_cell();
-      self.transcript.active_cell = Some(Box::new(new_active_exec_command(
+      self.flush_active_exec_cell();
+      self.transcript.active_exec_cell = Some(Box::new(new_active_exec_command(
         call.command_id.clone(),
         call.tool_name.clone(),
         call.command.clone(),
@@ -75,7 +75,7 @@ impl ChatWidget {
 
     if let Some(cell) = self
       .transcript
-      .active_cell
+      .active_exec_cell
       .as_mut()
       .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
       && cell.append_output(&event.command_id, &event.output)
@@ -132,7 +132,7 @@ impl ChatWidget {
     let mut should_flush_active = false;
     if let Some(cell) = self
       .transcript
-      .active_cell
+      .active_exec_cell
       .as_mut()
       .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
     {
@@ -149,7 +149,7 @@ impl ChatWidget {
       self.bump_active_cell_revision();
     }
     if should_flush_active {
-      self.flush_active_cell();
+      self.flush_active_exec_cell();
     }
     self.sync_exec_status_indicator();
   }
@@ -260,7 +260,7 @@ mod tests {
 
     let cell = widget
       .transcript
-      .active_cell
+      .active_exec_cell
       .as_ref()
       .and_then(|c| c.as_any().downcast_ref::<ExecCell>())
       .expect("expected active exec cell");
@@ -294,5 +294,63 @@ mod tests {
       .expect("status should remain visible while turn is active");
     assert_eq!(status.header(), "Investigating rendering code");
     assert_eq!(status.details(), None);
+  }
+
+  #[test]
+  fn sequential_exploring_calls_stay_in_one_exec_cell() {
+    let mut widget = make_widget();
+
+    widget.on_exec_command_begin(&begin_event("call-1", "list_dir", "cokra-rs"));
+    widget.on_exec_command_end(&end_event("call-1"));
+    widget.on_exec_command_begin(&begin_event("call-2", "read_file", "PROJECT_STRUCTURE.md"));
+    widget.on_exec_command_end(&end_event("call-2"));
+    widget.on_exec_command_begin(&begin_event("call-3", "search_tool", "ExecCell"));
+    widget.on_exec_command_end(&end_event("call-3"));
+
+    let cell = widget
+      .transcript
+      .active_exec_cell
+      .as_ref()
+      .and_then(|c| c.as_any().downcast_ref::<ExecCell>())
+      .expect("expected grouped exploring exec cell");
+
+    assert_eq!(cell.calls.len(), 3);
+    assert!(cell.is_exploring_cell());
+
+    let rendered = cell
+      .display_lines(80)
+      .iter()
+      .map(Line::to_string)
+      .collect::<Vec<_>>()
+      .join("\n");
+    assert!(rendered.contains("Explored"));
+    assert!(rendered.contains("List cokra-rs"));
+    assert!(rendered.contains("Read PROJECT_STRUCTURE.md"));
+    assert!(rendered.contains("Search ExecCell"));
+  }
+
+  #[test]
+  fn agent_preview_does_not_replace_active_exec_cell() {
+    let mut widget = make_widget();
+
+    widget.on_exec_command_begin(&begin_event("call-1", "list_dir", "cokra-rs"));
+    widget.on_agent_message_delta("item-1", "I'll inspect the top-level layout.");
+    widget.on_exec_command_begin(&begin_event("call-2", "read_file", "Cargo.toml"));
+
+    let cell = widget
+      .transcript
+      .active_exec_cell
+      .as_ref()
+      .and_then(|c| c.as_any().downcast_ref::<ExecCell>())
+      .expect("expected active exec cell");
+    assert_eq!(cell.calls.len(), 2);
+
+    let lines = widget
+      .active_cell_transcript_lines(80)
+      .expect("expected combined live transcript");
+    let rendered = lines.iter().map(Line::to_string).collect::<Vec<_>>().join("\n");
+    assert!(rendered.contains("I'll inspect the top-level layout."));
+    assert!(rendered.contains("List cokra-rs"));
+    assert!(rendered.contains("Read Cargo.toml"));
   }
 }

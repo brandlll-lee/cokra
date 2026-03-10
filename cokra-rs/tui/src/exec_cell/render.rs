@@ -21,6 +21,7 @@ use crate::wrapping::word_wrap_line;
 use crate::wrapping::word_wrap_lines;
 
 pub(crate) const TOOL_CALL_MAX_LINES: usize = 5;
+const SHELL_TOOL_CALL_MAX_LINES: usize = 2;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OutputLinesParams {
@@ -208,10 +209,15 @@ impl HistoryCell for ExecCell {
         lines.extend(wrapped_cmd);
       }
 
+      let line_limit = if call.tool_name == "shell" {
+        SHELL_TOOL_CALL_MAX_LINES
+      } else {
+        TOOL_CALL_MAX_LINES
+      };
       let rendered = output_lines(
         call.output.as_ref(),
         OutputLinesParams {
-          line_limit: TOOL_CALL_MAX_LINES,
+          line_limit,
           only_err: false,
           include_angle_pipe: true,
           include_prefix: true,
@@ -454,5 +460,43 @@ mod tests {
     let cell = ExecCell::new(call, false);
     let rendered = render_exec_cell(&cell, 60, 8);
     insta::assert_snapshot!(rendered);
+  }
+
+  #[test]
+  fn shell_output_uses_compact_preview_limit() {
+    let output = (1..=10)
+      .map(|n| format!("line {n}"))
+      .collect::<Vec<_>>()
+      .join("\n");
+    let call = ExecCall {
+      command_id: "call-many".to_string(),
+      tool_name: "shell".to_string(),
+      command: "printf 'many lines'".to_string(),
+      cwd: PathBuf::from("/home/user"),
+      output: Some(CommandOutput {
+        exit_code: 0,
+        output,
+      }),
+      start_time: None,
+      duration: Some(Duration::from_millis(10)),
+    };
+
+    let cell = ExecCell::new(call, false);
+    let lines = cell.display_lines(80);
+    let rendered = lines.iter().map(Line::to_string).collect::<Vec<_>>();
+
+    assert!(rendered.iter().any(|line| line.contains("line 1")));
+    assert!(rendered.iter().any(|line| line.contains("line 2")));
+    assert!(rendered.iter().any(|line| line.contains("… +6 lines")));
+    assert!(rendered.iter().any(|line| line.contains("line 9")));
+    assert!(rendered.iter().any(|line| line.contains("line 10")));
+    assert!(
+      !rendered.iter().any(|line| line.contains("line 3")),
+      "shell preview should not keep more than two head lines"
+    );
+    assert!(
+      !rendered.iter().any(|line| line.contains("line 8")),
+      "shell preview should not keep more than two tail lines"
+    );
   }
 }

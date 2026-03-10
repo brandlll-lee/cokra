@@ -101,8 +101,10 @@ impl ChatWidget {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::app_event::AppEvent;
   use crate::app_event_sender::AppEventSender;
   use crate::tui::FrameRequester;
+  use std::path::PathBuf;
   use tokio::sync::mpsc::unbounded_channel;
 
   #[test]
@@ -195,5 +197,68 @@ mod tests {
       rx.try_recv().is_err(),
       "scrollback-first mode should not start commit animation for agent text"
     );
+  }
+
+  #[test]
+  fn scrollback_first_flushes_active_exec_before_agent_history_chunks() {
+    let (tx, mut rx) = unbounded_channel();
+    let sender = AppEventSender::new(tx);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::ScrollbackFirst,
+    );
+
+    widget.on_exec_command_begin(&cokra_protocol::ExecCommandBeginEvent {
+      thread_id: "thread-1".to_string(),
+      turn_id: "turn-1".to_string(),
+      command_id: "call-1".to_string(),
+      tool_name: "list_dir".to_string(),
+      command: "core/src".to_string(),
+      cwd: PathBuf::from("/tmp/project"),
+    });
+    widget.on_exec_command_end(&cokra_protocol::ExecCommandEndEvent {
+      thread_id: "thread-1".to_string(),
+      turn_id: "turn-1".to_string(),
+      command_id: "call-1".to_string(),
+      exit_code: 0,
+      output: String::new(),
+    });
+    widget.on_agent_message_delta("item-1", "answer line\nnext line");
+
+    let Some(AppEvent::InsertHistoryCell(exec_cell)) = rx.try_recv().ok() else {
+      panic!("expected exec cell to flush before agent text");
+    };
+    let exec_rendered = exec_cell
+      .display_lines(80)
+      .iter()
+      .map(|line| {
+        line
+          .spans
+          .iter()
+          .map(|span| span.content.clone())
+          .collect::<String>()
+      })
+      .collect::<Vec<_>>()
+      .join("\n");
+    assert!(exec_rendered.contains("List core/src"));
+
+    let Some(AppEvent::InsertHistoryCell(agent_cell)) = rx.try_recv().ok() else {
+      panic!("expected committed agent text after exec cell");
+    };
+    let agent_rendered = agent_cell
+      .display_lines(80)
+      .iter()
+      .map(|line| {
+        line
+          .spans
+          .iter()
+          .map(|span| span.content.clone())
+          .collect::<String>()
+      })
+      .collect::<Vec<_>>()
+      .join("\n");
+    assert!(agent_rendered.contains("answer line"));
   }
 }

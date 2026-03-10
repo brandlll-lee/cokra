@@ -319,7 +319,16 @@ impl App {
         core_event = self.cokra.next_event() => {
           match core_event {
             Ok(event) => {
+              let redraw_inline_now =
+                self.ui_mode == UiMode::Inline
+                  && matches!(
+                    &event.msg,
+                    EventMsg::ExecCommandBegin(_) | EventMsg::ExecCommandEnd(_)
+                  );
               self.handle_cokra_event(event).await?;
+              if redraw_inline_now {
+                self.draw(tui)?;
+              }
               // SessionConfigured arrives before the first user turn starts, so
               // the app must keep polling core events even while idle. Always
               // schedule a frame after handling core events to surface startup

@@ -125,7 +125,11 @@ impl ChatWidget {
   }
 
   fn flush_active_cell(&mut self) {
-    self.transcript.flush_active_cell(&self.app_event_tx);
+    self.transcript.flush_all_active_cells(&self.app_event_tx);
+  }
+
+  fn flush_active_exec_cell(&mut self) {
+    self.transcript.flush_active_exec_cell(&self.app_event_tx);
   }
 
   pub(crate) fn add_to_history(&mut self, cell: impl HistoryCell + 'static) {
@@ -133,11 +137,12 @@ impl ChatWidget {
   }
 
   fn add_boxed_history(&mut self, cell: Box<dyn HistoryCell>) {
-    self.flush_active_cell();
+    self.flush_active_exec_cell();
     self.app_event_tx.insert_boxed_history_cell(cell);
   }
 
   fn append_boxed_history(&mut self, cell: Box<dyn HistoryCell>) {
+    self.flush_active_exec_cell();
     self.app_event_tx.insert_boxed_history_cell(cell);
   }
 
@@ -215,14 +220,13 @@ impl ChatWidget {
 
     if let Some(cell) = self
       .transcript
-      .active_cell
+      .active_agent_preview
       .as_mut()
       .and_then(|cell| cell.as_any_mut().downcast_mut::<AgentMessageCell>())
     {
       cell.replace_lines(lines);
     } else {
-      self.flush_active_cell();
-      self.transcript.active_cell = Some(Box::new(AgentMessageCell::new(lines, true)));
+      self.transcript.active_agent_preview = Some(Box::new(AgentMessageCell::new(lines, true)));
     }
 
     self.bump_active_cell_revision();
@@ -231,12 +235,12 @@ impl ChatWidget {
   fn clear_streaming_agent_preview(&mut self) {
     let should_clear = self
       .transcript
-      .active_cell
+      .active_agent_preview
       .as_ref()
       .and_then(|cell| cell.as_any().downcast_ref::<AgentMessageCell>())
       .is_some();
     if should_clear {
-      self.transcript.active_cell = None;
+      self.transcript.active_agent_preview = None;
       self.bump_active_cell_revision();
     }
   }
@@ -252,7 +256,7 @@ impl ChatWidget {
   fn current_exec_status_snapshot(&self) -> Option<StatusSnapshot> {
     let active_exec_call = self
       .transcript
-      .active_cell
+      .active_exec_cell
       .as_ref()
       .and_then(|cell| cell.as_any().downcast_ref::<crate::exec_cell::ExecCell>())
       .and_then(crate::exec_cell::ExecCell::active_call);
@@ -487,14 +491,19 @@ impl ChatWidget {
   }
 
   fn as_renderable(&self) -> RenderableItem<'_> {
-    let active_cell_renderable = match &self.transcript.active_cell {
-      Some(cell) => {
-        RenderableItem::Borrowed(cell as &dyn Renderable).inset(Insets::tlbr(1, 0, 0, 0))
-      }
-      None => RenderableItem::Owned(Box::new(())),
-    };
     let mut flex = FlexRenderable::new();
-    flex.push(1, active_cell_renderable);
+    if let Some(cell) = &self.transcript.active_agent_preview {
+      flex.push(
+        0,
+        RenderableItem::Borrowed(cell as &dyn Renderable).inset(Insets::tlbr(1, 0, 0, 0)),
+      );
+    }
+    if let Some(cell) = &self.transcript.active_exec_cell {
+      flex.push(
+        1,
+        RenderableItem::Borrowed(cell as &dyn Renderable).inset(Insets::tlbr(1, 0, 0, 0)),
+      );
+    }
     flex.push(
       0,
       RenderableItem::Borrowed(&self.bottom_pane as &dyn Renderable)

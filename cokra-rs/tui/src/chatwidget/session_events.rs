@@ -32,6 +32,7 @@ impl ChatWidget {
 
   pub(super) fn on_error(&mut self, event: &cokra_protocol::ErrorEvent) {
     self.app_event_tx.send(AppEvent::StopCommitAnimation);
+    self.flush_active_cell();
     self.transcript.clear_exec_state();
     self.transcript.clear_turn_state();
     self.session.reset_turn_status();
@@ -66,6 +67,7 @@ impl ChatWidget {
 
   pub(super) fn on_turn_aborted(&mut self, event: &cokra_protocol::TurnAbortedEvent) {
     self.app_event_tx.send(AppEvent::StopCommitAnimation);
+    self.flush_active_cell();
     self.transcript.clear_exec_state();
     self.transcript.clear_turn_state();
     self.session.reset_turn_status();
