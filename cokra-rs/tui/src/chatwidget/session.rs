@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -13,6 +14,31 @@ impl TokenUsage {
   }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StatusSnapshot {
+  pub(super) header: String,
+  pub(super) details: Option<String>,
+  pub(super) inline_message: Option<String>,
+}
+
+impl StatusSnapshot {
+  pub(super) fn new(
+    header: impl Into<String>,
+    details: Option<String>,
+    inline_message: Option<String>,
+  ) -> Self {
+    Self {
+      header: header.into(),
+      details,
+      inline_message,
+    }
+  }
+
+  pub(super) fn working() -> Self {
+    Self::new("Working", None, None)
+  }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct SessionState {
   pub(super) token_usage: TokenUsage,
@@ -22,6 +48,10 @@ pub(super) struct SessionState {
   pub(super) has_seen_session_configured: bool,
   pub(super) last_separator_elapsed_secs: Option<u64>,
   pub(super) last_wait_end_fingerprint: Option<u64>,
+  pub(super) reasoning_buffer: String,
+  pub(super) collab_wait_status: Option<StatusSnapshot>,
+  pub(super) active_status_override: Option<StatusSnapshot>,
+  pub(super) mcp_starting_servers: BTreeSet<String>,
 }
 
 impl SessionState {
@@ -51,11 +81,21 @@ impl SessionState {
     self.last_separator_elapsed_secs = Some(current_elapsed);
     elapsed
   }
+
+  pub(super) fn reset_turn_status(&mut self) {
+    self.reasoning_buffer.clear();
+    self.collab_wait_status = None;
+    self.active_status_override = None;
+    self.mcp_starting_servers.clear();
+  }
 }
 
 #[cfg(test)]
 mod tests {
+  use std::collections::BTreeSet;
+
   use super::SessionState;
+  use super::StatusSnapshot;
 
   #[test]
   fn worked_elapsed_uses_last_separator_as_baseline() {
@@ -66,5 +106,23 @@ mod tests {
 
     // Guard against timer resets or resumed sessions reporting a smaller elapsed.
     assert_eq!(state.worked_elapsed_from(3), 3);
+  }
+
+  #[test]
+  fn reset_turn_status_clears_dynamic_status_state() {
+    let mut state = SessionState {
+      reasoning_buffer: "**Analyzing**".to_string(),
+      collab_wait_status: Some(StatusSnapshot::new("Waiting for agents", None, None)),
+      active_status_override: Some(StatusSnapshot::new("Searching the web", None, None)),
+      mcp_starting_servers: BTreeSet::from(["filesystem".to_string()]),
+      ..SessionState::default()
+    };
+
+    state.reset_turn_status();
+
+    assert!(state.reasoning_buffer.is_empty());
+    assert!(state.collab_wait_status.is_none());
+    assert!(state.active_status_override.is_none());
+    assert!(state.mcp_starting_servers.is_empty());
   }
 }

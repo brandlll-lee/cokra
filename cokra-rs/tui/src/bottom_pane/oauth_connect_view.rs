@@ -21,6 +21,7 @@ use super::textarea::TextAreaState;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::render::renderable::Renderable;
+use crate::tui::InlineViewportSizing;
 
 pub(crate) struct OAuthConnectView {
   provider_id: String,
@@ -78,6 +79,13 @@ impl OAuthConnectView {
 }
 
 impl BottomPaneView for OAuthConnectView {
+  fn inline_viewport_sizing(&self) -> InlineViewportSizing {
+    // Tradeoff: keep OAuth login as a stable dialog in inline mode instead of
+    // expanding the viewport, because resize redraws would otherwise push the
+    // dialog itself into scrollback and duplicate its content.
+    InlineViewportSizing::PreserveVisibleHistory
+  }
+
   fn handle_key_event(&mut self, key_event: KeyEvent) {
     match key_event {
       KeyEvent {
@@ -188,5 +196,30 @@ impl Renderable for OAuthConnectView {
   fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
     let _ = area;
     None
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use tokio::sync::mpsc;
+
+  use super::*;
+
+  #[test]
+  fn oauth_connect_view_uses_stable_inline_viewport_sizing() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let view = OAuthConnectView::new(
+      "anthropic-oauth".to_string(),
+      "Anthropic".to_string(),
+      "https://example.com/oauth".to_string(),
+      "Log in with your browser.".to_string(),
+      "Paste the redirect URL:".to_string(),
+      AppEventSender::new(tx),
+    );
+
+    assert_eq!(
+      <OAuthConnectView as BottomPaneView>::inline_viewport_sizing(&view),
+      InlineViewportSizing::PreserveVisibleHistory
+    );
   }
 }

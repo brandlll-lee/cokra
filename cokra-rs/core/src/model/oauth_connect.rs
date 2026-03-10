@@ -3,8 +3,15 @@ use base64::engine::general_purpose::STANDARD;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use std::collections::HashMap;
 use std::error::Error as _;
+use std::future::Future;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 
+use futures::future::select_all;
 use reqwest::Url;
 use serde::Deserialize;
 use serde_json::Value;
@@ -21,6 +28,7 @@ use super::auth::AuthError;
 use super::auth::Credentials;
 use super::auth::OAuthConfig;
 use super::auth::StoredCredentials;
+use super::auth::find_auth_provider_by_oauth_kind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OAuthProviderKind {
@@ -316,7 +324,9 @@ pub async fn enable_all_github_copilot_models(
   }
   results
 }
+#[cfg(test)]
 const ENV_GOOGLE_GEMINI_CLIENT_ID: &str = "COKRA_GOOGLE_GEMINI_CLIENT_ID";
+#[cfg(test)]
 const ENV_GOOGLE_GEMINI_CLIENT_SECRET: &str = "COKRA_GOOGLE_GEMINI_CLIENT_SECRET";
 const GOOGLE_GEMINI_REDIRECT_URI: &str = "http://localhost:8085/oauth2callback";
 const GOOGLE_GEMINI_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -327,7 +337,9 @@ const GOOGLE_GEMINI_SCOPES: &[&str] = &[
   "https://www.googleapis.com/auth/userinfo.profile",
 ];
 
+#[cfg(test)]
 const ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID: &str = "COKRA_GOOGLE_ANTIGRAVITY_CLIENT_ID";
+#[cfg(test)]
 const ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET: &str = "COKRA_GOOGLE_ANTIGRAVITY_CLIENT_SECRET";
 const GOOGLE_ANTIGRAVITY_REDIRECT_URI: &str = "http://localhost:51121/oauth-callback";
 const GOOGLE_ANTIGRAVITY_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -341,6 +353,7 @@ const GOOGLE_ANTIGRAVITY_SCOPES: &[&str] = &[
 ];
 
 const OAUTH_CLIENTS_FILE_NAME: &str = "oauth_clients.json";
+const OAUTH_CALLBACK_BIND_MODE_ENV: &str = "COKRA_OAUTH_CALLBACK_BIND_MODE";
 
 #[derive(Debug, Deserialize)]
 struct OAuthClientFileEntry {
@@ -450,31 +463,40 @@ fn oauth_client_from_metadata(metadata: &Value) -> Option<(String, Option<String
   Some((client_id, client_secret))
 }
 
+fn google_oauth_provider_descriptor(
+  kind: OAuthProviderKind,
+) -> Result<&'static super::auth::AuthProviderDescriptor, AuthError> {
+  let descriptor = find_auth_provider_by_oauth_kind(kind).ok_or_else(|| {
+    AuthError::OAuthError(format!("missing auth provider descriptor for {:?}", kind))
+  })?;
+
+  if descriptor.id != "google-gemini-cli" && descriptor.id != "google-antigravity" {
+    return Err(AuthError::OAuthError(
+      "provider is not a Google OAuth flow".to_string(),
+    ));
+  }
+
+  Ok(descriptor)
+}
+
 fn google_oauth_client_optional(
   kind: OAuthProviderKind,
   stored: Option<&StoredCredentials>,
 ) -> Result<Option<(String, Option<String>)>, AuthError> {
-  let (provider_id, env_id, env_secret) = match kind {
-    OAuthProviderKind::GoogleGeminiCli => (
-      "google-gemini-cli",
-      ENV_GOOGLE_GEMINI_CLIENT_ID,
-      ENV_GOOGLE_GEMINI_CLIENT_SECRET,
-    ),
-    OAuthProviderKind::GoogleAntigravity => (
-      "google-antigravity",
-      ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID,
-      ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET,
-    ),
-    _ => {
-      return Err(AuthError::OAuthError(
-        "provider is not a Google OAuth flow".to_string(),
-      ));
-    }
-  };
+  let descriptor = google_oauth_provider_descriptor(kind)?;
+  let oauth_client_env = descriptor.oauth_client_env.ok_or_else(|| {
+    AuthError::OAuthError(format!(
+      "missing OAuth client environment mapping for {}",
+      descriptor.id
+    ))
+  })?;
+  let provider_id = descriptor.id;
+  let env_id = oauth_client_env.client_id_env;
+  let env_secret = oauth_client_env.client_secret_env;
 
   // 1) Env vars (explicit and immediate)
   if let Some(client_id) = env_optional(env_id) {
-    return Ok(Some((client_id, env_optional(env_secret))));
+    return Ok(Some((client_id, env_secret.and_then(env_optional))));
   }
 
   // 2) Local oauth_clients.json (~/.cokra/oauth_clients.json). This matches pi-mono's
@@ -500,23 +522,16 @@ fn google_oauth_client(
   kind: OAuthProviderKind,
   stored: Option<&StoredCredentials>,
 ) -> Result<(String, Option<String>), AuthError> {
-  let (provider_id, env_id, env_secret) = match kind {
-    OAuthProviderKind::GoogleGeminiCli => (
-      "google-gemini-cli",
-      ENV_GOOGLE_GEMINI_CLIENT_ID,
-      ENV_GOOGLE_GEMINI_CLIENT_SECRET,
-    ),
-    OAuthProviderKind::GoogleAntigravity => (
-      "google-antigravity",
-      ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID,
-      ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET,
-    ),
-    _ => {
-      return Err(AuthError::OAuthError(
-        "provider is not a Google OAuth flow".to_string(),
-      ));
-    }
-  };
+  let descriptor = google_oauth_provider_descriptor(kind)?;
+  let oauth_client_env = descriptor.oauth_client_env.ok_or_else(|| {
+    AuthError::OAuthError(format!(
+      "missing OAuth client environment mapping for {}",
+      descriptor.id
+    ))
+  })?;
+  let provider_id = descriptor.id;
+  let env_id = oauth_client_env.client_id_env;
+  let env_secret = oauth_client_env.client_secret_env.unwrap_or("<none>");
 
   google_oauth_client_optional(kind, stored)?.ok_or_else(|| {
     AuthError::OAuthError(format!(
@@ -534,6 +549,322 @@ const CALLBACK_FAILURE_HTML: &str = "<!doctype html><html><body><h1>Authenticati
 struct CallbackBinding {
   port: u16,
   path: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalCallbackBindPreference {
+  Auto,
+  Loopback,
+  Wildcard,
+}
+
+impl LocalCallbackBindPreference {
+  fn parse(raw: &str) -> Option<Self> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+      "auto" => Some(Self::Auto),
+      "loopback" | "local" | "localhost" => Some(Self::Loopback),
+      "wildcard" | "all" | "any" => Some(Self::Wildcard),
+      _ => None,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalCallbackBindStrategy {
+  Loopback,
+  Wildcard,
+}
+
+impl LocalCallbackBindStrategy {
+  fn name(self) -> &'static str {
+    match self {
+      Self::Loopback => "loopback",
+      Self::Wildcard => "wildcard",
+    }
+  }
+
+  fn listener_endpoints(self, port: u16) -> Vec<LocalCallbackListenerEndpoint> {
+    match self {
+      Self::Loopback => vec![
+        LocalCallbackListenerEndpoint::new(
+          "ipv4-loopback",
+          SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        ),
+        LocalCallbackListenerEndpoint::new(
+          "ipv6-loopback",
+          SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
+        ),
+      ],
+      Self::Wildcard => vec![
+        LocalCallbackListenerEndpoint::new(
+          "ipv4-wildcard",
+          SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port),
+        ),
+        // Tradeoff: keep IPv6 on loopback even in wildcard mode. Binding [::]
+        // can monopolize the port on Linux and block the IPv4 wildcard
+        // listener that WSL localhost forwarding depends on.
+        LocalCallbackListenerEndpoint::new(
+          "ipv6-loopback",
+          SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
+        ),
+      ],
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalCallbackRuntime {
+  is_wsl: bool,
+}
+
+impl LocalCallbackRuntime {
+  fn detect() -> Self {
+    let env_wsl_distro = std::env::var("WSL_DISTRO_NAME").ok();
+    let env_wsl_interop = std::env::var("WSL_INTEROP").ok();
+    let proc_version = std::fs::read_to_string("/proc/version").ok();
+    let proc_osrelease = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok();
+
+    Self::from_signals(
+      env_wsl_distro.as_deref(),
+      env_wsl_interop.as_deref(),
+      proc_version.as_deref(),
+      proc_osrelease.as_deref(),
+    )
+  }
+
+  fn from_signals(
+    env_wsl_distro: Option<&str>,
+    env_wsl_interop: Option<&str>,
+    proc_version: Option<&str>,
+    proc_osrelease: Option<&str>,
+  ) -> Self {
+    let has_wsl_env = env_wsl_distro.is_some() || env_wsl_interop.is_some();
+    let proc_mentions_wsl = proc_version
+      .into_iter()
+      .chain(proc_osrelease)
+      .any(|value| value.to_ascii_lowercase().contains("microsoft"));
+
+    Self {
+      is_wsl: has_wsl_env || proc_mentions_wsl,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalCallbackListenerEndpoint {
+  label: &'static str,
+  addr: SocketAddr,
+}
+
+impl LocalCallbackListenerEndpoint {
+  const fn new(label: &'static str, addr: SocketAddr) -> Self {
+    Self { label, addr }
+  }
+}
+
+#[derive(Debug)]
+struct LocalCallbackListener {
+  endpoint: LocalCallbackListenerEndpoint,
+  listener: TcpListener,
+}
+
+#[derive(Debug)]
+struct LocalCallbackServer {
+  binding: CallbackBinding,
+  strategy: LocalCallbackBindStrategy,
+  listeners: Vec<LocalCallbackListener>,
+}
+
+impl LocalCallbackServer {
+  async fn bind(binding: CallbackBinding) -> Result<Self, AuthError> {
+    let runtime = LocalCallbackRuntime::detect();
+    let strategy = resolve_local_callback_bind_strategy(runtime)?;
+    let endpoints = strategy.listener_endpoints(binding.port);
+    let mut listeners = Vec::new();
+    let mut errors = Vec::new();
+
+    tracing::debug!(
+      "starting OAuth callback server on port {} with {} strategy (wsl={})",
+      binding.port,
+      strategy.name(),
+      runtime.is_wsl
+    );
+
+    for endpoint in endpoints {
+      match TcpListener::bind(endpoint.addr).await {
+        Ok(listener) => {
+          tracing::debug!(
+            "bound localhost callback server endpoint {} on {}",
+            endpoint.label,
+            endpoint.addr
+          );
+          listeners.push(LocalCallbackListener { endpoint, listener });
+        }
+        Err(err) => {
+          tracing::debug!(
+            "failed to bind localhost callback endpoint {} on {}: {}",
+            endpoint.label,
+            endpoint.addr,
+            err
+          );
+          errors.push(format!("{} ({}): {}", endpoint.label, endpoint.addr, err));
+        }
+      }
+    }
+
+    if listeners.is_empty() {
+      return Err(AuthError::OAuthError(format!(
+        "failed to bind localhost callback server on port {} using {} strategy: {}",
+        binding.port,
+        strategy.name(),
+        errors.join(" | ")
+      )));
+    }
+
+    Ok(Self {
+      binding,
+      strategy,
+      listeners,
+    })
+  }
+
+  async fn wait_for_callback(self, cancel: CancellationToken) -> Result<String, AuthError> {
+    tracing::debug!(
+      "OAuth callback server ready with {} strategy; waiting for connections...",
+      self.strategy.name()
+    );
+
+    let accept_future = async {
+      loop {
+        let (mut socket, addr, endpoint) = self.accept_socket(&cancel).await?;
+
+        tracing::debug!(
+          "received localhost callback connection from {} via {} ({})",
+          addr,
+          endpoint.label,
+          endpoint.addr
+        );
+
+        let request = read_http_request(&mut socket).await?;
+        tracing::debug!(
+          "received HTTP request for path: {:?}",
+          request.lines().next()
+        );
+
+        let Some((path, query)) = parse_http_request_target(&request) else {
+          write_http_response(&mut socket, 400, CALLBACK_FAILURE_HTML).await?;
+          continue;
+        };
+
+        if path != self.binding.path {
+          write_http_response(&mut socket, 404, CALLBACK_FAILURE_HTML).await?;
+          continue;
+        }
+
+        let callback_url = if query.is_empty() {
+          format!("http://localhost:{}{}", self.binding.port, path)
+        } else {
+          format!("http://localhost:{}{}?{}", self.binding.port, path, query)
+        };
+
+        let parsed = parse_auth_input(&callback_url);
+        if parsed.code.is_none() {
+          tracing::warn!("OAuth callback missing authorization code");
+          write_http_response(&mut socket, 400, CALLBACK_FAILURE_HTML).await?;
+          continue;
+        }
+
+        tracing::info!("OAuth callback received successfully, returning authorization code");
+        write_http_response(&mut socket, 200, CALLBACK_SUCCESS_HTML).await?;
+        return Ok(callback_url);
+      }
+    };
+
+    tokio::select! {
+      _ = cancel.cancelled() => Err(AuthError::OAuthError("OAuth callback cancelled".to_string())),
+      result = timeout(CALLBACK_WAIT_TIMEOUT, accept_future) => {
+        result
+          .map_err(|_| AuthError::Timeout)?
+      }
+    }
+  }
+
+  async fn accept_socket(
+    &self,
+    cancel: &CancellationToken,
+  ) -> Result<
+    (
+      tokio::net::TcpStream,
+      std::net::SocketAddr,
+      LocalCallbackListenerEndpoint,
+    ),
+    AuthError,
+  > {
+    let accept_futures = self
+      .listeners
+      .iter()
+      .map(|entry| {
+        Box::pin(entry.listener.accept())
+          as Pin<
+            Box<
+              dyn Future<Output = std::io::Result<(tokio::net::TcpStream, SocketAddr)>> + Send + '_,
+            >,
+          >
+      })
+      .collect::<Vec<_>>();
+
+    let (result, index, _) = tokio::select! {
+      _ = cancel.cancelled() => {
+        return Err(AuthError::OAuthError("OAuth callback cancelled".to_string()));
+      }
+      result = select_all(accept_futures) => result,
+    };
+
+    let endpoint = self
+      .listeners
+      .get(index)
+      .map(|entry| entry.endpoint)
+      .ok_or_else(|| AuthError::OAuthError("callback listener index out of bounds".to_string()))?;
+
+    let (socket, addr) = result.map_err(|err| {
+      AuthError::OAuthError(format!("failed to accept localhost callback: {err}"))
+    })?;
+
+    Ok((socket, addr, endpoint))
+  }
+}
+
+fn resolve_local_callback_bind_strategy(
+  runtime: LocalCallbackRuntime,
+) -> Result<LocalCallbackBindStrategy, AuthError> {
+  let preference = env_optional(OAUTH_CALLBACK_BIND_MODE_ENV)
+    .map(|raw| {
+      LocalCallbackBindPreference::parse(&raw).ok_or_else(|| {
+        AuthError::OAuthError(format!(
+          "invalid {} value {:?}; expected one of: auto, loopback, wildcard",
+          OAUTH_CALLBACK_BIND_MODE_ENV, raw
+        ))
+      })
+    })
+    .transpose()?
+    .unwrap_or(LocalCallbackBindPreference::Auto);
+
+  let strategy = match preference {
+    LocalCallbackBindPreference::Auto => {
+      if runtime.is_wsl {
+        // Tradeoff: WSL auto mode binds IPv4 wildcard so Windows localhost
+        // forwarding can reach the Linux process. State verification remains
+        // the security boundary for this short-lived callback listener.
+        LocalCallbackBindStrategy::Wildcard
+      } else {
+        LocalCallbackBindStrategy::Loopback
+      }
+    }
+    LocalCallbackBindPreference::Loopback => LocalCallbackBindStrategy::Loopback,
+    LocalCallbackBindPreference::Wildcard => LocalCallbackBindStrategy::Wildcard,
+  };
+
+  Ok(strategy)
 }
 
 fn oauth_http_client() -> reqwest::Client {
@@ -733,52 +1064,8 @@ pub async fn wait_for_local_callback(
     ));
   };
 
-  let listener = TcpListener::bind(("127.0.0.1", binding.port))
-    .await
-    .map_err(|e| AuthError::OAuthError(format!("failed to bind localhost callback server: {e}")))?;
-
-  let accept_future = async {
-    loop {
-      let (mut socket, _) = listener
-        .accept()
-        .await
-        .map_err(|e| AuthError::OAuthError(format!("failed to accept localhost callback: {e}")))?;
-
-      let request = read_http_request(&mut socket).await?;
-      let Some((path, query)) = parse_http_request_target(&request) else {
-        write_http_response(&mut socket, 400, CALLBACK_FAILURE_HTML).await?;
-        continue;
-      };
-
-      if path != binding.path {
-        write_http_response(&mut socket, 404, CALLBACK_FAILURE_HTML).await?;
-        continue;
-      }
-
-      let callback_url = if query.is_empty() {
-        format!("http://localhost:{}{}", binding.port, path)
-      } else {
-        format!("http://localhost:{}{}?{}", binding.port, path, query)
-      };
-
-      let parsed = parse_auth_input(&callback_url);
-      if parsed.code.is_none() {
-        write_http_response(&mut socket, 400, CALLBACK_FAILURE_HTML).await?;
-        continue;
-      }
-
-      write_http_response(&mut socket, 200, CALLBACK_SUCCESS_HTML).await?;
-      return Ok(callback_url);
-    }
-  };
-
-  tokio::select! {
-    _ = cancel.cancelled() => Err(AuthError::OAuthError("OAuth callback cancelled".to_string())),
-    result = timeout(CALLBACK_WAIT_TIMEOUT, accept_future) => {
-      result
-        .map_err(|_| AuthError::Timeout)?
-    }
-  }
+  let server = LocalCallbackServer::bind(binding).await?;
+  server.wait_for_callback(cancel).await
 }
 
 fn start_anthropic_connect(
@@ -2169,6 +2456,9 @@ pub async fn refresh_openai_codex_token(refresh_token: &str) -> Result<(String, 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::sync::Mutex;
+
+  static OAUTH_ENV_LOCK: Mutex<()> = Mutex::new(());
 
   #[test]
   fn callback_bindings_match_expected_routes() {
@@ -2184,6 +2474,106 @@ mod tests {
     assert_eq!(antigravity.port, 51121);
     assert_eq!(antigravity.path, "/oauth-callback");
     assert!(callback_binding(OAuthProviderKind::Anthropic).is_none());
+  }
+
+  #[test]
+  fn local_callback_runtime_detects_wsl_from_signals() {
+    let runtime = LocalCallbackRuntime::from_signals(
+      Some("Ubuntu"),
+      None,
+      Some("Linux version 5.15.167.4-microsoft-standard-WSL2"),
+      None,
+    );
+
+    assert!(runtime.is_wsl);
+  }
+
+  #[test]
+  fn local_callback_bind_strategy_defaults_to_loopback_off_wsl() {
+    let _guard = OAUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var(OAUTH_CALLBACK_BIND_MODE_ENV).ok();
+    unsafe {
+      std::env::remove_var(OAUTH_CALLBACK_BIND_MODE_ENV);
+    }
+
+    let strategy = resolve_local_callback_bind_strategy(LocalCallbackRuntime { is_wsl: false })
+      .expect("bind strategy");
+
+    assert_eq!(strategy, LocalCallbackBindStrategy::Loopback);
+
+    unsafe {
+      if let Some(value) = prev {
+        std::env::set_var(OAUTH_CALLBACK_BIND_MODE_ENV, value);
+      }
+    }
+  }
+
+  #[test]
+  fn local_callback_bind_strategy_defaults_to_wildcard_under_wsl() {
+    let _guard = OAUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var(OAUTH_CALLBACK_BIND_MODE_ENV).ok();
+    unsafe {
+      std::env::remove_var(OAUTH_CALLBACK_BIND_MODE_ENV);
+    }
+
+    let strategy = resolve_local_callback_bind_strategy(LocalCallbackRuntime { is_wsl: true })
+      .expect("bind strategy");
+
+    assert_eq!(strategy, LocalCallbackBindStrategy::Wildcard);
+
+    unsafe {
+      if let Some(value) = prev {
+        std::env::set_var(OAUTH_CALLBACK_BIND_MODE_ENV, value);
+      }
+    }
+  }
+
+  #[test]
+  fn local_callback_bind_strategy_respects_env_override() {
+    let _guard = OAUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var(OAUTH_CALLBACK_BIND_MODE_ENV).ok();
+    unsafe {
+      std::env::set_var(OAUTH_CALLBACK_BIND_MODE_ENV, "loopback");
+    }
+
+    let strategy = resolve_local_callback_bind_strategy(LocalCallbackRuntime { is_wsl: true })
+      .expect("bind strategy");
+
+    assert_eq!(strategy, LocalCallbackBindStrategy::Loopback);
+
+    unsafe {
+      if let Some(value) = prev {
+        std::env::set_var(OAUTH_CALLBACK_BIND_MODE_ENV, value);
+      } else {
+        std::env::remove_var(OAUTH_CALLBACK_BIND_MODE_ENV);
+      }
+    }
+  }
+
+  #[test]
+  fn local_callback_bind_strategy_rejects_invalid_override() {
+    let _guard = OAUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var(OAUTH_CALLBACK_BIND_MODE_ENV).ok();
+    unsafe {
+      std::env::set_var(OAUTH_CALLBACK_BIND_MODE_ENV, "invalid-mode");
+    }
+
+    let err = resolve_local_callback_bind_strategy(LocalCallbackRuntime { is_wsl: false })
+      .expect_err("invalid bind mode should fail");
+
+    assert!(
+      err
+        .to_string()
+        .contains("invalid COKRA_OAUTH_CALLBACK_BIND_MODE value")
+    );
+
+    unsafe {
+      if let Some(value) = prev {
+        std::env::set_var(OAUTH_CALLBACK_BIND_MODE_ENV, value);
+      } else {
+        std::env::remove_var(OAUTH_CALLBACK_BIND_MODE_ENV);
+      }
+    }
   }
 
   #[test]
@@ -2258,5 +2648,83 @@ mod tests {
       cfg.client_secret.as_deref(),
       Some("client-secret-from-metadata")
     );
+  }
+
+  #[test]
+  fn google_refresh_config_prefers_env_over_stored_oauth_client_metadata() {
+    let _guard = OAUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev_client_id = std::env::var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID).ok();
+    let prev_client_secret = std::env::var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET).ok();
+    unsafe {
+      std::env::set_var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID, "client-id-from-env");
+      std::env::set_var(
+        ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET,
+        "client-secret-from-env",
+      );
+    }
+
+    let mut stored = StoredCredentials::new(
+      "google-antigravity",
+      Credentials::OAuth {
+        access_token: "oauth-access".to_string(),
+        refresh_token: "oauth-refresh".to_string(),
+        expires_at: chrono::Utc::now().timestamp() as u64 + 60,
+        account_id: None,
+        enterprise_url: None,
+      },
+    );
+    stored.metadata = serde_json::json!({
+      "oauth_client_id": "client-id-from-metadata",
+      "oauth_client_secret": "client-secret-from-metadata",
+    });
+
+    let cfg = oauth_refresh_config_for_provider_with_stored("google-antigravity", Some(&stored))
+      .expect("config resolution")
+      .expect("oauth config");
+
+    assert_eq!(cfg.client_id, "client-id-from-env");
+    assert_eq!(cfg.client_secret.as_deref(), Some("client-secret-from-env"));
+
+    unsafe {
+      if let Some(value) = prev_client_id {
+        std::env::set_var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID, value);
+      } else {
+        std::env::remove_var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID);
+      }
+      if let Some(value) = prev_client_secret {
+        std::env::set_var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET, value);
+      } else {
+        std::env::remove_var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET);
+      }
+    }
+  }
+
+  #[test]
+  fn google_oauth_client_uses_env_when_set() {
+    let _guard = OAUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev_client_id = std::env::var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID).ok();
+    let prev_client_secret = std::env::var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET).ok();
+    unsafe {
+      std::env::set_var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID, "client-id-from-env");
+      std::env::set_var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET, "client-secret-from-env");
+    }
+
+    let (client_id, client_secret) =
+      google_oauth_client(OAuthProviderKind::GoogleAntigravity, None).expect("oauth client");
+    assert_eq!(client_id, "client-id-from-env");
+    assert_eq!(client_secret.as_deref(), Some("client-secret-from-env"));
+
+    unsafe {
+      if let Some(value) = prev_client_id {
+        std::env::set_var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID, value);
+      } else {
+        std::env::remove_var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID);
+      }
+      if let Some(value) = prev_client_secret {
+        std::env::set_var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET, value);
+      } else {
+        std::env::remove_var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET);
+      }
+    }
   }
 }

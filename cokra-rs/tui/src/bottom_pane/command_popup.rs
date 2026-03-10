@@ -1,11 +1,10 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use super::popup_consts::MAX_POPUP_ROWS;
+use super::popup_consts::MAX_COMMAND_POPUP_ITEMS;
 use super::scroll_state::ScrollState;
 use super::selection_popup_common::GenericDisplayRow;
-use super::selection_popup_common::measure_rows_height;
-use super::selection_popup_common::render_rows;
+use super::selection_popup_common::render_rows_single_line;
 use super::slash_commands;
 use crate::render::Insets;
 use crate::render::RectExt;
@@ -62,28 +61,33 @@ impl CommandPopup {
 
     let len = self.filtered_commands().len();
     self.scroll.clamp_selection(len);
-    self.scroll.ensure_visible(len, MAX_POPUP_ROWS.min(len));
+    self
+      .scroll
+      .ensure_visible(len, MAX_COMMAND_POPUP_ITEMS.min(len));
   }
 
   /// Move the selection cursor one step up.
   pub(crate) fn move_up(&mut self) {
     let len = self.filtered_commands().len();
     self.scroll.move_up_wrap(len);
-    self.scroll.ensure_visible(len, MAX_POPUP_ROWS.min(len));
+    self
+      .scroll
+      .ensure_visible(len, MAX_COMMAND_POPUP_ITEMS.min(len));
   }
 
   /// Move the selection cursor one step down.
   pub(crate) fn move_down(&mut self) {
     let len = self.filtered_commands().len();
     self.scroll.move_down_wrap(len);
-    self.scroll.ensure_visible(len, MAX_POPUP_ROWS.min(len));
+    self
+      .scroll
+      .ensure_visible(len, MAX_COMMAND_POPUP_ITEMS.min(len));
   }
 
   /// Determine the preferred height of the popup for a given width.
   /// 1:1 codex: CommandPopup::calculate_required_height.
-  pub(crate) fn calculate_required_height(&self, width: u16) -> u16 {
-    let rows = self.render_rows_data();
-    measure_rows_height(&rows, &self.scroll, MAX_POPUP_ROWS, width)
+  pub(crate) fn calculate_required_height(&self, _width: u16) -> u16 {
+    self.visible_row_count()
   }
 
   /// Return currently selected command, if any.
@@ -159,14 +163,19 @@ impl CommandPopup {
       .collect()
   }
 
+  fn visible_row_count(&self) -> u16 {
+    let count = self.filtered_commands().len().min(MAX_COMMAND_POPUP_ITEMS);
+    u16::try_from(count.max(1)).unwrap_or(u16::MAX)
+  }
+
   pub(crate) fn render(&self, area: Rect, buf: &mut Buffer) {
     let rows = self.render_rows_data();
-    render_rows(
+    render_rows_single_line(
       area.inset(Insets::tlbr(0, 2, 0, 0)),
       buf,
       &rows,
       &self.scroll,
-      MAX_POPUP_ROWS,
+      MAX_COMMAND_POPUP_ITEMS,
       "no matches",
     );
   }
@@ -189,5 +198,11 @@ mod tests {
     let filtered = popup.filtered_commands();
     assert!(!filtered.contains(&SlashCommand::Quit));
     assert!(!filtered.contains(&SlashCommand::Approvals));
+  }
+
+  #[test]
+  fn default_popup_reserves_eight_rows_for_commands() {
+    let popup = CommandPopup::new(true);
+    assert_eq!(8, popup.calculate_required_height(120));
   }
 }

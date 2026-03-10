@@ -14,6 +14,7 @@ use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableItem;
 use crate::status_indicator_widget::StatusIndicatorWidget;
 use crate::tui::FrameRequester;
+use crate::tui::InlineViewportSizing;
 use approval_overlay::ApprovalChoice;
 use approval_overlay::ApprovalOverlay;
 use bottom_pane_view::BottomPaneView;
@@ -221,7 +222,18 @@ impl BottomPane {
   }
 
   pub(crate) fn desired_height(&self, width: u16) -> u16 {
-    self.as_renderable().desired_height(width)
+    let base = self.as_renderable().desired_height(width);
+    if let Some(overlay) = &self.approval_overlay {
+      // Reserve space above the composer for the approval modal so it doesn't
+      // overlap the input box (Codex parity).
+      //
+      // Tradeoff: this increases the viewport height request while approval is
+      // pending, shrinking the visible transcript area.
+      let overlay_h = overlay.desired_height(width);
+      base.saturating_add(overlay_h)
+    } else {
+      base
+    }
   }
 
   pub(crate) fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
@@ -229,6 +241,32 @@ impl BottomPane {
       return None;
     }
     self.as_renderable().cursor_pos(area)
+  }
+
+  pub(crate) fn has_interactive_overlay(&self) -> bool {
+    self.approval_overlay.is_some()
+      || !self.view_stack.is_empty()
+      || self.composer.has_command_popup()
+  }
+
+  pub(crate) fn can_focus_status_line_selector(&self) -> bool {
+    !self.has_interactive_overlay() && self.composer.can_focus_status_line_selector()
+  }
+
+  pub(crate) fn inline_viewport_sizing(&self) -> InlineViewportSizing {
+    if self.approval_overlay.is_some() {
+      return InlineViewportSizing::ExpandForOverlay;
+    }
+
+    if let Some(view) = self.active_view() {
+      return view.inline_viewport_sizing();
+    }
+
+    if self.composer.has_command_popup() {
+      return InlineViewportSizing::ExpandForOverlay;
+    }
+
+    InlineViewportSizing::PreserveVisibleHistory
   }
 
   /// 1:1 codex: key event routing.
@@ -344,10 +382,30 @@ impl BottomPane {
     if area.is_empty() {
       return;
     }
-    self.as_renderable().render(area, buf);
-    // Approval overlay renders on top of whatever is active.
     if let Some(overlay) = &self.approval_overlay {
-      overlay.render(area, buf);
+      // Layout: overlay gets its own vertical slice above the composer so it
+      // never covers the input box.
+      let overlay_h_raw = overlay.desired_height(area.width);
+      let min_content_h: u16 = 1;
+      let overlay_h = overlay_h_raw.min(area.height.saturating_sub(min_content_h));
+
+      let overlay_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: overlay_h,
+      };
+      let content_area = Rect {
+        x: area.x,
+        y: area.y.saturating_add(overlay_h),
+        width: area.width,
+        height: area.height.saturating_sub(overlay_h),
+      };
+
+      self.as_renderable().render(content_area, buf);
+      overlay.render(overlay_area, buf);
+    } else {
+      self.as_renderable().render(area, buf);
     }
   }
 }
@@ -363,5 +421,51 @@ impl Renderable for BottomPane {
 
   fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
     self.cursor_pos(area)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use crossterm::event::KeyEvent;
+  use ratatui::buffer::Buffer;
+  use ratatui::layout::Rect;
+  use tokio::sync::mpsc;
+
+  use super::*;
+  use crate::tui::FrameRequester;
+
+  struct FakeView {
+    sizing: InlineViewportSizing,
+  }
+
+  impl BottomPaneView for FakeView {
+    fn inline_viewport_sizing(&self) -> InlineViewportSizing {
+      self.sizing
+    }
+
+    fn handle_key_event(&mut self, _key_event: KeyEvent) {}
+  }
+
+  impl Renderable for FakeView {
+    fn render(&self, _area: Rect, _buf: &mut Buffer) {}
+
+    fn desired_height(&self, _width: u16) -> u16 {
+      1
+    }
+  }
+
+  #[test]
+  fn active_view_controls_inline_viewport_sizing() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut pane = BottomPane::new(AppEventSender::new(tx), FrameRequester::test_dummy(), false);
+
+    pane.push_view(Box::new(FakeView {
+      sizing: InlineViewportSizing::ExpandForOverlay,
+    }));
+
+    assert_eq!(
+      pane.inline_viewport_sizing(),
+      InlineViewportSizing::ExpandForOverlay
+    );
   }
 }

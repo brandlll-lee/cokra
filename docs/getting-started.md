@@ -96,6 +96,7 @@ Create a Python script that calculates Fibonacci numbers
 ```
 
 Cokra will:
+
 1. Understand your request
 2. Create the file
 3. Ask for approval

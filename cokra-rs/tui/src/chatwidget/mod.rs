@@ -35,8 +35,10 @@ use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableExt as _;
 use crate::render::renderable::RenderableItem;
 use crate::tui::FrameRequester;
+use crate::tui::InlineViewportSizing;
 
 use self::session::SessionState;
+use self::session::StatusSnapshot;
 pub use self::session::TokenUsage;
 pub(crate) use self::transcript::ActiveCellTranscriptKey;
 use self::transcript::ActiveTranscriptState;
@@ -49,12 +51,19 @@ pub(crate) enum ChatWidgetAction {
   ShowRequestUserInput(RequestUserInputEvent),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamRenderMode {
+  AnimatedPreview,
+  ScrollbackFirst,
+}
+
 pub(crate) struct ChatWidget {
   transcript: ActiveTranscriptState,
   pub(crate) bottom_pane: BottomPane,
   session: SessionState,
   app_event_tx: AppEventSender,
   last_render_width: Cell<u16>,
+  stream_render_mode: StreamRenderMode,
 }
 
 impl ChatWidget {
@@ -62,6 +71,7 @@ impl ChatWidget {
     app_event_tx: AppEventSender,
     frame_requester: FrameRequester,
     animations_enabled: bool,
+    stream_render_mode: StreamRenderMode,
   ) -> Self {
     Self {
       transcript: ActiveTranscriptState::new(animations_enabled),
@@ -69,6 +79,7 @@ impl ChatWidget {
       session: SessionState::default(),
       app_event_tx,
       last_render_width: Cell::new(0),
+      stream_render_mode,
     }
   }
 
@@ -100,6 +111,10 @@ impl ChatWidget {
     self.transcript.active_cell_transcript_lines(width)
   }
 
+  pub(crate) fn inline_viewport_sizing(&self) -> InlineViewportSizing {
+    self.bottom_pane.inline_viewport_sizing()
+  }
+
   fn streaming_wrap_width(&self) -> Option<usize> {
     let width = self.last_render_width.get();
     if width == 0 {
@@ -122,6 +137,10 @@ impl ChatWidget {
     self.app_event_tx.insert_boxed_history_cell(cell);
   }
 
+  fn append_boxed_history(&mut self, cell: Box<dyn HistoryCell>) {
+    self.app_event_tx.insert_boxed_history_cell(cell);
+  }
+
   fn flush_stream_controllers(&mut self) {
     let wrap_width = self.streaming_wrap_width();
 
@@ -138,12 +157,35 @@ impl ChatWidget {
       }
     }
     self.transcript.xml_tool_filter = None;
-    self.transcript.stream_controller = None;
 
-    if let Some(mut controller) = self.transcript.plan_stream_controller.take()
+    if self.stream_render_mode == StreamRenderMode::ScrollbackFirst
+      && let Some(controller) = self.transcript.stream_controller.as_mut()
+      && let Some(cell) = controller.drain_committed_now()
+    {
+      self.append_boxed_history(cell);
+    }
+
+    let stream_controller = self.transcript.stream_controller.take();
+    let plan_stream_controller = self.transcript.plan_stream_controller.take();
+
+    if let Some(mut controller) = stream_controller
+      && self.stream_render_mode == StreamRenderMode::ScrollbackFirst
       && let Some(cell) = controller.finalize()
     {
-      self.add_boxed_history(cell);
+      self.append_boxed_history(cell);
+    }
+
+    if let Some(mut controller) = plan_stream_controller
+      && let Some(cell) = controller.finalize()
+    {
+      match self.stream_render_mode {
+        StreamRenderMode::AnimatedPreview => self.add_boxed_history(cell),
+        StreamRenderMode::ScrollbackFirst => self.append_boxed_history(cell),
+      }
+    }
+
+    if self.stream_render_mode == StreamRenderMode::ScrollbackFirst {
+      self.clear_streaming_agent_preview();
     }
   }
 
@@ -153,11 +195,21 @@ impl ChatWidget {
 
   fn refresh_streaming_agent_preview(&mut self) {
     let Some(controller) = self.transcript.stream_controller.as_mut() else {
+      self.clear_streaming_agent_preview();
       return;
     };
-    controller.discard_queued();
-    let lines = controller.preview_lines();
+    let lines = match self.stream_render_mode {
+      StreamRenderMode::AnimatedPreview => {
+        // Tradeoff: keep alt-screen on the legacy full-buffer preview so we can
+        // modernize inline terminal behavior without simultaneously changing the
+        // separate alt-screen transcript experience.
+        controller.discard_queued();
+        controller.preview_lines()
+      }
+      StreamRenderMode::ScrollbackFirst => controller.preview_uncommitted_lines(),
+    };
     if lines.is_empty() {
+      self.clear_streaming_agent_preview();
       return;
     }
 
@@ -176,9 +228,126 @@ impl ChatWidget {
     self.bump_active_cell_revision();
   }
 
+  fn clear_streaming_agent_preview(&mut self) {
+    let should_clear = self
+      .transcript
+      .active_cell
+      .as_ref()
+      .and_then(|cell| cell.as_any().downcast_ref::<AgentMessageCell>())
+      .is_some();
+    if should_clear {
+      self.transcript.active_cell = None;
+      self.bump_active_cell_revision();
+    }
+  }
+
   pub(crate) fn set_agent_turn_running(&mut self, running: bool) {
     self.session.agent_turn_running = running;
     self.bottom_pane.set_task_running(running);
+    if running {
+      self.sync_status_indicator();
+    }
+  }
+
+  fn current_exec_status_snapshot(&self) -> Option<StatusSnapshot> {
+    let active_exec_call = self
+      .transcript
+      .active_cell
+      .as_ref()
+      .and_then(|cell| cell.as_any().downcast_ref::<crate::exec_cell::ExecCell>())
+      .and_then(crate::exec_cell::ExecCell::active_call);
+
+    active_exec_call.map(|call| {
+      StatusSnapshot::new(
+        format!("Running {}", call.tool_name),
+        Some(call.command.clone()),
+        None,
+      )
+    })
+  }
+
+  fn current_mcp_status_snapshot(&self) -> Option<StatusSnapshot> {
+    if self.session.mcp_starting_servers.is_empty() {
+      return None;
+    }
+
+    let servers = self
+      .session
+      .mcp_starting_servers
+      .iter()
+      .cloned()
+      .collect::<Vec<_>>();
+    let header = match servers.as_slice() {
+      [server] => format!("Booting MCP server: {server}"),
+      [first, second] => format!("Starting MCP servers: {first}, {second}"),
+      [first, second, third, ..] => {
+        format!("Starting MCP servers: {first}, {second}, {third}, …")
+      }
+      [] => return None,
+    };
+    let details = (servers.len() > 1).then(|| servers.join("\n"));
+
+    Some(StatusSnapshot::new(header, details, None))
+  }
+
+  fn derived_status_snapshot(&self) -> StatusSnapshot {
+    self
+      .current_exec_status_snapshot()
+      .or_else(|| self.session.collab_wait_status.clone())
+      .or_else(|| self.session.active_status_override.clone())
+      .or_else(|| self.current_mcp_status_snapshot())
+      .or_else(|| {
+        extract_first_bold(&self.session.reasoning_buffer)
+          .map(|header| StatusSnapshot::new(header, None, None))
+      })
+      .unwrap_or_else(StatusSnapshot::working)
+  }
+
+  fn sync_status_indicator(&mut self) {
+    let snapshot = self.derived_status_snapshot();
+    let Some(status) = self.bottom_pane.status_widget_mut() else {
+      return;
+    };
+    status.update_header(snapshot.header);
+    status.update_details(snapshot.details);
+    status.update_inline_message(snapshot.inline_message);
+  }
+
+  fn set_status_override(
+    &mut self,
+    header: impl Into<String>,
+    details: Option<String>,
+    inline_message: Option<String>,
+  ) {
+    self.session.active_status_override =
+      Some(StatusSnapshot::new(header, details, inline_message));
+    self.sync_status_indicator();
+  }
+
+  fn clear_status_override(&mut self) {
+    self.session.active_status_override = None;
+    self.sync_status_indicator();
+  }
+
+  fn set_collab_wait_status(&mut self, status: Option<StatusSnapshot>) {
+    self.session.collab_wait_status = status;
+    self.sync_status_indicator();
+  }
+
+  fn on_reasoning_delta(&mut self, delta: &str) {
+    self.session.reasoning_buffer.push_str(delta);
+    self.sync_status_indicator();
+  }
+
+  fn on_reasoning_final(&mut self, text: &str) {
+    self.session.reasoning_buffer.clear();
+    self.session.reasoning_buffer.push_str(text);
+    self.sync_status_indicator();
+  }
+
+  fn on_reasoning_section_break(&mut self) {
+    self.session.reasoning_buffer.clear();
+    self.sync_status_indicator();
   }
 
   fn run_commit_tick_with_scope(&mut self, scope: crate::streaming::commit_tick::CommitTickScope) {
@@ -309,7 +478,8 @@ impl ChatWidget {
       EventMsg::TurnAborted(e) => self.on_turn_aborted(e),
       EventMsg::RawResponseItem(_) => {}
       EventMsg::PlanDelta(e) => self.on_plan_delta(&e.delta),
-      EventMsg::ReasoningContentDelta(_) | EventMsg::ReasoningRawContentDelta(_) => {}
+      EventMsg::ReasoningContentDelta(e) => self.on_reasoning_delta(&e.delta),
+      EventMsg::ReasoningRawContentDelta(e) => self.on_reasoning_delta(&e.delta),
       _ => {}
     }
 
@@ -361,6 +531,31 @@ impl ChatWidget {
       .scroll((scroll_y, 0))
       .render(area, buf);
   }
+}
+
+// Extract the first Markdown bold element in the form `**...**`.
+// Tradeoff: we intentionally stop at the first unmatched opener so streaming
+// partial chunks don't produce flickering half-headers.
+fn extract_first_bold(s: &str) -> Option<String> {
+  let bytes = s.as_bytes();
+  let mut i = 0usize;
+  while i + 1 < bytes.len() {
+    if bytes[i] == b'*' && bytes[i + 1] == b'*' {
+      let start = i + 2;
+      let mut j = start;
+      while j + 1 < bytes.len() {
+        if bytes[j] == b'*' && bytes[j + 1] == b'*' {
+          let inner = &s[start..j];
+          let trimmed = inner.trim();
+          return (!trimmed.is_empty()).then(|| trimmed.to_string());
+        }
+        j += 1;
+      }
+      return None;
+    }
+    i += 1;
+  }
+  None
 }
 
 impl Renderable for ChatWidget {

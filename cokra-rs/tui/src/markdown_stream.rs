@@ -65,6 +65,36 @@ impl MarkdownStreamCollector {
     rendered
   }
 
+  /// Render only the still-uncommitted tail of the stream.
+  ///
+  /// This keeps scrollback-first UIs attached to the newest unfinished content
+  /// instead of re-rendering already-committed history inside a live viewport.
+  pub fn preview_uncommitted_lines(&self) -> Vec<Line<'static>> {
+    if self.buffer.is_empty() {
+      return Vec::new();
+    }
+
+    let mut source = self.buffer.clone();
+    if !source.ends_with('\n') {
+      source.push('\n');
+    }
+
+    let mut rendered: Vec<Line<'static>> = Vec::new();
+    markdown::append_markdown(&source, self.width, &mut rendered);
+    while rendered
+      .last()
+      .is_some_and(crate::render::line_utils::is_blank_line_spaces_only)
+    {
+      rendered.pop();
+    }
+
+    if self.committed_line_count >= rendered.len() {
+      return Vec::new();
+    }
+
+    rendered[self.committed_line_count..].to_vec()
+  }
+
   /// Render the full buffer and return only the newly completed logical lines
   /// since the last commit. When the buffer does not end with a newline, the
   /// final rendered line is considered incomplete and is not emitted.
@@ -256,6 +286,16 @@ mod tests {
     c.push_delta("Line without newline");
     let out = c.finalize_and_drain();
     assert_eq!(out.len(), 1);
+  }
+
+  #[tokio::test]
+  async fn preview_uncommitted_lines_omits_committed_prefix() {
+    let mut c = super::MarkdownStreamCollector::new(None);
+    c.push_delta("one\n");
+    assert_eq!(c.commit_complete_lines(), vec![Line::from("one")]);
+
+    c.push_delta("two");
+    assert_eq!(c.preview_uncommitted_lines(), vec![Line::from("two")]);
   }
 
   #[tokio::test]

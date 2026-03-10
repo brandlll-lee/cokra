@@ -115,17 +115,17 @@ JSON-RPC server for IDE/desktop integrations:
 
 ## Technology Stack
 
-| Component | Technology |
-|-----------|------------|
-| **Core** | Rust 2024 Edition |
-| **CLI Wrapper** | TypeScript/Node.js |
-| **Build System** | Bazel 9.0.0 |
-| **Package Manager** | PNPM workspace |
-| **Terminal UI** | ratatui |
-| **Database** | SQLite (sqlx) |
-| **Async Runtime** | tokio |
-| **Serialization** | serde |
-| **MCP** | rmcp (Rust MCP) |
+| Component           | Technology         |
+| ------------------- | ------------------ |
+| **Core**            | Rust 2024 Edition  |
+| **CLI Wrapper**     | TypeScript/Node.js |
+| **Build System**    | Bazel 9.0.0        |
+| **Package Manager** | PNPM workspace     |
+| **Terminal UI**     | ratatui            |
+| **Database**        | SQLite (sqlx)      |
+| **Async Runtime**   | tokio              |
+| **Serialization**   | serde              |
+| **MCP**             | rmcp (Rust MCP)    |
 
 ## Multi-Agent System
 
@@ -150,20 +150,20 @@ Main Agent (Orchestrator)
 
 ### Built-in Tools (20+)
 
-| Tool | Purpose |
-|------|---------|
-| `shell` | Execute shell commands |
-| `apply_patch` | Apply unified diffs |
-| `read_file` | Read file contents |
-| `write_file` | Write files |
-| `list_dir` | List directory contents |
-| `grep_files` | Search with ripgrep |
-| `search_tool` | BM25 semantic search |
-| `mcp` | Call MCP tools |
-| `spawn_agent` | Create sub-agents |
-| `plan` | Show execution plan |
-| `request_user_input` | Ask user for input |
-| `view_image` | View image files |
+| Tool                 | Purpose                 |
+| -------------------- | ----------------------- |
+| `shell`              | Execute shell commands  |
+| `apply_patch`        | Apply unified diffs     |
+| `read_file`          | Read file contents      |
+| `write_file`         | Write files             |
+| `list_dir`           | List directory contents |
+| `grep_files`         | Search with ripgrep     |
+| `search_tool`        | BM25 semantic search    |
+| `mcp`                | Call MCP tools          |
+| `spawn_agent`        | Create sub-agents       |
+| `plan`               | Show execution plan     |
+| `request_user_input` | Ask user for input      |
+| `view_image`         | View image files        |
 
 ## MCP Integration
 

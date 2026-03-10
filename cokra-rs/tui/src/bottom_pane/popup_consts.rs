@@ -9,6 +9,10 @@ use crate::key_hint;
 /// Keep this consistent across all popups for a uniform feel.
 pub(crate) const MAX_POPUP_ROWS: usize = 8;
 
+/// Slash commands behave like a dense command palette, so keep them single-line
+/// and show the full default command budget whenever space allows.
+pub(crate) const MAX_COMMAND_POPUP_ITEMS: usize = 8;
+
 /// Standard footer hint text used by popups.
 pub(crate) fn standard_popup_hint_line() -> Line<'static> {
   Line::from(vec![

@@ -168,6 +168,10 @@ pub(crate) fn runtime_for_thread(thread_id: &str) -> Option<Arc<TeamRuntime>> {
 }
 
 impl TeamRuntime {
+  pub(crate) fn is_root_thread(&self, thread_id: &str) -> bool {
+    self.root_thread_id.to_string() == thread_id
+  }
+
   pub(crate) fn list_spawned_agent_ids(&self) -> Vec<String> {
     self
       .handles
@@ -686,9 +690,9 @@ impl TeamRuntime {
                 let final_message = has_output.then_some(result.content);
                 let _ = status_tx.send(CollabAgentStatus::Completed(final_message));
                 let bg_msg = if has_output {
-                  format!("@{nickname_display} 已完成任务")
+                  format!("@{nickname_display} completed task")
                 } else {
-                  format!("@{nickname_display} 已完成（无输出）")
+                  format!("@{nickname_display} completed (no output)")
                 };
                 let _ = root_tx_event_for_bg
                   .send(EventMsg::BackgroundEvent(BackgroundEventEvent {
@@ -699,7 +703,7 @@ impl TeamRuntime {
               Err(err) => {
                 let err = err.to_string();
                 let _ = status_tx.send(CollabAgentStatus::Errored(err.clone()));
-                let bg_msg = format!("@{nickname_display} 失败：{err}");
+                let bg_msg = format!("@{nickname_display} errored: {err}");
                 let _ = root_tx_event_for_bg
                   .send(EventMsg::BackgroundEvent(BackgroundEventEvent {
                     message: bg_msg,
@@ -756,6 +760,9 @@ fn build_spawned_agent_system_prompt(base: &str, nickname: Option<&str>, role: &
   );
   out.push_str(
     "- Do not invent product timelines, deprecations, pricing, or other time-sensitive facts. If you are unsure, say so and keep claims scoped.\n",
+  );
+  out.push_str(
+    "- Do not call request_user_input. Spawned teammates cannot ask the human directly; make a reasonable assumption or report the missing information back to @main.\n",
   );
   out.push_str(
     "- Keep outputs concise and oriented toward helping @main (key findings, clear recommendation, and any follow-up questions).\n",

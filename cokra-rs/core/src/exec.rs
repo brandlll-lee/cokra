@@ -11,6 +11,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use serde::Serialize;
+use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
@@ -83,6 +84,43 @@ pub fn format_exec_output_for_model_structured(
             exec_output.exit_code, duration_seconds
         )
     })
+}
+
+/// The JSON envelope format produced by `format_exec_output_for_model_structured`.
+///
+/// Domain intent:
+/// - LLM/tool router gets a structured payload (output + metadata).
+/// - UI/event consumers can decode it back into human-friendly text without
+///   hardcoding knowledge in the TUI layer.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelStructuredExecOutput {
+  pub output: String,
+  pub metadata: ModelStructuredExecMetadata,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelStructuredExecMetadata {
+  pub exit_code: i32,
+  pub duration_seconds: f32,
+}
+
+/// Best-effort decode for the model-structured exec envelope.
+///
+/// Returns `None` if the payload is not in the expected shape.
+pub fn try_parse_model_structured_exec_output(
+  content: &str,
+) -> Option<ModelStructuredExecOutput> {
+  let trimmed = content.trim();
+  // Fast-path heuristic: avoid JSON parsing for typical tool outputs.
+  if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
+    return None;
+  }
+  // The expected envelope always carries metadata.
+  if !trimmed.contains("\"metadata\"") || !trimmed.contains("\"duration_seconds\"") {
+    return None;
+  }
+
+  serde_json::from_str::<ModelStructuredExecOutput>(trimmed).ok()
 }
 
 /// Windows sandbox level placeholder (fixed Disabled for now).
@@ -673,5 +711,18 @@ mod tests {
     assert_eq!(parsed["metadata"]["exit_code"], 7);
     assert_eq!(parsed["metadata"]["duration_seconds"], 1.5);
     assert_eq!(parsed["output"], "sample output");
+  }
+
+  #[test]
+  fn try_parse_model_structured_exec_output_decodes_output_and_metadata() {
+    let payload = r#"{"output":"line1\nline2\n","metadata":{"exit_code":7,"duration_seconds":1.5}}"#;
+    let parsed = try_parse_model_structured_exec_output(payload).expect("expected envelope");
+    assert_eq!(parsed.metadata.exit_code, 7);
+    assert_eq!(parsed.metadata.duration_seconds, 1.5);
+    assert_eq!(parsed.output, "line1\nline2\n");
+
+    // Non-envelope JSON should not match.
+    let not_envelope = r#"{"output":"x"}"#;
+    assert!(try_parse_model_structured_exec_output(not_envelope).is_none());
   }
 }

@@ -27,9 +27,15 @@ impl ChatWidget {
       .stream_controller
       .get_or_insert_with(|| crate::streaming::controller::StreamController::new(wrap_width));
     controller.set_width_if_uncommitted(wrap_width);
-    let _ = controller.push(&filtered_delta);
+    let committed = controller.push(&filtered_delta);
+    if self.stream_render_mode == StreamRenderMode::ScrollbackFirst
+      && committed
+      && let Some(cell) = controller.drain_committed_now()
+    {
+      self.append_boxed_history(cell);
+    }
     self.refresh_streaming_agent_preview();
-    if is_new {
+    if self.stream_render_mode == StreamRenderMode::AnimatedPreview && is_new {
       self.app_event_tx.send(AppEvent::StartCommitAnimation);
     }
   }
@@ -68,11 +74,22 @@ impl ChatWidget {
       .get_or_insert_with(|| crate::streaming::controller::PlanStreamController::new(wrap_width));
     controller.set_width_if_uncommitted(wrap_width);
     let committed = controller.push(delta);
-    if is_new || committed {
-      self.app_event_tx.send(AppEvent::StartCommitAnimation);
-    }
-    if committed {
-      self.run_catch_up_commit_tick();
+    match self.stream_render_mode {
+      StreamRenderMode::AnimatedPreview => {
+        if is_new || committed {
+          self.app_event_tx.send(AppEvent::StartCommitAnimation);
+        }
+        if committed {
+          self.run_catch_up_commit_tick();
+        }
+      }
+      StreamRenderMode::ScrollbackFirst => {
+        // Tradeoff: proposed plans now favor terminal-native history in inline mode,
+        // even though that gives up the old line-by-line commit animation there.
+        if committed && let Some(cell) = controller.drain_committed_now() {
+          self.append_boxed_history(cell);
+        }
+      }
     }
   }
 
@@ -92,7 +109,12 @@ mod tests {
   fn agent_delta_updates_active_preview_immediately() {
     let (tx, mut rx) = unbounded_channel();
     let sender = AppEventSender::new(tx);
-    let mut widget = ChatWidget::new(sender, FrameRequester::test_dummy(), false);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::AnimatedPreview,
+    );
 
     widget.on_agent_message_delta("item-1", "| A | B |\n| --- | --- |\n| 1 | 2 |");
 
@@ -115,6 +137,63 @@ mod tests {
     assert!(
       rx.try_recv().is_ok(),
       "stream start should still trigger UI wake-up"
+    );
+  }
+
+  #[test]
+  fn scrollback_first_commits_completed_lines_without_growing_preview() {
+    let (tx, mut rx) = unbounded_channel();
+    let sender = AppEventSender::new(tx);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::ScrollbackFirst,
+    );
+
+    widget.on_agent_message_delta("item-1", "hello\nworld");
+
+    let Some(AppEvent::InsertHistoryCell(cell)) = rx.try_recv().ok() else {
+      panic!("completed stream line should be inserted into history immediately");
+    };
+    let rendered = cell
+      .display_lines(80)
+      .iter()
+      .map(|line| {
+        line
+          .spans
+          .iter()
+          .map(|span| span.content.clone())
+          .collect::<String>()
+      })
+      .collect::<Vec<_>>()
+      .join("\n");
+    assert!(rendered.contains("hello"));
+
+    let tail_rendered = widget
+      .active_cell_transcript_lines(80)
+      .expect("uncommitted tail should stay in the active preview")
+      .iter()
+      .map(|line| {
+        line
+          .spans
+          .iter()
+          .map(|span| span.content.clone())
+          .collect::<String>()
+      })
+      .collect::<Vec<_>>()
+      .join("\n");
+    assert!(
+      tail_rendered.contains("world"),
+      "active preview should only retain the uncommitted tail"
+    );
+    assert!(
+      !tail_rendered.contains("hello"),
+      "completed lines should leave the preview once committed to scrollback"
+    );
+    assert!(
+      rx.try_recv().is_err(),
+      "scrollback-first mode should not start commit animation for agent text"
     );
   }
 }

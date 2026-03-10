@@ -32,8 +32,17 @@ impl StreamController {
     self.state.collector.preview_lines()
   }
 
+  pub(crate) fn preview_uncommitted_lines(&self) -> Vec<Line<'static>> {
+    self.state.collector.preview_uncommitted_lines()
+  }
+
   pub(crate) fn discard_queued(&mut self) {
     self.state.discard_queued();
+  }
+
+  pub(crate) fn drain_committed_now(&mut self) -> Option<Box<dyn HistoryCell>> {
+    let lines = self.state.drain_all();
+    self.emit(lines)
   }
 
   /// Push a delta; if it contains a newline, commit completed lines and start animation.
@@ -134,6 +143,11 @@ impl PlanStreamController {
 
   pub(crate) fn set_width_if_uncommitted(&mut self, width: Option<usize>) {
     self.state.collector.set_width_if_uncommitted(width);
+  }
+
+  pub(crate) fn drain_committed_now(&mut self) -> Option<Box<dyn HistoryCell>> {
+    let lines = self.state.drain_all();
+    self.emit(lines, false)
   }
 
   /// Push a delta; if it contains a newline, commit completed lines and start animation.
@@ -381,5 +395,18 @@ mod tests {
       streamed, expected,
       "expected exact rendered lines for loose/tight section"
     );
+  }
+
+  #[test]
+  fn drain_committed_now_emits_and_clears_queue() {
+    let mut controller = StreamController::new(None);
+    assert!(controller.push("hello\n"));
+
+    let Some(cell) = controller.drain_committed_now() else {
+      panic!("completed line should emit immediately");
+    };
+    let rendered = lines_to_plain_strings(&cell.display_lines(80)).join("\n");
+    assert!(rendered.contains("hello"));
+    assert_eq!(controller.queued_lines(), 0);
   }
 }

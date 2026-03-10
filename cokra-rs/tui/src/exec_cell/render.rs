@@ -94,8 +94,8 @@ pub(crate) fn output_lines(
   };
   let prefix_next = if include_prefix { "    " } else { "" };
 
-  let visible = total.min(line_limit);
-  for (idx, row) in rows.iter().take(visible).enumerate() {
+  let head_end = total.min(line_limit);
+  for (idx, row) in rows.iter().take(head_end).enumerate() {
     let prefix = if idx == 0 { prefix_head } else { prefix_next };
     out.push(Line::from(vec![
       Span::from(prefix).dim(),
@@ -103,17 +103,34 @@ pub(crate) fn output_lines(
     ]));
   }
 
-  let omitted = total.saturating_sub(visible);
-  if omitted > 0 {
+  let show_ellipsis = total > 2 * line_limit;
+  let omitted = if show_ellipsis {
+    total.saturating_sub(2 * line_limit)
+  } else {
+    0
+  };
+  if show_ellipsis {
     out.push(Line::from(vec![
-      Span::from("    ").dim(),
-      Span::from(format!("... ({omitted} lines omitted)")).dim(),
+      Span::from(prefix_next).dim(),
+      Span::from(format!("… +{omitted} lines")).dim(),
+    ]));
+  }
+
+  let tail_start = if show_ellipsis {
+    total.saturating_sub(line_limit)
+  } else {
+    head_end
+  };
+  for row in rows.iter().skip(tail_start) {
+    out.push(Line::from(vec![
+      Span::from(prefix_next).dim(),
+      Span::from((*row).to_string()).dim(),
     ]));
   }
 
   OutputLines {
     lines: out,
-    omitted: (omitted > 0).then_some(omitted),
+    omitted: show_ellipsis.then_some(omitted),
   }
 }
 

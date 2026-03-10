@@ -19,6 +19,7 @@ impl ChatWidget {
   }
 
   pub(super) fn on_turn_started(&mut self, event: &cokra_protocol::TurnStartedEvent) {
+    self.session.reset_turn_status();
     self.set_agent_turn_running(true);
     self.session.cwd = Some(event.cwd.clone());
   }
@@ -33,6 +34,7 @@ impl ChatWidget {
     self.app_event_tx.send(AppEvent::StopCommitAnimation);
     self.transcript.clear_exec_state();
     self.transcript.clear_turn_state();
+    self.session.reset_turn_status();
     self.add_to_history(PlainHistoryCell::new(vec![Line::from(vec![
       Span::from("error: ").red(),
       Span::from(event.user_facing_message.clone()),
@@ -56,6 +58,7 @@ impl ChatWidget {
         output_tokens: self.session.token_usage.output_tokens,
       });
     }
+    self.session.reset_turn_status();
     self.set_agent_turn_running(false);
     self.transcript.clear_exec_state();
     self.transcript.clear_turn_state();
@@ -65,6 +68,7 @@ impl ChatWidget {
     self.app_event_tx.send(AppEvent::StopCommitAnimation);
     self.transcript.clear_exec_state();
     self.transcript.clear_turn_state();
+    self.session.reset_turn_status();
     self.add_to_history(PlainHistoryCell::new(vec![Line::from(vec![
       Span::from("aborted: ").yellow(),
       Span::from(event.reason.clone()),
@@ -94,7 +98,12 @@ mod tests {
   fn first_session_config_only_updates_state_without_history_duplication() {
     let (tx, mut rx) = unbounded_channel();
     let sender = AppEventSender::new(tx);
-    let mut widget = ChatWidget::new(sender, FrameRequester::test_dummy(), false);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::AnimatedPreview,
+    );
 
     widget.on_session_configured(&configured_event("openai/gpt-5.2-codex"));
 
@@ -109,7 +118,12 @@ mod tests {
   fn later_session_config_inserts_compact_session_header() {
     let (tx, mut rx) = unbounded_channel();
     let sender = AppEventSender::new(tx);
-    let mut widget = ChatWidget::new(sender, FrameRequester::test_dummy(), false);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::AnimatedPreview,
+    );
 
     widget.on_session_configured(&configured_event("openai/gpt-5.2-codex"));
     widget.on_session_configured(&configured_event("github/claude-sonnet-4.6"));

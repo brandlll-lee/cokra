@@ -2,7 +2,6 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 // Note: Table-based layout previously used Constraint; the manual renderer
 // below no longer requires it.
-use ratatui::style::Color;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
@@ -17,6 +16,7 @@ use crate::key_hint::KeyBinding;
 use crate::render::Insets;
 use crate::render::RectExt as _;
 use crate::style::user_message_style;
+use crate::terminal_palette::light_blue;
 
 use super::scroll_state::ScrollState;
 
@@ -384,7 +384,7 @@ fn apply_row_state_style(lines: &mut [Line<'static>], selected: bool, is_disable
   if selected {
     for line in lines.iter_mut() {
       line.spans.iter_mut().for_each(|span| {
-        span.style = Style::default().fg(Color::Cyan).bold();
+        span.style = selected_row_style();
       });
     }
   }
@@ -395,6 +395,10 @@ fn apply_row_state_style(lines: &mut [Line<'static>], selected: bool, is_disable
       });
     }
   }
+}
+
+fn selected_row_style() -> Style {
+  Style::default().fg(light_blue()).bold()
 }
 
 fn compute_item_window_start(
@@ -806,7 +810,7 @@ pub(crate) fn render_rows_single_line(
     let mut full_line = build_full_line(row, desc_col);
     if Some(i) == state.selected_idx && !row.is_disabled {
       full_line.spans.iter_mut().for_each(|span| {
-        span.style = Style::default().fg(Color::Cyan).bold();
+        span.style = selected_row_style();
       });
     }
     if row.is_disabled {

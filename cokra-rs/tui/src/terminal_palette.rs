@@ -2,8 +2,10 @@ use crate::color::perceptual_distance;
 use ratatui::style::Color;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::RwLock;
 
 static DEFAULT_PALETTE_VERSION: AtomicU64 = AtomicU64::new(0);
+static DEFAULT_COLORS_CACHE: RwLock<Option<DefaultColors>> = RwLock::new(None);
 
 // Target color: #59a4f9 (light blue)
 const LIGHT_BLUE_TARGET: (u8, u8, u8) = (0x59, 0xa4, 0xf9);
@@ -48,7 +50,15 @@ pub fn best_color(target: (u8, u8, u8)) -> Color {
 }
 
 pub fn requery_default_colors() {
-  imp::requery_default_colors();
+  // Refresh from environment-based heuristics. Some terminals (notably on Windows/WSL)
+  // set COLORFGBG and friends; others don't. We keep this cheap and synchronous.
+  //
+  // Tradeoff: this isn't a full OSC 11 query. Implementing a background-color query
+  // requires bidirectional terminal I/O and is brittle across multiplexers.
+  let updated = query_default_colors_from_env();
+  if let Ok(mut guard) = DEFAULT_COLORS_CACHE.write() {
+    *guard = updated;
+  }
   bump_palette_version();
 }
 
@@ -59,7 +69,17 @@ pub struct DefaultColors {
 }
 
 pub fn default_colors() -> Option<DefaultColors> {
-  imp::default_colors()
+  if let Ok(guard) = DEFAULT_COLORS_CACHE.read()
+    && guard.is_some()
+  {
+    return *guard;
+  }
+
+  let computed = query_default_colors_from_env();
+  if let Ok(mut guard) = DEFAULT_COLORS_CACHE.write() {
+    *guard = computed;
+  }
+  computed
 }
 
 pub fn default_fg() -> Option<(u8, u8, u8)> {
@@ -78,26 +98,68 @@ pub fn palette_version() -> u64 {
   DEFAULT_PALETTE_VERSION.load(Ordering::Relaxed)
 }
 
-#[cfg(all(unix, not(test)))]
-mod imp {
-  use super::DefaultColors;
-
-  pub(super) fn default_colors() -> Option<DefaultColors> {
-    None
+fn parse_hex_rgb(mut s: &str) -> Option<(u8, u8, u8)> {
+  s = s.trim();
+  if let Some(stripped) = s.strip_prefix('#') {
+    s = stripped;
   }
-
-  pub(super) fn requery_default_colors() {}
+  if s.len() != 6 {
+    return None;
+  }
+  let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+  let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+  let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+  Some((r, g, b))
 }
 
-#[cfg(not(all(unix, not(test))))]
-mod imp {
-  use super::DefaultColors;
+fn parse_colorfgbg(value: &str) -> Option<(u8, u8)> {
+  // Common formats:
+  // - "15;0"
+  // - "7;0"
+  // - "default;default;15;0" (some terminals append)
+  let nums: Vec<u8> = value
+    .split(';')
+    .filter_map(|part| part.trim().parse::<u16>().ok())
+    .filter_map(|n| u8::try_from(n).ok())
+    .collect();
+  if nums.len() < 2 {
+    return None;
+  }
+  let fg = nums[nums.len() - 2];
+  let bg = nums[nums.len() - 1];
+  Some((fg, bg))
+}
 
-  pub(super) fn default_colors() -> Option<DefaultColors> {
-    None
+fn xterm_rgb(idx: u8) -> Option<(u8, u8, u8)> {
+  XTERM_COLORS.get(idx as usize).copied()
+}
+
+fn query_default_colors_from_env() -> Option<DefaultColors> {
+  // Explicit overrides: allow users to set accurate values in environments
+  // where terminals do not expose defaults.
+  let fg_override = std::env::var("COKRA_TERMINAL_FG")
+    .ok()
+    .as_deref()
+    .and_then(parse_hex_rgb);
+  let bg_override = std::env::var("COKRA_TERMINAL_BG")
+    .ok()
+    .as_deref()
+    .and_then(parse_hex_rgb);
+
+  if let (Some(fg), Some(bg)) = (fg_override, bg_override) {
+    return Some(DefaultColors { fg, bg });
   }
 
-  pub(super) fn requery_default_colors() {}
+  let (fg_idx, bg_idx) = std::env::var("COLORFGBG")
+    .ok()
+    .as_deref()
+    .and_then(parse_colorfgbg)
+    .unwrap_or((7, 0)); // Reasonable fallback for dark terminals.
+
+  let fg = fg_override.or_else(|| xterm_rgb(fg_idx)).unwrap_or((255, 255, 255));
+  let bg = bg_override.or_else(|| xterm_rgb(bg_idx)).unwrap_or((0, 0, 0));
+
+  Some(DefaultColors { fg, bg })
 }
 
 /// The subset of Xterm colors that are usually consistent across terminals.

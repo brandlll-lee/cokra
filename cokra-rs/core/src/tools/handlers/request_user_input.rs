@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::agent::team_runtime::runtime_for_thread;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -23,6 +24,13 @@ impl ToolHandler for RequestUserInputHandler {
     let runtime = invocation.runtime.ok_or_else(|| {
       FunctionCallError::Fatal("request_user_input missing runtime context".to_string())
     })?;
+    if let Some(team_runtime) = runtime_for_thread(&runtime.thread_id)
+      && !team_runtime.is_root_thread(&runtime.thread_id)
+    {
+      return Err(FunctionCallError::RespondToModel(
+        "request_user_input is unavailable for spawned teammate agents; make a reasonable assumption or report the missing information back to @main".to_string(),
+      ));
+    }
     let missing_options = args
       .questions
       .iter()

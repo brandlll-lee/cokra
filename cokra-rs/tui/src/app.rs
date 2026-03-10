@@ -16,6 +16,7 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::prelude::Stylize;
 use ratatui::text::Line;
+use ratatui::text::Span;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -47,6 +48,7 @@ use crate::bottom_pane::chat_composer::ComposerSubmission;
 use crate::chatwidget::ActiveCellTranscriptKey;
 use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ChatWidgetAction;
+use crate::chatwidget::StreamRenderMode;
 use crate::chatwidget::TokenUsage;
 use crate::custom_terminal::Frame;
 use crate::history_cell::HistoryCell;
@@ -54,6 +56,7 @@ use crate::history_cell::PlainHistoryCell;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::tui::FrameRequester;
+use crate::tui::InlineViewportSizing;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
 
@@ -62,8 +65,6 @@ use crate::tui::TuiEvent;
 /// Smooth-mode streaming drains one line per tick, so this interval controls
 /// perceived typing speed for non-backlogged output.
 const COMMIT_ANIMATION_TICK: Duration = crate::tui::TARGET_FRAME_INTERVAL;
-const THREAD_EVENT_STORE_CAPACITY: usize = 512;
-
 pub struct App {
   cokra: Cokra,
   chat_widget: ChatWidget,
@@ -91,6 +92,7 @@ pub struct App {
   queued_submissions: VecDeque<ComposerSubmission>,
   primary_thread_id: String,
   active_thread_id: String,
+  status_line_agent_selector_active: bool,
   thread_event_stores: HashMap<String, ThreadEventStore>,
   agent_picker_threads: HashMap<String, crate::multi_agents::AgentPickerThreadEntry>,
   background_pending_threads: HashMap<String, BackgroundPending>,
@@ -128,15 +130,13 @@ struct ThreadEventSnapshot {
 struct ThreadEventStore {
   session_configured: Option<Event>,
   buffer: VecDeque<Event>,
-  capacity: usize,
 }
 
 impl ThreadEventStore {
-  fn new(capacity: usize) -> Self {
+  fn new() -> Self {
     Self {
       session_configured: None,
       buffer: VecDeque::new(),
-      capacity,
     }
   }
 
@@ -147,9 +147,9 @@ impl ThreadEventStore {
     }
 
     self.buffer.push_back(event);
-    if self.buffer.len() > self.capacity {
-      let _ = self.buffer.pop_front();
-    }
+    // Tradeoff: keep the full per-thread event log so switching agent views can
+    // faithfully rebuild the entire transcript instead of silently dropping
+    // early history once a long discussion exceeds a ring-buffer cap.
   }
 
   fn snapshot(&self) -> ThreadEventSnapshot {
@@ -158,6 +158,64 @@ impl ThreadEventStore {
       events: self.buffer.iter().cloned().collect(),
     }
   }
+}
+
+fn cycle_agent_thread(
+  thread_ids: &[String],
+  current_thread_id: &str,
+  direction: isize,
+) -> Option<String> {
+  if thread_ids.len() < 2 {
+    return None;
+  }
+
+  let current_idx = thread_ids
+    .iter()
+    .position(|thread_id| thread_id == current_thread_id)
+    .unwrap_or(0) as isize;
+  // Tradeoff: wrap around the footer member strip so repeated Left/Right presses
+  // can keep cycling through a team without forcing the user to re-arm at the ends.
+  let next_idx = (current_idx + direction).rem_euclid(thread_ids.len() as isize) as usize;
+  thread_ids.get(next_idx).cloned()
+}
+
+fn status_line_agent_tabs(
+  threads: &[(String, crate::multi_agents::AgentPickerThreadEntry)],
+  primary_thread_id: &str,
+  active_thread_id: &str,
+  selector_active: bool,
+) -> Vec<Span<'static>> {
+  let mut spans = Vec::new();
+  for (idx, (thread_id, entry)) in threads.iter().enumerate() {
+    if idx > 0 {
+      spans.push(Span::from(" ").dim());
+    }
+
+    let label = crate::multi_agents::format_agent_picker_item_name(
+      entry.nickname.as_deref(),
+      entry.role.as_deref(),
+      thread_id == primary_thread_id,
+    );
+    let label = if thread_id == active_thread_id {
+      format!("[{label}]")
+    } else {
+      label
+    };
+
+    let mut span = Span::from(label);
+    if entry.is_closed && thread_id != active_thread_id {
+      span = span.dim();
+    }
+    if thread_id == active_thread_id {
+      span = span.fg(crate::terminal_palette::light_blue()).bold();
+      if selector_active {
+        span = span.underlined();
+      }
+    }
+    spans.push(span);
+  }
+
+  spans
 }
 
 #[derive(Debug, Clone)]
@@ -182,14 +240,19 @@ impl App {
       .map(ToString::to_string)
       .unwrap_or_else(|| "main".to_string());
     let mut thread_event_stores = HashMap::new();
-    thread_event_stores.insert(
-      primary_thread_id.clone(),
-      ThreadEventStore::new(THREAD_EVENT_STORE_CAPACITY),
-    );
+    thread_event_stores.insert(primary_thread_id.clone(), ThreadEventStore::new());
 
     let mut app = Self {
       cokra,
-      chat_widget: ChatWidget::new(app_event_sender.clone(), frame_requester, true),
+      chat_widget: ChatWidget::new(
+        app_event_sender.clone(),
+        frame_requester,
+        true,
+        match ui_mode {
+          UiMode::Inline => StreamRenderMode::ScrollbackFirst,
+          UiMode::AltScreen => StreamRenderMode::AnimatedPreview,
+        },
+      ),
       exit_info: None,
       app_event_rx,
       app_event_tx: app_event_sender,
@@ -212,6 +275,7 @@ impl App {
       queued_submissions: VecDeque::new(),
       primary_thread_id: primary_thread_id.clone(),
       active_thread_id: primary_thread_id,
+      status_line_agent_selector_active: false,
       thread_event_stores,
       agent_picker_threads: HashMap::new(),
       background_pending_threads: HashMap::new(),
@@ -282,7 +346,12 @@ impl App {
       self.rebuild_transcript_cache(width);
     }
     let height = self.chat_widget.desired_height(width);
-    tui.draw(height, |frame| self.render(frame))?;
+    let sizing = if self.ui_mode == UiMode::Inline {
+      self.chat_widget.inline_viewport_sizing()
+    } else {
+      InlineViewportSizing::PreserveVisibleHistory
+    };
+    tui.draw(height, sizing, |frame| self.render(frame))?;
     Ok(())
   }
 
@@ -523,15 +592,21 @@ impl App {
       },
     );
 
-    self.chat_widget.add_to_history(PlainHistoryCell::new(vec![
-      Line::from(format!(
-        "● Starting OAuth connect for {}",
-        start.provider_name
-      ))
-      .dim(),
-      Line::from(start.auth_url.clone()).cyan(),
-      Line::from(start.instructions.clone()).dim(),
-    ]));
+    let opens_connect_view = start.prompt.is_some();
+    if !opens_connect_view {
+      self.chat_widget.add_to_history(PlainHistoryCell::new(vec![
+        Line::from(format!(
+          "● Starting OAuth connect for {}",
+          start.provider_name
+        ))
+        .dim(),
+        Line::from(start.auth_url.clone()).cyan(),
+        // Tradeoff: device-code style flows do not own an active dialog, so the
+        // transcript still needs the browser URL and instructions as the durable
+        // place for the user to refer back to them.
+        Line::from(start.instructions.clone()).dim(),
+      ]));
+    }
 
     if cokra_core::model::oauth_connect::uses_local_callback(kind) {
       let tx = self.app_event_tx.clone();
@@ -564,11 +639,9 @@ impl App {
       });
     }
 
-    if start.prompt.is_some() {
+    if opens_connect_view {
       self.open_oauth_connect_view(start);
-      if kind != cokra_core::model::oauth_connect::OAuthProviderKind::GitHubCopilot {
-        return Ok(());
-      }
+      return Ok(());
     }
 
     self
@@ -777,14 +850,8 @@ impl App {
       }
       AppEvent::NewSession => {
         // Clear transcript and push a new session cell.
-        self.transcript_cells.clear();
-        self.transcript_lines_cache.clear();
-        self.active_tail_cache_key = None;
-        self.active_tail_cache_width = 0;
-        self.active_tail_cache_lines.clear();
-        self.deferred_history_lines.clear();
-        self.has_emitted_history_lines = false;
-        self.backtrack_render_pending = false;
+        self.clear_transcript_view();
+        self.insert_startup_welcome(tui)?;
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
@@ -906,7 +973,7 @@ impl App {
   async fn handle_tui_event(&mut self, event: TuiEvent, tui: &mut Tui) -> Result<()> {
     match event {
       TuiEvent::Key(key) => {
-        self.handle_key_event(key).await?;
+        self.handle_key_event(tui, key).await?;
         // Schedule a redraw after every keypress so the compositor
         // reflects the updated textarea/cursor state immediately.
         tui.frame_requester().schedule_frame();
@@ -973,7 +1040,96 @@ impl App {
     Ok(())
   }
 
-  async fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
+  fn agent_switcher_threads(
+    &mut self,
+  ) -> Vec<(String, crate::multi_agents::AgentPickerThreadEntry)> {
+    self.remember_threads_from_snapshot();
+    self.remember_agent_thread(
+      self.primary_thread_id.clone(),
+      Some("main".to_string()),
+      Some("leader".to_string()),
+      false,
+    );
+
+    let mut threads = self
+      .agent_picker_threads
+      .iter()
+      .map(|(thread_id, entry)| (thread_id.clone(), entry.clone()))
+      .collect::<Vec<_>>();
+    crate::multi_agents::sort_agent_picker_threads(&mut threads, &self.primary_thread_id);
+    threads
+  }
+
+  fn set_status_line_agent_selector_active(&mut self, active: bool) {
+    if self.status_line_agent_selector_active == active {
+      return;
+    }
+    self.status_line_agent_selector_active = active;
+    self.refresh_status_line();
+  }
+
+  fn can_focus_status_line_agent_selector(&mut self) -> bool {
+    self
+      .chat_widget
+      .bottom_pane
+      .can_focus_status_line_selector()
+      && self.agent_switcher_threads().len() > 1
+  }
+
+  fn select_adjacent_agent_thread(&mut self, tui: &mut Tui, direction: isize) -> Result<bool> {
+    let thread_ids = self
+      .agent_switcher_threads()
+      .into_iter()
+      .map(|(thread_id, _)| thread_id)
+      .collect::<Vec<_>>();
+    let Some(next_thread_id) = cycle_agent_thread(&thread_ids, &self.active_thread_id, direction)
+    else {
+      return Ok(false);
+    };
+
+    self.status_line_agent_selector_active = true;
+    // Tradeoff: footer team switching applies immediately on Left/Right so the
+    // inline experience matches Claude Code's fast member cycling instead of
+    // forcing a second confirmation key before every replay.
+    self.select_agent_thread(tui, next_thread_id)?;
+    Ok(true)
+  }
+
+  fn handle_status_line_agent_selector_key(
+    &mut self,
+    tui: &mut Tui,
+    key: KeyEvent,
+  ) -> Result<bool> {
+    if !self.status_line_agent_selector_active && !matches!(key.code, KeyCode::Down) {
+      return Ok(false);
+    }
+
+    if !self.can_focus_status_line_agent_selector() {
+      self.set_status_line_agent_selector_active(false);
+      return Ok(false);
+    }
+
+    if !self.status_line_agent_selector_active {
+      self.set_status_line_agent_selector_active(true);
+      return Ok(true);
+    }
+
+    match key.code {
+      KeyCode::Left => self.select_adjacent_agent_thread(tui, -1),
+      KeyCode::Right => self.select_adjacent_agent_thread(tui, 1),
+      KeyCode::Esc | KeyCode::Enter => {
+        self.set_status_line_agent_selector_active(false);
+        Ok(true)
+      }
+      KeyCode::Down => Ok(true),
+      _ => {
+        self.set_status_line_agent_selector_active(false);
+        Ok(false)
+      }
+    }
+  }
+
+  async fn handle_key_event(&mut self, tui: &mut Tui, key: KeyEvent) -> Result<()> {
     // 1:1 codex: only forward Press and Repeat events; silently drop Release.
     // In keyboard-enhancement mode crossterm emits Press + Release pairs; without
     // this guard every keystroke would be processed twice.
@@ -1010,6 +1166,10 @@ impl App {
         }
         _ => {}
       }
+    }
+
+    if self.handle_status_line_agent_selector_key(tui, key)? {
+      return Ok(());
     }
 
     match self.chat_widget.bottom_pane.handle_key(key) {
@@ -1101,7 +1261,7 @@ impl App {
     self
       .thread_event_stores
       .entry(thread_id.to_string())
-      .or_insert_with(|| ThreadEventStore::new(THREAD_EVENT_STORE_CAPACITY))
+      .or_insert_with(ThreadEventStore::new)
   }
 
   fn remember_agent_thread(
@@ -1336,6 +1496,7 @@ impl App {
     self.scroll_offset = 0;
     self.has_emitted_history_lines = false;
     self.backtrack_render_pending = false;
+    self.did_show_welcome = false;
   }
 
   fn drain_replay_history_cells(&mut self, width: u16) {
@@ -1393,13 +1554,31 @@ impl App {
     };
 
     self.active_thread_id = thread_id.clone();
-    if self.ui_mode == UiMode::Inline {
-      let _ = tui.terminal.clear_scrollback();
+    tui.clear_pending_history_lines();
+    match self.ui_mode {
+      UiMode::Inline => {
+        let _ = tui.terminal.clear_scrollback();
+        // Tradeoff: switching teammate threads pays for a full visible clear so the
+        // new thread view never inherits stale tail rows from the previously shown
+        // inline viewport/history region.
+        let _ = tui.terminal.clear_visible_screen();
+      }
+      UiMode::AltScreen => {
+        let _ = tui.terminal.clear();
+      }
     }
-    let _ = tui.terminal.clear();
-    self.chat_widget = ChatWidget::new(self.app_event_tx.clone(), tui.frame_requester(), true);
+    self.chat_widget = ChatWidget::new(
+      self.app_event_tx.clone(),
+      tui.frame_requester(),
+      true,
+      match self.ui_mode {
+        UiMode::Inline => StreamRenderMode::ScrollbackFirst,
+        UiMode::AltScreen => StreamRenderMode::AnimatedPreview,
+      },
+    );
     self.chat_widget.bottom_pane.set_status_line_enabled(true);
     self.clear_transcript_view();
+    self.insert_startup_welcome(tui)?;
     self.task_running = false;
     self.chat_widget.set_agent_turn_running(false);
     self.pending_approval = None;
@@ -2197,19 +2376,46 @@ impl App {
     let model = self.chat_widget.model_name().to_string();
     let usage = self.chat_widget.token_usage();
     let team_snapshot = self.cokra.team_snapshot();
+    let agent_switcher_threads = self.agent_switcher_threads();
+    let has_team_switcher = agent_switcher_threads.len() > 1;
+    if !has_team_switcher {
+      self.status_line_agent_selector_active = false;
+    }
 
-    let line = match self.status_line_mode {
-      StatusLineMode::Minimal => Line::from(vec![
-        ratatui::text::Span::from("view: ").dim(),
-        ratatui::text::Span::from(self.active_thread_label()),
-        ratatui::text::Span::from("  •  ").dim(),
-        ratatui::text::Span::from("cwd: ").dim(),
-        ratatui::text::Span::from(cwd.display().to_string()),
-      ]),
-      StatusLineMode::Default => {
-        let mut spans = Vec::new();
+    let push_agent_switcher = |spans: &mut Vec<Span<'static>>| {
+      if has_team_switcher {
+        spans.push(ratatui::text::Span::from("team: ").dim());
+        spans.extend(status_line_agent_tabs(
+          &agent_switcher_threads,
+          &self.primary_thread_id,
+          &self.active_thread_id,
+          self.status_line_agent_selector_active,
+        ));
+        spans.push(ratatui::text::Span::from("  •  ").dim());
+        let hint = if self.status_line_agent_selector_active {
+          "←/→ switch  Esc done"
+        } else {
+          "↓ team switch"
+        };
+        spans.push(ratatui::text::Span::from(hint).dim());
+      } else {
         spans.push(ratatui::text::Span::from("view: ").dim());
         spans.push(ratatui::text::Span::from(self.active_thread_label()));
+      }
+    };
+
+    let line = match self.status_line_mode {
+      StatusLineMode::Minimal => {
+        let mut spans = Vec::new();
+        push_agent_switcher(&mut spans);
+        spans.push(ratatui::text::Span::from("  •  ").dim());
+        spans.push(ratatui::text::Span::from("cwd: ").dim());
+        spans.push(ratatui::text::Span::from(cwd.display().to_string()));
+        Line::from(spans)
+      }
+      StatusLineMode::Default => {
+        let mut spans = Vec::new();
+        push_agent_switcher(&mut spans);
         spans.push(ratatui::text::Span::from("  •  ").dim());
         if !model.is_empty() {
           spans.push(ratatui::text::Span::from("model: ").dim());
@@ -2229,10 +2435,9 @@ impl App {
             .iter()
             .filter(|plan| matches!(plan.status, cokra_protocol::TeamPlanStatus::PendingApproval))
             .count();
-          spans.push(ratatui::text::Span::from("team: ").dim());
+          spans.push(ratatui::text::Span::from("alerts: ").dim());
           spans.push(ratatui::text::Span::from(format!(
-            "{} members, {} unread, {} bg approvals, {} pending plans",
-            snapshot.members.len(),
+            "{} unread, {} bg approvals, {} pending plans",
             unread_total,
             self.background_pending_count(),
             pending_plans
@@ -2324,15 +2529,8 @@ impl App {
     use crate::bottom_pane::list_selection_view::SelectionViewParams;
     use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 
-    self.remember_threads_from_snapshot();
-    self.remember_agent_thread(
-      self.primary_thread_id.clone(),
-      Some("main".to_string()),
-      Some("leader".to_string()),
-      false,
-    );
-
-    if self.agent_picker_threads.is_empty() {
+    let threads = self.agent_switcher_threads();
+    if threads.len() <= 1 {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
@@ -2342,13 +2540,6 @@ impl App {
     }
 
     let snapshot = self.cokra.team_snapshot();
-    let mut threads = self
-      .agent_picker_threads
-      .iter()
-      .map(|(thread_id, entry)| (thread_id.clone(), entry.clone()))
-      .collect::<Vec<_>>();
-    crate::multi_agents::sort_agent_picker_threads(&mut threads, &self.primary_thread_id);
-
     let mut initial_selected_idx = None;
     let items = threads
       .into_iter()
@@ -2677,5 +2868,85 @@ mod tests {
 
     assert_eq!(lines_to_string(&first_lines), "first");
     assert_eq!(lines_to_string(&second_lines), "\nsecond");
+  }
+
+  #[test]
+  fn thread_event_store_keeps_full_history_without_truncation() {
+    let mut store = ThreadEventStore::new();
+    for idx in 0..600 {
+      store.push_event(Event {
+        id: format!("event-{idx}"),
+        msg: EventMsg::AgentMessage(cokra_protocol::AgentMessageEvent {
+          thread_id: "agent-1".to_string(),
+          turn_id: "turn-1".to_string(),
+          item_id: format!("item-{idx}"),
+          content: vec![cokra_protocol::AgentMessageContent::Text {
+            text: format!("message-{idx}"),
+          }],
+        }),
+      });
+    }
+
+    let snapshot = store.snapshot();
+    assert_eq!(snapshot.events.len(), 600);
+
+    let first = snapshot.events.first().expect("first event");
+    let last = snapshot.events.last().expect("last event");
+    assert_eq!(first.id, "event-0");
+    assert_eq!(last.id, "event-599");
+  }
+
+  #[test]
+  fn cycle_agent_thread_wraps_in_both_directions() {
+    let thread_ids = vec!["main".to_string(), "elon".to_string(), "dario".to_string()];
+
+    assert_eq!(
+      cycle_agent_thread(&thread_ids, "main", -1),
+      Some("dario".to_string())
+    );
+    assert_eq!(
+      cycle_agent_thread(&thread_ids, "dario", 1),
+      Some("main".to_string())
+    );
+    assert_eq!(
+      cycle_agent_thread(&thread_ids, "elon", 1),
+      Some("dario".to_string())
+    );
+  }
+
+  #[test]
+  fn status_line_agent_tabs_mark_active_member_and_selector_focus() {
+    let threads = vec![
+      (
+        "main".to_string(),
+        crate::multi_agents::AgentPickerThreadEntry {
+          nickname: Some("main".to_string()),
+          role: Some("leader".to_string()),
+          is_closed: false,
+        },
+      ),
+      (
+        "elon-thread".to_string(),
+        crate::multi_agents::AgentPickerThreadEntry {
+          nickname: Some("elon".to_string()),
+          role: Some("worker".to_string()),
+          is_closed: false,
+        },
+      ),
+    ];
+
+    let spans = status_line_agent_tabs(&threads, "main", "elon-thread", true);
+    let rendered = spans
+      .iter()
+      .map(|span| span.content.as_ref())
+      .collect::<String>();
+    assert_eq!(rendered, "@main [@elon (worker)]");
+    assert!(spans.iter().any(|span| {
+      span.content.as_ref() == "[@elon (worker)]"
+        && span
+          .style
+          .add_modifier
+          .contains(ratatui::style::Modifier::UNDERLINED)
+    }));
   }
 }

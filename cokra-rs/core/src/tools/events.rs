@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use crate::session::Session;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolOutput;
+use crate::exec::try_parse_model_structured_exec_output;
 
 #[derive(Clone)]
 pub struct ToolEventCtx<'a> {
@@ -91,14 +92,24 @@ impl ToolEmitter {
         .await;
       }
       ToolEventStage::Success(output) => {
+        // Tradeoff: we decode the model-structured exec envelope here so the TUI
+        // shows human output (not JSON) without coupling the UI layer to tool payloads.
+        // This is the narrowest place that knows both "tool output format" and "UI event".
+        let (exit_code, display_output) =
+          if let Some(envelope) = try_parse_model_structured_exec_output(&output.content) {
+            (envelope.metadata.exit_code, envelope.output)
+          } else {
+            (if output.is_error { 1 } else { 0 }, output.content)
+          };
+
         emit_event(
           &ctx,
           EventMsg::ExecCommandEnd(ExecCommandEndEvent {
             thread_id: ctx.thread_id.to_string(),
             turn_id: ctx.turn_id.to_string(),
             command_id: ctx.call_id.to_string(),
-            exit_code: if output.is_error { 1 } else { 0 },
-            output: output.content,
+            exit_code,
+            output: display_output,
           }),
         )
         .await;

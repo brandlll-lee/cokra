@@ -16,7 +16,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 
 use crate::history_cell::HistoryCell;
-use crate::history_cell::PlainHistoryCell;
+use crate::history_cell::WelcomeHistoryCell;
 
 /// The cokra ASCII logo (纯白色极简风格)
 /// 必须精确匹配原始logo，1:1复刻
@@ -171,14 +171,11 @@ impl WelcomeWidget {
 
   /// Create a welcome header cell for permanent display in history
   pub(crate) fn into_history_cell(ctx: WelcomeContext) -> Box<dyn HistoryCell> {
-    let mut lines = Self::generate_lines(&ctx, false); // 不显示hint
-    while lines
-      .last()
-      .is_some_and(|line| line.spans.iter().all(|span| span.content.trim().is_empty()))
-    {
-      lines.pop();
-    }
-    Box::new(PlainHistoryCell::new(lines))
+    Box::new(WelcomeHistoryCell::new(
+      ctx.model_id,
+      ctx.approval_mode,
+      ctx.sandbox_mode,
+    ))
   }
 }
 

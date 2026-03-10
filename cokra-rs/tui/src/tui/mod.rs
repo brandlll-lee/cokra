@@ -28,8 +28,8 @@ use crossterm::terminal::LeaveAlternateScreen;
 use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
 use crossterm::terminal::supports_keyboard_enhancement;
-use ratatui::backend::Backend;
 use ratatui::backend::CrosstermBackend;
+use ratatui::backend::Backend;
 use ratatui::layout::Offset;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -55,6 +55,48 @@ pub(crate) const TARGET_FRAME_INTERVAL: Duration = frame_rate_limiter::MIN_FRAME
 
 /// A type alias for the terminal type used in this application
 pub type Terminal = CustomTerminal<CrosstermBackend<Stdout>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InlineViewportSizing {
+  PreserveVisibleHistory,
+  ExpandForOverlay,
+}
+
+fn inline_viewport_height(
+  requested_height: u16,
+  screen_height: u16,
+  visible_history_rows: u16,
+  sizing: InlineViewportSizing,
+) -> u16 {
+  if screen_height == 0 {
+    return 0;
+  }
+
+  if sizing == InlineViewportSizing::ExpandForOverlay {
+    return requested_height.min(screen_height);
+  }
+
+  // Inline mode relies on `insert_history_lines()` to render committed history *above* the viewport.
+  // That implementation uses a scroll region capped at `viewport.top()`, which becomes invalid when
+  // the viewport reaches the very top of the screen (top == 0).
+  //
+  // Keep at least one row above the viewport whenever possible so:
+  // - history insertions never need to emit `ESC[1;0r` (broken scroll region)
+  // - the compositor never "covers" freshly inserted history, which looks like the user message
+  //   was swallowed
+  //
+  // Tradeoff: even when no history has been inserted yet, the inline viewport is capped to
+  // `screen_height - 1` on screens that are at least 2 rows tall.
+  let reserved_history_rows = if screen_height > 1 {
+    visible_history_rows.max(1).min(screen_height.saturating_sub(1))
+  } else {
+    0
+  };
+  // Tradeoff: preserve already visible history above the inline viewport even if that means
+  // the live transcript must scroll within a smaller viewport once the lower region fills up.
+  let max_inline_height = screen_height.saturating_sub(reserved_history_rows).max(1);
+  requested_height.min(max_inline_height)
+}
 
 pub fn set_modes() -> Result<()> {
   execute!(stdout(), EnableBracketedPaste)?;
@@ -397,9 +439,14 @@ impl Tui {
     self.frame_requester().schedule_frame();
   }
 
+  pub fn clear_pending_history_lines(&mut self) {
+    self.pending_history_lines.clear();
+  }
+
   pub fn draw(
     &mut self,
     height: u16,
+    sizing: InlineViewportSizing,
     draw_fn: impl FnOnce(&mut custom_terminal::Frame),
   ) -> Result<()> {
     // If we are resuming from ^Z, we need to prepare the resume action now so we can apply it
@@ -428,14 +475,28 @@ impl Tui {
       let size = terminal.size()?;
 
       let mut area = terminal.viewport_area;
-      area.height = height.min(size.height);
+      area.height =
+        inline_viewport_height(height, size.height, terminal.visible_history_rows(), sizing);
       area.width = size.width;
-      // If the viewport has expanded, scroll everything else up to make room.
+      if !self.alt_screen_active.load(Ordering::Relaxed) && size.height > 1 {
+        // In inline mode, keep at least one row above the viewport. This avoids invalid scroll
+        // regions during `insert_history_lines()` and prevents "history swallowed by viewport"
+        // when the screen is resized small.
+        //
+        // Tradeoff: overlays that request full-screen height in inline mode will be clipped by 1 row.
+        area.height = area.height.min(size.height.saturating_sub(1)).max(1);
+        area.y = area.y.max(1);
+      }
       if area.bottom() > size.height {
+        // Inline mode runs inside the normal terminal screen buffer.
+        // If the viewport expanded, scroll the region *above* it up to make room.
+        //
+        // This matches codex's proven behavior and ensures that freshly inserted scrollback lines
+        // remain visible instead of being covered by a bottom-anchored viewport.
         terminal
           .backend_mut()
           .scroll_region_up(0..area.top(), area.bottom() - size.height)?;
-        area.y = size.height - area.height;
+        area.y = size.height.saturating_sub(area.height);
       }
       if area != terminal.viewport_area {
         terminal.clear()?;
@@ -486,5 +547,66 @@ impl Tui {
       }
     }
     Ok(None)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::InlineViewportSizing;
+  use super::inline_viewport_height;
+
+  #[test]
+  fn cap_inline_viewport_height_preserves_visible_history_rows() {
+    assert_eq!(
+      12,
+      inline_viewport_height(12, 24, 8, InlineViewportSizing::PreserveVisibleHistory)
+    );
+    assert_eq!(
+      16,
+      inline_viewport_height(20, 24, 8, InlineViewportSizing::PreserveVisibleHistory)
+    );
+  }
+
+  #[test]
+  fn cap_inline_viewport_height_keeps_one_row_for_inline_ui() {
+    assert_eq!(
+      1,
+      inline_viewport_height(5, 6, 6, InlineViewportSizing::PreserveVisibleHistory)
+    );
+    assert_eq!(
+      0,
+      inline_viewport_height(5, 0, 0, InlineViewportSizing::PreserveVisibleHistory)
+    );
+  }
+
+  #[test]
+  fn overlay_mode_matches_codex_style_full_expansion() {
+    assert_eq!(
+      20,
+      inline_viewport_height(20, 24, 8, InlineViewportSizing::ExpandForOverlay)
+    );
+    assert_eq!(
+      24,
+      inline_viewport_height(40, 24, 8, InlineViewportSizing::ExpandForOverlay)
+    );
+  }
+
+  #[test]
+  fn preserve_visible_history_always_leaves_one_row_when_possible() {
+    // Even with no already-inserted scrollback, we reserve one row above the
+    // inline viewport so insert_history_lines has a valid region.
+    assert_eq!(
+      23,
+      inline_viewport_height(40, 24, 0, InlineViewportSizing::PreserveVisibleHistory)
+    );
+    assert_eq!(
+      1,
+      inline_viewport_height(40, 2, 0, InlineViewportSizing::PreserveVisibleHistory)
+    );
+    // Degenerate 1-row terminals can't reserve space.
+    assert_eq!(
+      1,
+      inline_viewport_height(40, 1, 0, InlineViewportSizing::PreserveVisibleHistory)
+    );
   }
 }

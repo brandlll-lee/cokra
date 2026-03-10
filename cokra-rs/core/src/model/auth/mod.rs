@@ -4,6 +4,7 @@
 
 pub mod manager;
 pub mod oauth;
+pub mod provider_registry;
 pub mod resolver;
 pub mod storage;
 
@@ -12,6 +13,12 @@ pub use oauth::DeviceCodeResponse;
 pub use oauth::OAuthConfig;
 pub use oauth::OAuthManager;
 pub use oauth::OAuthToken;
+pub use provider_registry::AuthProviderDescriptor;
+pub use provider_registry::OAuthClientEnv;
+pub use provider_registry::RuntimeRegistrationKind;
+pub use provider_registry::auth_provider_descriptors;
+pub use provider_registry::find_auth_provider;
+pub use provider_registry::find_auth_provider_by_oauth_kind;
 pub use resolver::AuthResolver;
 pub use resolver::EnvAuthResolver;
 pub use storage::CredentialStorage;

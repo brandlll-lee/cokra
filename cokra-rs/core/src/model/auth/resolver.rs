@@ -4,6 +4,7 @@
 
 use super::Credentials;
 use super::Result;
+use super::find_auth_provider;
 
 /// Trait for resolving credentials from various sources
 pub trait AuthResolver: Send + Sync {
@@ -26,25 +27,15 @@ impl EnvAuthResolver {
   }
 
   /// Get environment variable mappings for providers
-  fn get_env_vars_for_provider(provider_id: &str) -> Vec<String> {
-    match provider_id {
-      "openai" => return vec!["OPENAI_API_KEY".to_string()],
-      "anthropic" => return vec!["ANTHROPIC_API_KEY".to_string()],
-      "google" => return vec!["GOOGLE_API_KEY".to_string(), "GEMINI_API_KEY".to_string()],
-      "openrouter" => return vec!["OPENROUTER_API_KEY".to_string()],
-      "github" => {
-        return vec![
-          "GITHUB_COPILOT_TOKEN".to_string(),
-          "GITHUB_TOKEN".to_string(),
-        ];
-      }
-      // OAuth-only providers must not inherit unrelated API-key env vars.
-      "github-copilot" | "anthropic-oauth" | "google-gemini-cli" | "google-antigravity"
-      | "openai-codex" => return Vec::new(),
-      _ => {}
+  fn get_env_vars_for_provider(provider_id: &str) -> Option<Vec<String>> {
+    if let Some(descriptor) = find_auth_provider(provider_id) {
+      return Some(descriptor.env_vars());
     }
 
-    // Standardize provider ID (replace hyphens with underscores)
+    None
+  }
+
+  fn fallback_env_vars_for_unknown_provider(provider_id: &str) -> Vec<String> {
     let provider_upper = provider_id.to_uppercase().replace('-', "_");
     let provider_snake = provider_id.to_uppercase();
 
@@ -67,7 +58,20 @@ impl AuthResolver for EnvAuthResolver {
   fn resolve(&self, provider_id: &str) -> Option<Credentials> {
     // Only resolve env vars explicitly associated with this provider.
     // Unrelated global API keys must not make OAuth-only providers appear connected.
-    for var in Self::get_env_vars_for_provider(provider_id) {
+    if let Some(env_vars) = Self::get_env_vars_for_provider(provider_id) {
+      for var in env_vars {
+        if let Ok(key) = std::env::var(&var)
+          && !key.is_empty()
+        {
+          tracing::debug!("Found credentials for {} in env var {}", provider_id, var);
+          return Some(Credentials::ApiKey { key });
+        }
+      }
+
+      return None;
+    }
+
+    for var in Self::fallback_env_vars_for_unknown_provider(provider_id) {
       if let Ok(key) = std::env::var(&var)
         && !key.is_empty()
       {

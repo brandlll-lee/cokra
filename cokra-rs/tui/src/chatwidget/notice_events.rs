@@ -20,9 +20,6 @@ impl ChatWidget {
       | EventMsg::ItemCompleted(_)
       | EventMsg::ShutdownComplete
       | EventMsg::ModelReroute(_)
-      | EventMsg::AgentReasoningRawContent(_)
-      | EventMsg::AgentReasoningRawContentDelta(_)
-      | EventMsg::AgentReasoningSectionBreak(_)
       | EventMsg::DynamicToolCallRequest(_)
       | EventMsg::TurnDiff(_)
       | EventMsg::GetHistoryEntryResponse(_)
@@ -43,24 +40,48 @@ impl ChatWidget {
         ))]));
       }
       EventMsg::AgentReasoningDelta(e) => {
+        self.on_reasoning_delta(&e.delta);
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(vec![
           Span::from("reasoning: ").dim(),
           Span::from(e.delta.clone()).dim(),
         ])]));
       }
       EventMsg::AgentReasoning(e) => {
+        self.on_reasoning_final(&e.text);
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(vec![
           Span::from("reasoning: ").dim(),
           Span::from(e.text.clone()).dim(),
         ])]));
       }
+      EventMsg::AgentReasoningRawContentDelta(e) => {
+        self.on_reasoning_delta(&e.delta);
+      }
+      EventMsg::AgentReasoningRawContent(e) => {
+        self.on_reasoning_final(&e.text);
+      }
+      EventMsg::AgentReasoningSectionBreak(_) => {
+        self.on_reasoning_section_break();
+      }
       EventMsg::McpStartupUpdate(e) => {
+        match &e.status {
+          cokra_protocol::McpStartupStatus::Starting => {
+            self.session.mcp_starting_servers.insert(e.server.clone());
+          }
+          cokra_protocol::McpStartupStatus::Ready
+          | cokra_protocol::McpStartupStatus::Cancelled
+          | cokra_protocol::McpStartupStatus::Failed { .. } => {
+            self.session.mcp_starting_servers.remove(&e.server);
+          }
+        }
+        self.sync_status_indicator();
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
           "● MCP server {}: {:?}",
           e.server, e.status
         ))]));
       }
       EventMsg::McpStartupComplete(e) => {
+        self.session.mcp_starting_servers.clear();
+        self.sync_status_indicator();
         if !e.failed.is_empty() {
           for f in &e.failed {
             self.add_to_history(PlainHistoryCell::new(vec![Line::from(vec![
@@ -71,29 +92,46 @@ impl ChatWidget {
         }
       }
       EventMsg::McpToolCallBegin(e) => {
+        self.set_status_override(
+          format!("Calling {}.{}", e.invocation.server, e.invocation.tool),
+          None,
+          None,
+        );
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
           "● Calling {}.{}",
           e.invocation.server, e.invocation.tool
         ))]));
       }
       EventMsg::McpToolCallEnd(e) => {
+        self.clear_status_override();
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
           "● {}.{} completed ({}ms)",
           e.invocation.server, e.invocation.tool, e.duration_ms
         ))]));
       }
       EventMsg::WebSearchBegin(_) => {
+        self.set_status_override("Searching the web", None, None);
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(
           "● Searching the web...".dim(),
         )]));
       }
       EventMsg::WebSearchEnd(e) => {
+        self.clear_status_override();
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
           "● Searched: {}",
           e.query
         ))]));
       }
       EventMsg::TerminalInteraction(e) => {
+        if e.stdin.trim().is_empty() {
+          self.set_status_override(
+            "Waiting for terminal",
+            Some(format!("process {}", e.process_id)),
+            None,
+          );
+        } else {
+          self.clear_status_override();
+        }
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
           "● Terminal input: {}",
           e.stdin.trim()
@@ -131,9 +169,11 @@ impl ChatWidget {
       }
       EventMsg::UndoStarted(e) => {
         let msg = e.message.as_deref().unwrap_or("Undoing...");
+        self.set_status_override(msg, None, None);
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!("● {msg}"))]));
       }
       EventMsg::UndoCompleted(e) => {
+        self.clear_status_override();
         let msg = e.message.as_deref().unwrap_or(if e.success {
           "Undo completed"
         } else {
@@ -143,6 +183,14 @@ impl ChatWidget {
       }
       EventMsg::PatchApplyBegin(e) => {
         let file_count = e.changes.len();
+        self.set_status_override(
+          format!(
+            "Applying patch ({file_count} file{s})",
+            s = if file_count == 1 { "" } else { "s" }
+          ),
+          None,
+          None,
+        );
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
           "● Applying patch ({file_count} file{s}){auto}",
           s = if file_count == 1 { "" } else { "s" },
@@ -154,6 +202,7 @@ impl ChatWidget {
         ))]));
       }
       EventMsg::PatchApplyEnd(e) => {
+        self.clear_status_override();
         let status_str = if e.success { "succeeded" } else { "failed" };
         self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
           "● Patch apply {status_str}"
@@ -199,33 +248,28 @@ impl ChatWidget {
           "● Exited review mode".dim(),
         )]));
       }
-      EventMsg::ReasoningContentDelta(_) | EventMsg::ReasoningRawContentDelta(_) => {}
       EventMsg::CollabWaitingBegin(e) => {
         // Keep agent-teams progress out of the main transcript to avoid spam when models
         // repeatedly call `wait`. Use the status indicator line as the compact surface.
-        self.bottom_pane.ensure_status_indicator();
-        if let Some(status) = self.bottom_pane.status_widget_mut() {
-          let preview = multi_agents::waiting_preview(e);
-          // Tradeoff: inline_message is the only stable "updatable" surface we currently
-          // have without introducing editable history cells.
-          let inline = if preview.receiver_count > 0 {
-            format!("{} agents launched (/agent 展开)", preview.receiver_count)
-          } else {
-            "Waiting for agents (/agent 展开)".to_string()
-          };
-          status.update_inline_message(Some(inline));
-          if preview.details.is_some() {
-            status.update_details(preview.details);
-          }
-        }
+        let preview = multi_agents::waiting_preview(e);
+        // Tradeoff: inline_message remains the compact expandable hint surface, while
+        // the status header now reflects the live "what the model is doing" summary.
+        let inline = if preview.receiver_count > 0 {
+          format!(
+            "{} agents launched (/agent to expand)",
+            preview.receiver_count
+          )
+        } else {
+          "Waiting for agents (/agent to expand)".to_string()
+        };
+        self.set_collab_wait_status(Some(StatusSnapshot::new(
+          preview.summary,
+          preview.details,
+          Some(inline),
+        )));
       }
       EventMsg::CollabWaitingEnd(e) => {
-        if let Some(status) = self.bottom_pane.status_widget_mut() {
-          status.update_inline_message(None);
-          // If we set details for agent teams, clear them on completion so exec/tool
-          // details do not get stuck behind a finished wait.
-          status.update_details(None);
-        }
+        self.set_collab_wait_status(None);
 
         let fingerprint = wait_end_fingerprint(e);
         if self.session.last_wait_end_fingerprint == Some(fingerprint) {
@@ -305,5 +349,100 @@ fn hash_agent_status(status: &cokra_protocol::AgentStatus, hasher: &mut DefaultH
     }
     cokra_protocol::AgentStatus::Shutdown => "Shutdown".hash(hasher),
     cokra_protocol::AgentStatus::NotFound => "NotFound".hash(hasher),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::app_event_sender::AppEventSender;
+  use crate::tui::FrameRequester;
+  use tokio::sync::mpsc::unbounded_channel;
+
+  fn make_widget() -> ChatWidget {
+    let (tx, _rx) = unbounded_channel();
+    let sender = AppEventSender::new(tx);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::AnimatedPreview,
+    );
+    widget.set_agent_turn_running(true);
+    widget
+  }
+
+  #[test]
+  fn reasoning_delta_replaces_working_header() {
+    let mut widget = make_widget();
+
+    widget.handle_notice_event(&EventMsg::AgentReasoningDelta(
+      cokra_protocol::AgentReasoningDeltaEvent {
+        delta: "**Analyzing CLI rendering** collecting context".to_string(),
+      },
+    ));
+
+    let status = widget
+      .bottom_pane
+      .status_widget()
+      .expect("status should stay visible while turn is active");
+    assert_eq!(status.header(), "Analyzing CLI rendering");
+  }
+
+  #[test]
+  fn collab_waiting_uses_live_wait_summary_and_restores_working() {
+    let mut widget = make_widget();
+
+    widget.handle_notice_event(&EventMsg::CollabWaitingBegin(
+      cokra_protocol::CollabWaitingBeginEvent {
+        sender_thread_id: "main".to_string(),
+        receiver_thread_ids: Vec::new(),
+        receiver_agents: vec![
+          cokra_protocol::CollabAgentRef {
+            thread_id: "agent-1".to_string(),
+            nickname: Some("有村架纯".to_string()),
+            role: None,
+          },
+          cokra_protocol::CollabAgentRef {
+            thread_id: "agent-2".to_string(),
+            nickname: Some("菅田将晖".to_string()),
+            role: None,
+          },
+        ],
+        call_id: "wait-1".to_string(),
+      },
+    ));
+
+    let status = widget
+      .bottom_pane
+      .status_widget()
+      .expect("status should be visible during collab wait");
+    assert_eq!(status.header(), "Waiting for 2 agents");
+    assert_eq!(
+      status.inline_message(),
+      Some("2 agents launched (/agent to expand)")
+    );
+    let details = status
+      .details()
+      .expect("multi-agent wait should show details");
+    assert!(details.contains("@有村架纯"));
+    assert!(details.contains("@菅田将晖"));
+
+    widget.handle_notice_event(&EventMsg::CollabWaitingEnd(
+      cokra_protocol::CollabWaitingEndEvent {
+        sender_thread_id: "main".to_string(),
+        call_id: "wait-1".to_string(),
+        agent_statuses: Vec::new(),
+        statuses: std::collections::HashMap::new(),
+      },
+    ));
+
+    let status = widget
+      .bottom_pane
+      .status_widget()
+      .expect("status should remain visible while turn is active");
+    assert_eq!(status.header(), "Working");
+    assert_eq!(status.inline_message(), None);
+    assert_eq!(status.details(), None);
   }
 }

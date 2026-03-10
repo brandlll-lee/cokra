@@ -4,7 +4,11 @@ use std::io::Write;
 
 use crate::wrapping::word_wrap_lines_borrowed;
 use crossterm::Command;
+use crossterm::cursor::MoveDown;
 use crossterm::cursor::MoveTo;
+use crossterm::cursor::MoveToColumn;
+use crossterm::cursor::RestorePosition;
+use crossterm::cursor::SavePosition;
 use crossterm::queue;
 use crossterm::style::Color as CColor;
 use crossterm::style::Colors;
@@ -32,16 +36,40 @@ where
   B: Backend + Write,
 {
   let screen_size = terminal.backend().size().unwrap_or(Size::new(0, 0));
+  if screen_size.height == 0 || screen_size.width == 0 || lines.is_empty() {
+    return Ok(());
+  }
 
   let mut area = terminal.viewport_area;
   let mut should_update_area = false;
   let last_cursor_pos = terminal.last_known_cursor_pos;
+  let wrap_width = area.width.max(1) as usize;
+
+  // Defensive: inserting history requires at least one row above the viewport.
+  // If the viewport reached the top (top==0), `SetScrollRegion(1..0)` would corrupt some
+  // terminals and can make the composer/input vanish.
+  //
+  // Prefer to shrink and push the viewport down by one row, rather than emitting invalid
+  // scroll region ANSI.
+  //
+  // Tradeoff: when the viewport occupies the full screen, this can clip the live UI by 1 row.
+  if area.top() == 0 && screen_size.height > 1 && area.height > 1 {
+    area.y = 1;
+    area.height = area.height.saturating_sub(1).max(1);
+    terminal.set_viewport_area(area);
+    // We already applied the area update; keep should_update_area false.
+  }
+
+  let mut area = terminal.viewport_area;
   let writer = terminal.backend_mut();
 
   // Pre-wrap lines using word-aware wrapping so terminal scrollback sees the same
   // formatting as the TUI. This avoids character-level hard wrapping by the terminal.
-  let wrapped = word_wrap_lines_borrowed(&lines, area.width.max(1) as usize);
-  let wrapped_lines = wrapped.len() as u16;
+  let wrapped = word_wrap_lines_borrowed(&lines, wrap_width);
+  let wrapped_lines = wrapped
+    .iter()
+    .map(|line| line.width().max(1).div_ceil(wrap_width))
+    .sum::<usize>() as u16;
   let cursor_top = if area.bottom() < screen_size.height {
     // If the viewport is not at the bottom of the screen, scroll it down to make room.
     // Don't scroll it past the bottom of the screen.
@@ -85,6 +113,11 @@ where
   // ││                            ││
   // │╰────────────────────────────╯│
   // └──────────────────────────────┘
+  if area.top() == 0 {
+    // No room above the viewport; nothing we can do safely.
+    // Return without emitting broken scroll regions.
+    return Ok(());
+  }
   queue!(writer, SetScrollRegion(1..area.top()))?;
 
   // NB: we are using MoveTo instead of set_cursor_position here to avoid messing with the
@@ -94,6 +127,15 @@ where
 
   for line in wrapped {
     queue!(writer, Print("\r\n"))?;
+    let physical_rows = line.width().max(1).div_ceil(wrap_width);
+    if physical_rows > 1 {
+      queue!(writer, SavePosition)?;
+      for _ in 1..physical_rows {
+        queue!(writer, MoveDown(1), MoveToColumn(0))?;
+        queue!(writer, Clear(ClearType::UntilNewLine))?;
+      }
+      queue!(writer, RestorePosition)?;
+    }
     queue!(
       writer,
       SetColors(Colors::new(
@@ -131,6 +173,9 @@ where
   let _ = writer;
   if should_update_area {
     terminal.set_viewport_area(area);
+  }
+  if wrapped_lines > 0 {
+    terminal.note_history_rows_inserted(wrapped_lines);
   }
 
   Ok(())

@@ -30,12 +30,14 @@ We are committed to providing a welcoming and inclusive environment. Please be r
 
 1. Fork the repository
 2. Clone your fork:
+
    ```bash
    git clone https://github.com/YOUR_USERNAME/cokra.git
    cd cokra
    ```
 
 3. Install dependencies:
+
    ```bash
    just install
    pnpm install
@@ -59,6 +61,7 @@ We are committed to providing a welcoming and inclusive environment. Please be r
 ### Making Changes
 
 1. Create a new branch:
+
    ```bash
    git checkout -b feat/your-feature-name
    ```
@@ -66,16 +69,19 @@ We are committed to providing a welcoming and inclusive environment. Please be r
 2. Make your changes following our [Coding Standards](#coding-standards)
 
 3. Format your code:
+
    ```bash
    just fmt
    ```
 
 4. Run linters:
+
    ```bash
    just lint
    ```
 
 5. Run tests:
+
    ```bash
    just test
    ```
@@ -143,6 +149,7 @@ We follow [Conventional Commits](https://www.conventionalcommits.org/):
 ```
 
 **Types:**
+
 - `feat` - New feature
 - `fix` - Bug fix
 - `refactor` - Code refactoring
@@ -153,6 +160,7 @@ We follow [Conventional Commits](https://www.conventionalcommits.org/):
 - `perf` - Performance improvements
 
 **Examples:**
+
 ```
 feat(cli): add interactive mode
 fix(core): resolve race condition in agent spawning
@@ -174,18 +182,22 @@ docs(readme): update installation instructions
 
 ```markdown
 ## Summary
+
 Brief description of changes
 
 ## Type of Change
+
 - [ ] Bug fix
 - [ ] New feature
 - [ ] Breaking change
 - [ ] Documentation update
 
 ## Testing
+
 How was this tested?
 
 ## Checklist
+
 - [ ] Tests pass locally
 - [ ] Documentation updated
 - [ ] No breaking changes (or documented)

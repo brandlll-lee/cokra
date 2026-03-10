@@ -802,6 +802,18 @@ impl ChatComposer {
       remote_image_urls: self.remote_image_urls.clone(),
     })
   }
+
+  pub(crate) fn has_command_popup(&self) -> bool {
+    self.command_popup.is_some()
+  }
+
+  pub(crate) fn can_focus_status_line_selector(&self) -> bool {
+    self.textarea.text().is_empty()
+      && self.local_image_attachments.is_empty()
+      && self.remote_image_urls.is_empty()
+      && self.pending_pastes.is_empty()
+      && !self.paste_burst.is_active()
+  }
 }
 
 impl Renderable for ChatComposer {

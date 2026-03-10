@@ -393,16 +393,55 @@ fn take_prefix_by_width(text: &str, max_cols: usize) -> (String, &str, usize) {
   (text[..end_idx].to_string(), &text[end_idx..], cols)
 }
 
+fn fill_user_message_bar_lines_with_gutter(
+  lines: Vec<Line<'static>>,
+  width: u16,
+  style: Style,
+  gutter: Span<'static>,
+) -> Vec<Line<'static>> {
+  use crate::bottom_pane::selection_popup_common::truncate_line_to_width;
+
+  let total_width = usize::from(width.max(1));
+  let left_pad = usize::from((width > 0) as u16);
+  let right_pad = usize::from((width > 1) as u16);
+  let gutter_width = UnicodeWidthStr::width(gutter.content.as_ref());
+  let content_width = total_width.saturating_sub(left_pad + right_pad + gutter_width);
+
+  lines
+    .into_iter()
+    .map(|mut line| {
+      line.style = style;
+      let line = truncate_line_to_width(line, content_width);
+      let line_width = line.width();
+
+      let mut spans = Vec::with_capacity(line.spans.len() + 3);
+      if left_pad > 0 {
+        spans.push(Span::styled(" ".repeat(left_pad), style));
+      }
+      spans.push(gutter.clone());
+      spans.extend(line.spans);
+
+      let trailing = content_width.saturating_sub(line_width) + right_pad;
+      if trailing > 0 {
+        spans.push(Span::styled(" ".repeat(trailing), style));
+      }
+
+      Line::from(spans).style(style)
+    })
+    .collect()
+}
+
 impl HistoryCell for UserHistoryCell {
   fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
     let style = user_message_style();
     let element_style = style.fg(Color::Cyan);
-    let use_explicit_box = style.bg.is_none();
-    let wrap_width = if use_explicit_box {
-      width.saturating_sub(4).max(1)
-    } else {
-      width.saturating_sub(3).max(1) // "› " prefix = 2 cols + 1 margin
-    };
+    let gutter_style = Style::default()
+      .add_modifier(Modifier::BOLD | Modifier::DIM)
+      .patch(style);
+    let gutter = Span::styled("> ".to_string(), gutter_style);
+    // Claude Code-style submitted messages read best as a filled bar with a `> ` gutter.
+    // Reserve: left pad (1) + gutter (2 cols) + right pad (1).
+    let wrap_width = width.saturating_sub(4).max(1);
 
     let wrapped_remote_images = if self.remote_image_urls.is_empty() {
       None
@@ -445,62 +484,17 @@ impl HistoryCell for UserHistoryCell {
       return Vec::new();
     }
 
-    if use_explicit_box {
-      // Tradeoff: when terminal default colors are unavailable, bg-only styling
-      // disappears in inline scrollback. We switch to an explicit bordered block
-      // so user-authored messages still read as isolated "bubbles".
-      let border_style = Style::default().dim();
-      let horizontal = "─".repeat(width.saturating_sub(2) as usize);
-      let mut content_lines: Vec<Line<'static>> = Vec::new();
-
-      if let Some(imgs) = wrapped_remote_images {
-        content_lines.extend(imgs);
-        if wrapped_message.is_some() {
-          content_lines.push(Line::from(""));
-        }
-      }
-
-      if let Some(msg) = wrapped_message {
-        content_lines.extend(msg);
-      }
-
-      let mut lines: Vec<Line<'static>> = vec![
-        Line::from(""),
-        Line::from(vec![
-          Span::styled("╭".to_string(), border_style),
-          Span::styled(horizontal.clone(), border_style),
-          Span::styled("╮".to_string(), border_style),
-        ]),
-      ];
-      lines.extend(prefix_lines(
-        content_lines,
-        Span::styled("│ ".to_string(), border_style),
-        Span::styled("│ ".to_string(), border_style),
-      ));
-      lines.push(Line::from(vec![
-        Span::styled("╰".to_string(), border_style),
-        Span::styled(horizontal, border_style),
-        Span::styled("╯".to_string(), border_style),
-      ]));
-      lines.push(Line::from(""));
-      return lines;
-    }
-
-    let mut lines: Vec<Line<'static>> = vec![Line::from("").style(style)];
-
+    // Compose: images first, then message text. Both are rendered as filled bars.
+    // Tradeoff: we don't attempt to "box" images differently; we reuse the same
+    // filled bar surface so the UI stays consistent across terminals.
+    let mut out: Vec<Line<'static>> = Vec::new();
     if let Some(imgs) = wrapped_remote_images {
-      lines.extend(prefix_lines(imgs, "  ".into(), "  ".into()));
-      if wrapped_message.is_some() {
-        lines.push(Line::from("").style(style));
-      }
+      out.extend(fill_user_message_bar_lines_with_gutter(imgs, width, style, gutter.clone()));
     }
-
     if let Some(msg) = wrapped_message {
-      lines.extend(prefix_lines(msg, "› ".bold().dim(), "  ".into()));
+      out.extend(fill_user_message_bar_lines_with_gutter(msg, width, style, gutter));
     }
-
-    lines.push(Line::from("").style(style));
-    lines
+    out
   }
 
   fn desired_height(&self, width: u16) -> u16 {
@@ -581,35 +575,71 @@ impl SessionHeaderHistoryCell {
       cwd,
     }
   }
+
+  fn display_lines_with_left_pad(
+    &self,
+    width: usize,
+    left_pad: &'static str,
+  ) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let top_prefix = format!("{left_pad}┌─ cokra ─ ");
+    // Tradeoff: on narrow terminals we wrap metadata instead of truncating it so the
+    // full startup/session context remains recoverable in scrollback.
+    lines.extend(wrap_with_prefix(
+      &self.model,
+      width,
+      Span::styled(top_prefix, Style::default().add_modifier(Modifier::DIM)),
+      Span::styled(
+        format!("{left_pad}│           "),
+        Style::default().add_modifier(Modifier::DIM),
+      ),
+      Style::default(),
+    ));
+    lines.extend(wrap_with_prefix(
+      &format!(
+        "sandbox: {} │ approval: {}",
+        self.sandbox_mode, self.approval_policy
+      ),
+      width,
+      Span::styled(
+        format!("{left_pad}│  "),
+        Style::default().add_modifier(Modifier::DIM),
+      ),
+      Span::styled(
+        format!("{left_pad}│  "),
+        Style::default().add_modifier(Modifier::DIM),
+      ),
+      Style::default().add_modifier(Modifier::DIM),
+    ));
+
+    if let Some(cwd) = &self.cwd {
+      lines.extend(wrap_with_prefix(
+        &format!("cwd: {cwd}"),
+        width,
+        Span::styled(
+          format!("{left_pad}│  "),
+          Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::styled(
+          format!("{left_pad}│  "),
+          Style::default().add_modifier(Modifier::DIM),
+        ),
+        Style::default().add_modifier(Modifier::DIM),
+      ));
+    }
+
+    lines.push(Line::from(vec![
+      Span::styled(left_pad.to_string(), Style::default()),
+      "└──".dim(),
+    ]));
+    lines
+  }
 }
 
 impl HistoryCell for SessionHeaderHistoryCell {
-  fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    lines.push(Line::from(vec![
-      "┌─ ".dim(),
-      "cokra".bold(),
-      " ─ ".dim(),
-      self.model.clone().into(),
-    ]));
-    lines.push(Line::from(vec![
-      "│  ".dim(),
-      "sandbox: ".dim(),
-      self.sandbox_mode.clone().into(),
-      " │ approval: ".dim(),
-      self.approval_policy.clone().into(),
-    ]));
-
-    if let Some(cwd) = &self.cwd {
-      lines.push(Line::from(vec![
-        "│  ".dim(),
-        "cwd: ".dim(),
-        cwd.clone().into(),
-      ]));
-    }
-
-    lines.push(Line::from("└──".dim()));
-    lines
+  fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    self.display_lines_with_left_pad(width.max(1) as usize, "")
   }
 }
 
@@ -623,6 +653,153 @@ pub(crate) fn new_session_info(
   SessionInfoCell(CompositeHistoryCell::new(vec![Box::new(
     SessionHeaderHistoryCell::new(model, approval_policy, sandbox_mode, cwd),
   )]))
+}
+
+#[derive(Debug)]
+pub(crate) struct WelcomeHistoryCell {
+  model: String,
+  approval_policy: String,
+  sandbox_mode: String,
+}
+
+impl WelcomeHistoryCell {
+  pub(crate) fn new(model: String, approval_policy: String, sandbox_mode: String) -> Self {
+    Self {
+      model,
+      approval_policy,
+      sandbox_mode,
+    }
+  }
+}
+
+impl HistoryCell for WelcomeHistoryCell {
+  fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    let width = width.max(1) as usize;
+    let mut lines = vec![Line::from("")];
+
+    // Tradeoff: keep the ASCII logo as fixed rows; wrapping it would destroy the glyph geometry.
+    for line in [
+      "░█▀▀░█▀█░█░█░█▀▄░█▀█",
+      "░█░░░█░█░█▀▄░█▀▄░█▀█",
+      "░▀▀▀░▀▀▀░▀░▀░▀░▀░▀░▀",
+    ] {
+      lines.push(Line::from(vec!["  ".into(), line.white().bold()]));
+    }
+
+    lines.push(Line::from(""));
+    lines.extend(wrap_with_prefix(
+      "Welcome to Cokra, AI Agent Team CLI Environment",
+      width,
+      "  ".into(),
+      "  ".into(),
+      Style::default(),
+    ));
+    lines.push(Line::from(""));
+    lines.extend(
+      SessionHeaderHistoryCell::new(
+        self.model.clone(),
+        self.approval_policy.clone(),
+        self.sandbox_mode.clone(),
+        None,
+      )
+      .display_lines_with_left_pad(width, "  "),
+    );
+    lines.push(Line::from(""));
+    lines.extend(wrap_with_prefix(
+      "To get started, describe a task or try one of these commands:",
+      width,
+      "  ".into(),
+      "  ".into(),
+      Style::default(),
+    ));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+      "  ".into(),
+      "/help".bold(),
+      " - show available commands".into(),
+    ]));
+    lines.push(Line::from(vec![
+      "  ".into(),
+      "/model".bold(),
+      " - choose model and reasoning effort".into(),
+    ]));
+    lines.push(Line::from(vec![
+      "  ".into(),
+      "/status".bold(),
+      " - show current session configuration".into(),
+    ]));
+
+    trim_trailing_blank_lines(lines)
+  }
+}
+
+#[derive(Debug)]
+pub(crate) struct CollabWaitStatusTreeEntry {
+  pub(crate) label: Line<'static>,
+  pub(crate) summary: Line<'static>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CollabWaitStatusTreeCell {
+  entries: Vec<CollabWaitStatusTreeEntry>,
+}
+
+impl CollabWaitStatusTreeCell {
+  pub(crate) fn new(entries: Vec<CollabWaitStatusTreeEntry>) -> Self {
+    Self { entries }
+  }
+}
+
+impl HistoryCell for CollabWaitStatusTreeCell {
+  fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    let width = width.max(1) as usize;
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut lines = vec![Line::from(vec![
+      Span::styled("● ".to_string(), dim),
+      Span::styled("Finished waiting".to_string(), bold),
+    ])];
+
+    if self.entries.is_empty() {
+      lines.extend(prefix_lines(
+        vec![Line::from(Span::styled(
+          "No completed statuses yet".to_string(),
+          dim,
+        ))],
+        Span::styled("   └─ ".to_string(), dim),
+        Span::styled("      ".to_string(), dim),
+      ));
+      return lines;
+    }
+
+    for (idx, entry) in self.entries.iter().enumerate() {
+      let is_last = idx + 1 == self.entries.len();
+      let branch_prefix = if is_last { "   └─ " } else { "   ├─ " };
+      let child_initial = if is_last {
+        "      ⎿ "
+      } else {
+        "   │  ⎿ "
+      };
+      let child_continuation = if is_last { "         " } else { "   │    " };
+
+      lines.extend(prefix_lines(
+        vec![entry.label.clone()],
+        Span::styled(branch_prefix.to_string(), dim),
+        Span::styled(branch_prefix.to_string(), dim),
+      ));
+      lines.extend(word_wrap_lines(
+        vec![entry.summary.clone()],
+        RtOptions::new(width)
+          .initial_indent(Line::from(Span::styled(child_initial.to_string(), dim)))
+          .subsequent_indent(Line::from(Span::styled(
+            child_continuation.to_string(),
+            dim,
+          ))),
+      ));
+    }
+
+    lines
+  }
 }
 
 #[derive(Debug)]
@@ -884,6 +1061,39 @@ mod tests {
   }
 
   #[test]
+  fn session_header_wraps_metadata_on_narrow_width() {
+    let cell = SessionHeaderHistoryCell::new(
+      "openrouter/anthropic/claude-haiku-4.5".to_string(),
+      "Ask".to_string(),
+      "workspace-write".to_string(),
+      Some("/tmp/project".to_string()),
+    );
+
+    let rendered = lines_to_string(&cell.display_lines(24));
+    assert!(rendered.contains("openrouter/"));
+    assert!(rendered.contains("anthropic/"));
+    assert!(rendered.contains("claude-"));
+    assert!(rendered.contains("sandbox:"));
+    assert!(rendered.contains("approval:"));
+    assert!(rendered.contains("cwd: /tmp/project"));
+  }
+
+  #[test]
+  fn welcome_history_cell_renders_logo_and_commands() {
+    let cell = WelcomeHistoryCell::new(
+      "openai/gpt-5".to_string(),
+      "Ask".to_string(),
+      "workspace-write".to_string(),
+    );
+
+    let rendered = lines_to_string(&cell.display_lines(80));
+    assert!(rendered.contains("░█▀▀░█▀█░█░█░█▀▄░█▀█"));
+    assert!(rendered.contains("Welcome to Cokra"));
+    assert!(rendered.contains("┌─ cokra ─ openai/gpt-5"));
+    assert!(rendered.contains("/help - show available commands"));
+  }
+
+  #[test]
   fn request_user_input_result_cell_renders_answers_and_note() {
     let cell = RequestUserInputResultCell {
       questions: vec![
@@ -960,24 +1170,15 @@ mod tests {
   }
 
   #[test]
-  fn user_history_cell_adds_visual_spacing_block() {
+  fn user_history_cell_renders_as_box_or_filled_bar() {
     let cell = UserHistoryCell::from_text("hello world".to_string());
     let lines = cell.display_lines(80);
     let rendered = lines_to_string(&lines);
 
-    assert!(lines.len() >= 3);
-    assert!(
-      lines
-        .first()
-        .is_some_and(|line| line.spans.iter().all(|span| span.content.is_empty()))
-    );
+    assert!(!lines.is_empty());
     assert!(rendered.contains("hello world"));
-    assert!(rendered.contains("╭") || rendered.contains("› hello world"));
-    assert!(
-      lines
-        .last()
-        .is_some_and(|line| line.spans.iter().all(|span| span.content.is_empty()))
-    );
+    // Explicit box mode uses borders; filled bar mode uses a `> ` gutter.
+    assert!(rendered.contains("╭") || rendered.contains("> hello world"));
   }
 
   #[test]
@@ -985,8 +1186,26 @@ mod tests {
     let cell = UserHistoryCell::from_text("boxed inline message".to_string());
     let rendered = lines_to_string(&cell.display_lines(80));
 
-    assert!(rendered.contains("╭"));
-    assert!(rendered.contains("╰"));
-    assert!(rendered.contains("boxed inline message"));
+    // Even when the terminal background can't be detected, user messages still
+    // render as a Claude Code-style `> ` bar (fallback bg tint is used).
+    assert!(rendered.contains("> boxed inline message"));
+  }
+
+  #[test]
+  fn user_message_bar_lines_fill_available_width_with_gutter() {
+    let style = Style::default().bg(Color::DarkGray);
+    let gutter_style = Style::default().add_modifier(Modifier::BOLD | Modifier::DIM).patch(style);
+    let lines = fill_user_message_bar_lines_with_gutter(
+      vec![Line::from("hello world")],
+      16,
+      style,
+      Span::styled("> ".to_string(), gutter_style),
+    );
+
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].width(), 16);
+    let rendered = lines_to_string(&lines);
+    assert!(rendered.starts_with(" > "));
+    assert!(rendered.contains("hello world"));
   }
 }

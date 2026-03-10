@@ -18,7 +18,10 @@ use cokra_protocol::CollabWaitingBeginEvent;
 use cokra_protocol::CollabWaitingEndEvent;
 use cokra_protocol::TeamMember;
 
+use crate::history_cell::CollabWaitStatusTreeCell;
+use crate::history_cell::CollabWaitStatusTreeEntry;
 use crate::history_cell::PlainHistoryCell;
+use crate::terminal_palette::light_blue;
 
 const PROMPT_PREVIEW_CHARS: usize = 120;
 const STATUS_PREVIEW_CHARS: usize = 160;
@@ -36,11 +39,11 @@ pub(crate) fn waiting_preview(ev: &CollabWaitingBeginEvent) -> WaitingPreview {
 
   let summary = match receivers.as_slice() {
     [receiver] => format!(
-      "等待 {}",
+      "Waiting for {}",
       agent_label_display(agent_label_from_ref(receiver))
     ),
-    [] => "等待队友完成".to_string(),
-    _ => format!("等待 {} 个队友完成", receivers.len()),
+    [] => "Waiting for agents".to_string(),
+    _ => format!("Waiting for {} agents", receivers.len()),
   };
 
   let details = if receivers.len() > 1 {
@@ -124,7 +127,7 @@ pub(crate) fn sort_agent_picker_threads(
 
 pub(crate) fn spawn_end(ev: CollabAgentSpawnEndEvent) -> PlainHistoryCell {
   let title = title_with_agent(
-    "已启动",
+    "Spawned",
     AgentLabel {
       thread_id: &ev.agent_id,
       nickname: ev.nickname.as_deref(),
@@ -145,7 +148,7 @@ pub(crate) fn spawn_end(ev: CollabAgentSpawnEndEvent) -> PlainHistoryCell {
 
 pub(crate) fn interaction_end(ev: CollabAgentInteractionEndEvent) -> PlainHistoryCell {
   let title = title_with_agent(
-    "已发送消息给",
+    "Sent input to",
     AgentLabel {
       thread_id: &ev.agent_id,
       nickname: ev.nickname.as_deref(),
@@ -164,9 +167,9 @@ pub(crate) fn interaction_end(ev: CollabAgentInteractionEndEvent) -> PlainHistor
 pub(crate) fn waiting_begin(ev: CollabWaitingBeginEvent) -> PlainHistoryCell {
   let receivers = merge_wait_receivers(&ev.receiver_thread_ids, ev.receiver_agents);
   let title = match receivers.as_slice() {
-    [receiver] => title_with_agent("等待", agent_label_from_ref(receiver)),
-    [] => title_text("等待队友完成"),
-    _ => title_text(format!("等待 {} 个队友完成", receivers.len())),
+    [receiver] => title_with_agent("Waiting for", agent_label_from_ref(receiver)),
+    [] => title_text("Waiting for agents"),
+    _ => title_text(format!("Waiting for {} agents", receivers.len())),
   };
 
   let details = if receivers.len() > 1 {
@@ -181,14 +184,13 @@ pub(crate) fn waiting_begin(ev: CollabWaitingBeginEvent) -> PlainHistoryCell {
   collab_event(title, details)
 }
 
-pub(crate) fn waiting_end(ev: CollabWaitingEndEvent) -> PlainHistoryCell {
-  let details = wait_complete_lines(&ev.statuses, &ev.agent_statuses);
-  collab_event(title_text("等待结束"), details)
+pub(crate) fn waiting_end(ev: CollabWaitingEndEvent) -> CollabWaitStatusTreeCell {
+  CollabWaitStatusTreeCell::new(wait_complete_entries(&ev.statuses, &ev.agent_statuses))
 }
 
 pub(crate) fn close_end(ev: CollabCloseEndEvent) -> PlainHistoryCell {
   let title = title_with_agent(
-    "已关闭",
+    "Closed",
     AgentLabel {
       thread_id: &ev.receiver_thread_id,
       nickname: ev.receiver_nickname.as_deref(),
@@ -199,7 +201,7 @@ pub(crate) fn close_end(ev: CollabCloseEndEvent) -> PlainHistoryCell {
 }
 
 pub(crate) fn message_posted(ev: CollabMessagePostedEvent) -> PlainHistoryCell {
-  let title = title_text("团队消息");
+  let title = title_text("Team message");
   let sender = agent_label_line(AgentLabel {
     thread_id: &ev.sender_thread_id,
     nickname: ev.sender_nickname.as_deref(),
@@ -215,7 +217,7 @@ pub(crate) fn message_posted(ev: CollabMessagePostedEvent) -> PlainHistoryCell {
         role: ev.recipient_role.as_deref(),
       })
     })
-    .unwrap_or_else(|| Line::from("全队"));
+    .unwrap_or_else(|| Line::from("Entire team"));
   let mut details = vec![message_flow_line(sender, recipient)];
   if let Some(line) = preview_line(&ev.message, PROMPT_PREVIEW_CHARS) {
     details.push(line);
@@ -230,13 +232,13 @@ pub(crate) fn messages_read(ev: CollabMessagesReadEvent) -> PlainHistoryCell {
     role: ev.reader_role.as_deref(),
   });
   collab_event(
-    title_text("已读取团队消息"),
+    title_text("Team messages read"),
     vec![read_summary_line(reader, ev.count)],
   )
 }
 
 pub(crate) fn task_updated(ev: CollabTaskUpdatedEvent) -> PlainHistoryCell {
-  let title = title_text("团队任务更新");
+  let title = title_text("Team task updated");
   let assignee = ev
     .task
     .assignee_thread_id
@@ -298,7 +300,7 @@ pub(crate) fn team_snapshot(ev: CollabTeamSnapshotEvent) -> PlainHistoryCell {
     .count();
 
   details.push(Line::from(format!(
-    "负责人 @main • {} 个队友 • {} 个任务 • {} 个计划",
+    "Owner @main • {} teammates • {} tasks • {} plans",
     teammate_count,
     ev.snapshot.tasks.len(),
     ev.snapshot.plans.len(),
@@ -316,7 +318,7 @@ pub(crate) fn team_snapshot(ev: CollabTeamSnapshotEvent) -> PlainHistoryCell {
   }
 
   if teammate_count == 0 {
-    details.push(Line::from("暂无队友".dim()));
+    details.push(Line::from("No teammates yet".dim()));
   }
 
   if !unread_members.is_empty() {
@@ -327,7 +329,9 @@ pub(crate) fn team_snapshot(ev: CollabTeamSnapshotEvent) -> PlainHistoryCell {
   }
 
   if pending_plan_count > 0 {
-    details.push(Line::from(format!("待评审计划 {} 条", pending_plan_count)));
+    details.push(Line::from(format!(
+      "{pending_plan_count} plan(s) pending review"
+    )));
   }
 
   if !ev.snapshot.tasks.is_empty() {
@@ -335,30 +339,30 @@ pub(crate) fn team_snapshot(ev: CollabTeamSnapshotEvent) -> PlainHistoryCell {
     // TeamState 会跨会话持久化，渲染层缺少可靠的会话边界信息；直接折叠能稳定隔离历史遗留任务，
     // 避免主 leader 面板再次被旧任务和底层状态淹没。
     details.push(Line::from(format!(
-      "任务板已折叠 {} 条（默认隐藏历史/背景任务）",
+      "{0} task(s) collapsed by default (historical/background tasks hidden)",
       ev.snapshot.tasks.len()
     )));
   }
 
-  collab_event(title_text("团队状态"), details)
+  collab_event(title_text("Team status"), details)
 }
 
 pub(crate) fn plan_submitted(ev: CollabPlanSubmittedEvent) -> PlainHistoryCell {
-  let title = title_text("团队计划已提交");
+  let title = title_text("Team plan submitted");
   let details = vec![
-    Line::from(format!("作者 {}", short_thread_id(&ev.actor_thread_id))),
+    Line::from(format!("Author {}", short_thread_id(&ev.actor_thread_id))),
     Line::from(normalize_preview(&ev.plan.summary, TASK_PREVIEW_CHARS)),
-    Line::from(format!("状态 {}", short_plan_status(&ev.plan.status))),
+    Line::from(format!("Status {}", short_plan_status(&ev.plan.status))),
   ];
   collab_event(title, details)
 }
 
 pub(crate) fn plan_decision(ev: CollabPlanDecisionEvent) -> PlainHistoryCell {
-  let title = title_text("团队计划已评审");
+  let title = title_text("Team plan reviewed");
   let details = vec![
-    Line::from(format!("评审者 {}", short_thread_id(&ev.actor_thread_id))),
+    Line::from(format!("Reviewer {}", short_thread_id(&ev.actor_thread_id))),
     Line::from(normalize_preview(&ev.plan.summary, TASK_PREVIEW_CHARS)),
-    Line::from(format!("状态 {}", short_plan_status(&ev.plan.status))),
+    Line::from(format!("Status {}", short_plan_status(&ev.plan.status))),
   ];
   collab_event(title, details)
 }
@@ -392,9 +396,9 @@ fn message_flow_line(sender: Line<'static>, recipient: Line<'static>) -> Line<'s
 
 fn read_summary_line(reader: Line<'static>, count: usize) -> Line<'static> {
   let mut spans = reader.spans;
-  spans.push(Span::from(" 已读取 ").dim());
+  spans.push(Span::from(" read ").dim());
   spans.push(Span::from(format!("{count}")));
-  spans.push(Span::from(" 条团队消息").dim());
+  spans.push(Span::from(" team message(s)").dim());
   Line::from(spans)
 }
 
@@ -402,17 +406,17 @@ fn unread_summary_line(
   root_thread_id: &str,
   unread_members: &[(&TeamMember, usize)],
 ) -> Line<'static> {
-  let mut spans = vec![Span::from("未读: ").dim()];
+  let mut spans = vec![Span::from("Unread: ").dim()];
   let mut first = true;
   for (member, unread) in unread_members {
     if !first {
-      spans.push(Span::from("，").dim());
+      spans.push(Span::from(", ").dim());
     }
     first = false;
     spans.extend(team_member_label_spans(member, root_thread_id));
     spans.push(Span::from(" ").dim());
     spans.push(Span::from(format!("{unread}")));
-    spans.push(Span::from(" 条").dim());
+    spans.push(Span::from(" msg").dim());
   }
   Line::from(spans)
 }
@@ -471,9 +475,13 @@ fn agent_label_spans(agent: AgentLabel<'_>) -> Vec<Span<'static>> {
     .map(str::trim)
     .filter(|value| !value.is_empty())
   {
-    spans.push(Span::from(format!("@{nickname}")).cyan().bold());
+    spans.push(
+      Span::from(format!("@{nickname}"))
+        .style(light_blue())
+        .bold(),
+    );
   } else {
-    spans.push(Span::from(format!("@{}", short_thread_id(agent.thread_id))).cyan());
+    spans.push(Span::from(format!("@{}", short_thread_id(agent.thread_id))).style(light_blue()));
   }
 
   if let Some(role) = agent.role.map(str::trim).filter(|value| {
@@ -508,12 +516,12 @@ fn merge_wait_receivers(
   receiver_agents
 }
 
-fn wait_complete_lines(
+fn wait_complete_entries(
   statuses: &std::collections::HashMap<String, AgentStatus>,
   agent_statuses: &[CollabAgentStatusEntry],
-) -> Vec<Line<'static>> {
+) -> Vec<CollabWaitStatusTreeEntry> {
   if statuses.is_empty() && agent_statuses.is_empty() {
-    return vec![Line::from("暂无完成状态".dim())];
+    return Vec::new();
   }
 
   let entries = if agent_statuses.is_empty() {
@@ -536,15 +544,13 @@ fn wait_complete_lines(
 
   entries
     .into_iter()
-    .map(|entry| {
-      let mut spans = agent_label_spans(AgentLabel {
+    .map(|entry| CollabWaitStatusTreeEntry {
+      label: agent_label_line(AgentLabel {
         thread_id: &entry.thread_id,
         nickname: entry.nickname.as_deref(),
         role: entry.role.as_deref(),
-      });
-      spans.push(Span::from(": ").dim());
-      spans.extend(status_summary_spans(&entry.status));
-      Line::from(spans)
+      }),
+      summary: status_summary_line(&entry.status),
     })
     .collect()
 }
@@ -555,10 +561,10 @@ fn status_summary_line(status: &AgentStatus) -> Line<'static> {
 
 fn status_summary_spans(status: &AgentStatus) -> Vec<Span<'static>> {
   match status {
-    AgentStatus::PendingInit => vec![Span::from("等待初始化").cyan()],
-    AgentStatus::Running => vec![Span::from("进行中").yellow().bold()],
+    AgentStatus::PendingInit => vec![Span::from("Pending init").style(light_blue())],
+    AgentStatus::Running => vec![Span::from("Running").yellow().bold()],
     AgentStatus::Completed(message) => {
-      let mut spans = vec![Span::from("已完成").green()];
+      let mut spans = vec![Span::from("Completed").green()];
       if let Some(message) = message
         .as_deref()
         .map(|value| normalize_preview(value, STATUS_PREVIEW_CHARS))
@@ -570,12 +576,12 @@ fn status_summary_spans(status: &AgentStatus) -> Vec<Span<'static>> {
       spans
     }
     AgentStatus::Errored(message) => vec![
-      Span::from("失败").red(),
+      Span::from("Errored").red(),
       Span::from(" · ").dim(),
       Span::from(normalize_preview(message, STATUS_PREVIEW_CHARS)),
     ],
-    AgentStatus::Shutdown => vec![Span::from("已关闭").dim()],
-    AgentStatus::NotFound => vec![Span::from("未找到").red()],
+    AgentStatus::Shutdown => vec![Span::from("Closed").dim()],
+    AgentStatus::NotFound => vec![Span::from("Not found").red()],
   }
 }
 
@@ -591,7 +597,7 @@ fn member_status_line(
   let unread = unread_counts.get(&member.thread_id).copied().unwrap_or(0);
   if unread > 0 {
     spans.push(Span::from(" · ").dim());
-    spans.push(Span::from(format!("{unread} 未读")));
+    spans.push(Span::from(format!("{unread} unread")));
   }
 
   Line::from(spans)
@@ -599,7 +605,7 @@ fn member_status_line(
 
 fn team_member_label_spans(member: &TeamMember, root_thread_id: &str) -> Vec<Span<'static>> {
   if member.thread_id == root_thread_id {
-    return vec![Span::from("@main").cyan().bold()];
+    return vec![Span::from("@main").style(light_blue()).bold()];
   }
 
   agent_label_spans(AgentLabel {
@@ -613,12 +619,12 @@ fn status_task_line(status: &cokra_protocol::TeamTaskStatus) -> Line<'static> {
   let span = match status {
     cokra_protocol::TeamTaskStatus::Pending => Span::from("pending").dim(),
     cokra_protocol::TeamTaskStatus::InProgress => Span::from("in_progress").yellow(),
-    cokra_protocol::TeamTaskStatus::Review => Span::from("review").cyan(),
+    cokra_protocol::TeamTaskStatus::Review => Span::from("review").style(light_blue()),
     cokra_protocol::TeamTaskStatus::Completed => Span::from("completed").green(),
     cokra_protocol::TeamTaskStatus::Failed => Span::from("failed").red(),
     cokra_protocol::TeamTaskStatus::Canceled => Span::from("canceled").dim(),
   };
-  Line::from(vec!["状态 ".dim(), span])
+  Line::from(vec!["Status ".dim(), span])
 }
 
 fn short_plan_status(status: &cokra_protocol::TeamPlanStatus) -> &'static str {
@@ -661,11 +667,14 @@ fn short_thread_id(thread_id: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::history_cell::HistoryCell;
   use std::collections::HashMap;
 
+  use cokra_protocol::CollabAgentStatusEntry;
   use cokra_protocol::CollabMessagePostedEvent;
   use cokra_protocol::CollabMessagesReadEvent;
   use cokra_protocol::CollabTeamSnapshotEvent;
+  use cokra_protocol::CollabWaitingEndEvent;
   use cokra_protocol::TeamPlan;
   use cokra_protocol::TeamPlanStatus;
   use cokra_protocol::TeamSnapshot;
@@ -724,7 +733,7 @@ mod tests {
             role: "default".to_string(),
             task: "你是团队成员“六雀”。请从测试工具链角度继续深入分析。".to_string(),
             depth: 1,
-            status: AgentStatus::Completed(Some("已完成调研总结".to_string())),
+            status: AgentStatus::Completed(Some("Research summary completed".to_string())),
           },
         ],
         tasks: vec![
@@ -782,12 +791,12 @@ mod tests {
       .collect::<Vec<_>>()
       .join("\n");
 
-    assert!(rendered.contains("负责人 @main • 2 个队友 • 2 个任务 • 1 个计划"));
-    assert!(rendered.contains("@艾许: 进行中 · 1 未读"));
-    assert!(rendered.contains("@六雀: 已完成"));
-    assert!(rendered.contains("未读: @艾许 1 条"));
-    assert!(rendered.contains("待评审计划 1 条"));
-    assert!(rendered.contains("任务板已折叠 2 条"));
+    assert!(rendered.contains("Owner @main • 2 teammates • 2 tasks • 1 plans"));
+    assert!(rendered.contains("@艾许: Running · 1 unread"));
+    assert!(rendered.contains("@六雀: Completed"));
+    assert!(rendered.contains("Unread: @艾许 1 msg"));
+    assert!(rendered.contains("1 plan(s) pending review"));
+    assert!(rendered.contains("2 task(s) collapsed by default"));
     assert!(!rendered.contains("root session"));
     assert!(!rendered.contains("你是团队成员"));
     assert!(!rendered.contains("Project Exploration - Core"));
@@ -815,7 +824,7 @@ mod tests {
       .collect::<Vec<_>>()
       .join("\n");
 
-    assert!(rendered.contains("@main 已读取 1 条团队消息"));
+    assert!(rendered.contains("@main read 1 team message(s)"));
     assert!(!rendered.contains("943efa71"));
   }
 
@@ -847,5 +856,50 @@ mod tests {
     assert!(rendered.contains("@main -> @六雀"));
     assert!(!rendered.contains("root-thread"));
     assert!(!rendered.contains("sparrow-thread"));
+  }
+
+  #[test]
+  fn waiting_end_renders_member_statuses_as_tree() {
+    let cell = waiting_end(CollabWaitingEndEvent {
+      sender_thread_id: "root-thread".to_string(),
+      call_id: "call-1".to_string(),
+      statuses: HashMap::new(),
+      agent_statuses: vec![
+        CollabAgentStatusEntry {
+          thread_id: "kasumi-thread".to_string(),
+          nickname: Some("有村架纯".to_string()),
+          role: Some("default".to_string()),
+          status: AgentStatus::Completed(Some(
+            "哎哎哎——菅田くん，等一下！让我来一条一条给你整理一下！".to_string(),
+          )),
+        },
+        CollabAgentStatusEntry {
+          thread_id: "masaki-thread".to_string(),
+          nickname: Some("菅田将晖".to_string()),
+          role: Some("default".to_string()),
+          status: AgentStatus::Completed(Some(
+            "哈，架纯你说的也不是没道理……但等等，我有话说。".to_string(),
+          )),
+        },
+      ],
+    });
+
+    let rendered = HistoryCell::display_lines(&cell, 52)
+      .iter()
+      .map(|line| {
+        line
+          .spans
+          .iter()
+          .map(|span| span.content.as_ref())
+          .collect::<String>()
+      })
+      .collect::<Vec<_>>()
+      .join("\n");
+
+    assert!(rendered.contains("● Finished waiting"));
+    assert!(rendered.contains("├─ @有村架纯"));
+    assert!(rendered.contains("│  ⎿ Completed"));
+    assert!(rendered.contains("└─ @菅田将晖"));
+    assert!(rendered.contains("⎿ Completed"));
   }
 }

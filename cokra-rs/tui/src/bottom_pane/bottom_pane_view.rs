@@ -7,9 +7,19 @@
 use crossterm::event::KeyEvent;
 
 use crate::render::renderable::Renderable;
+use crate::tui::InlineViewportSizing;
 
 /// 1:1 codex: trait implemented by every view shown in the bottom pane.
 pub(crate) trait BottomPaneView: Renderable {
+  /// Controls how inline-mode viewport sizing behaves while this view is active.
+  ///
+  /// Dialog-style views should preserve visible history so resize redraws do not
+  /// push the dialog itself into scrollback. Larger list-style overlays may opt
+  /// into overlay expansion explicitly.
+  fn inline_viewport_sizing(&self) -> InlineViewportSizing {
+    InlineViewportSizing::PreserveVisibleHistory
+  }
+
   /// Handle a key event while the view is active.
   fn handle_key_event(&mut self, _key_event: KeyEvent) {}
 

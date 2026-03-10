@@ -9,24 +9,7 @@ use crate::history_cell::ExecHistoryCell;
 
 impl ChatWidget {
   fn sync_exec_status_indicator(&mut self) {
-    let Some(status) = self.bottom_pane.status_widget_mut() else {
-      return;
-    };
-
-    let active_exec_call = self
-      .transcript
-      .active_cell
-      .as_ref()
-      .and_then(|cell| cell.as_any().downcast_ref::<ExecCell>())
-      .and_then(ExecCell::active_call);
-
-    if let Some(call) = active_exec_call {
-      status.update_header(format!("Running {}", call.tool_name));
-      status.update_details(Some(call.command.clone()));
-    } else if self.session.agent_turn_running {
-      status.update_header("Working".to_string());
-      status.update_details(None);
-    }
+    self.sync_status_indicator();
   }
 
   pub(super) fn on_exec_command_begin(&mut self, event: &cokra_protocol::ExecCommandBeginEvent) {
@@ -118,7 +101,22 @@ impl ChatWidget {
 
     let mut output = call.output.unwrap_or_default();
     if !event.output.is_empty() {
-      output.output.push_str(&event.output);
+      // Some producers stream output via deltas and then send a final end event
+      // containing the full output snapshot. If we blindly append, we can duplicate
+      // huge logs and make the UI unreadable.
+      //
+      // Heuristic: if the end payload is a full snapshot and starts with what we
+      // already accumulated, replace instead of appending.
+      // Tradeoff: this assumes snapshot outputs are prefix-preserving; if a runtime
+      // sends a different kind of "end output", we fall back to append.
+      if !output.output.is_empty()
+        && event.output.len() > output.output.len()
+        && event.output.starts_with(&output.output)
+      {
+        output.output = event.output.clone();
+      } else {
+        output.output.push_str(&event.output);
+      }
     }
     output.exit_code = event.exit_code;
 
@@ -168,7 +166,12 @@ mod tests {
   fn make_widget() -> ChatWidget {
     let (tx, _rx) = unbounded_channel();
     let sender = AppEventSender::new(tx);
-    let mut widget = ChatWidget::new(sender, FrameRequester::test_dummy(), false);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::AnimatedPreview,
+    );
     widget.set_agent_turn_running(true);
     widget
   }
@@ -195,6 +198,15 @@ mod tests {
       command_id: command_id.to_string(),
       exit_code: 0,
       output: String::new(),
+    }
+  }
+
+  fn delta_event(command_id: &str, output: &str) -> cokra_protocol::ExecCommandOutputDeltaEvent {
+    cokra_protocol::ExecCommandOutputDeltaEvent {
+      thread_id: "thread-1".to_string(),
+      turn_id: "turn-1".to_string(),
+      command_id: command_id.to_string(),
+      output: output.to_string(),
     }
   }
 
@@ -227,5 +239,60 @@ mod tests {
       .expect("status should remain visible while turn is active");
     assert_eq!(status.header(), "Running list_dir");
     assert_eq!(status.details(), Some("List_dir"));
+  }
+
+  #[test]
+  fn exec_end_does_not_duplicate_output_when_end_contains_full_snapshot() {
+    let mut widget = make_widget();
+
+    widget.on_exec_command_begin(&begin_event("call-1", "read_file", "read_file"));
+    widget.on_exec_command_output_delta(&delta_event("call-1", "a\n"));
+
+    // Simulate a producer that sends deltas and then includes the full snapshot in the end event.
+    let end = cokra_protocol::ExecCommandEndEvent {
+      thread_id: "thread-1".to_string(),
+      turn_id: "turn-1".to_string(),
+      command_id: "call-1".to_string(),
+      exit_code: 0,
+      output: "a\nb\n".to_string(),
+    };
+    widget.on_exec_command_end(&end);
+
+    let cell = widget
+      .transcript
+      .active_cell
+      .as_ref()
+      .and_then(|c| c.as_any().downcast_ref::<ExecCell>())
+      .expect("expected active exec cell");
+    let call = cell.calls.first().expect("call");
+    let out = call.output.as_ref().expect("output");
+    assert_eq!(out.output, "a\nb\n");
+  }
+
+  #[test]
+  fn exec_end_restores_reasoning_header_when_available() {
+    let mut widget = make_widget();
+
+    widget.handle_notice_event(&EventMsg::AgentReasoningDelta(
+      cokra_protocol::AgentReasoningDeltaEvent {
+        delta: "**Investigating rendering code** gathering files".to_string(),
+      },
+    ));
+    widget.on_exec_command_begin(&begin_event("call-1", "read_file", "read_file"));
+
+    let status = widget
+      .bottom_pane
+      .status_widget()
+      .expect("status should stay visible while exec runs");
+    assert_eq!(status.header(), "Running read_file");
+
+    widget.on_exec_command_end(&end_event("call-1"));
+
+    let status = widget
+      .bottom_pane
+      .status_widget()
+      .expect("status should remain visible while turn is active");
+    assert_eq!(status.header(), "Investigating rendering code");
+    assert_eq!(status.details(), None);
   }
 }

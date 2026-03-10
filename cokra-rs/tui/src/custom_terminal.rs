@@ -106,6 +106,8 @@ where
   /// Last known position of the cursor. Used to find the new area when the viewport is inlined
   /// and the terminal resized.
   pub last_known_cursor_pos: Position,
+  /// Count of visible history rows rendered above the viewport in inline mode.
+  visible_history_rows: u16,
 }
 
 impl<B> Drop for Terminal<B>
@@ -143,9 +145,12 @@ where
       buffers: [Buffer::empty(Rect::ZERO), Buffer::empty(Rect::ZERO)],
       current: 0,
       hidden_cursor: false,
-      viewport_area: Rect::new(0, cursor_pos.y, 0, 0),
+      // Inline mode should behave like a native terminal: the TUI starts on the
+      // line after the shell prompt, not on top of the prompt's own row.
+      viewport_area: Rect::new(0, initial_inline_viewport_row(cursor_pos.y), 0, 0),
       last_known_screen_size: screen_size,
       last_known_cursor_pos: cursor_pos,
+      visible_history_rows: 0,
     })
   }
 
@@ -210,6 +215,7 @@ where
     self.current_buffer_mut().resize(area);
     self.previous_buffer_mut().resize(area);
     self.viewport_area = area;
+    self.visible_history_rows = self.visible_history_rows.min(area.top());
   }
 
   /// Queries the backend for size and resizes if it doesn't match the previous size.
@@ -321,6 +327,7 @@ where
       .set_cursor_position(self.viewport_area.as_position())?;
     queue!(self.backend, Clear(crossterm::terminal::ClearType::Purge))?;
     std::io::Write::flush(&mut self.backend)?;
+    self.visible_history_rows = 0;
     self.previous_buffer_mut().reset();
     Ok(())
   }
@@ -336,8 +343,20 @@ where
     self.backend.clear_region(ClearType::All)?;
     self.set_cursor_position(home)?;
     std::io::Write::flush(&mut self.backend)?;
+    self.visible_history_rows = 0;
     self.previous_buffer_mut().reset();
     Ok(())
+  }
+
+  pub(crate) fn note_history_rows_inserted(&mut self, inserted_rows: u16) {
+    self.visible_history_rows = self
+      .visible_history_rows
+      .saturating_add(inserted_rows)
+      .min(self.viewport_area.top());
+  }
+
+  pub(crate) fn visible_history_rows(&self) -> u16 {
+    self.visible_history_rows
   }
 
   /// Clears the inactive buffer and swaps it with the current buffer
@@ -350,6 +369,10 @@ where
   pub fn size(&self) -> io::Result<Size> {
     self.backend.size()
   }
+}
+
+fn initial_inline_viewport_row(cursor_y: u16) -> u16 {
+  cursor_y.saturating_add(1)
 }
 
 use ratatui::buffer::Cell;
@@ -555,6 +578,12 @@ mod tests {
   use pretty_assertions::assert_eq;
   use ratatui::layout::Rect;
   use ratatui::style::Style;
+
+  #[test]
+  fn initial_inline_viewport_row_starts_below_shell_prompt_row() {
+    assert_eq!(6, initial_inline_viewport_row(5));
+    assert_eq!(u16::MAX, initial_inline_viewport_row(u16::MAX));
+  }
 
   #[test]
   fn diff_buffers_does_not_emit_clear_to_end_for_full_width_row() {

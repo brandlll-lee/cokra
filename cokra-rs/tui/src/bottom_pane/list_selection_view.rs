@@ -30,6 +30,7 @@ use crate::app_event_sender::AppEventSender;
 use crate::key_hint::KeyBinding;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
+use crate::tui::InlineViewportSizing;
 
 pub(crate) type SelectionAction = Box<dyn Fn(&AppEventSender) + Send + Sync>;
 
@@ -335,6 +336,10 @@ impl ListSelectionView {
 
 // 1:1 codex: implement BottomPaneView so it can live on the view_stack.
 impl BottomPaneView for ListSelectionView {
+  fn inline_viewport_sizing(&self) -> InlineViewportSizing {
+    InlineViewportSizing::ExpandForOverlay
+  }
+
   fn handle_key_event(&mut self, key_event: KeyEvent) {
     match key_event {
       KeyEvent { code: KeyCode::Up, .. }

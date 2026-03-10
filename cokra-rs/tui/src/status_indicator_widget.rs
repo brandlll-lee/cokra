@@ -125,6 +125,11 @@ impl StatusIndicatorWidget {
     self.details.as_deref()
   }
 
+  #[cfg(test)]
+  pub(crate) fn inline_message(&self) -> Option<&str> {
+    self.inline_message.as_deref()
+  }
+
   pub(crate) fn set_interrupt_hint_visible(&mut self, visible: bool) {
     self.show_interrupt_hint = visible;
   }
