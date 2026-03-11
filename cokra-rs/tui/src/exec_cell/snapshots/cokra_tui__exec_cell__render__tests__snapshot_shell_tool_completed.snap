@@ -2,7 +2,7 @@
 source: tui/src/exec_cell/render.rs
 expression: rendered
 ---
-"✓ shell                                                     "
+"✓ shell (42ms)                                              "
 "  $ ls -la /tmp                                             "
 "  └ total 8                                                 "
 "    drwxrwxrwt 2 root root 40 Jan  1 00:00 .                "

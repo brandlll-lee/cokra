@@ -166,25 +166,29 @@ impl HistoryCell for ExecCell {
 
       // 1:1 codex: Show spinner during execution, ✓/✗ after completion
       // Also add "Running" text during execution
-      let (header_icon, status_text): (Span<'static>, &str) = match (&call.output, call.duration) {
-        (Some(output), Some(_)) => {
-          if output.exit_code == 0 {
-            ("✓ ".green().bold(), "")
-          } else {
-            ("✗ ".red().bold(), "")
+      let (header_icon, status_text, duration_ms): (Span<'static>, &str, Option<u128>) =
+        match (&call.output, call.duration) {
+          (Some(output), Some(dur)) => {
+            let ms = dur.as_millis();
+            if output.exit_code == 0 {
+              ("✓ ".green().bold(), "", Some(ms))
+            } else {
+              ("✗ ".red().bold(), "", Some(ms))
+            }
           }
-        }
-        _ => {
-          let mut s = crate::exec_cell::spinner(call.start_time, self.animations_enabled());
-          s.content = format!("{} ", s.content).into();
-          (s, "Running")
-        }
-      };
+          _ => {
+            let mut s = crate::exec_cell::spinner(call.start_time, self.animations_enabled());
+            s.content = format!("{} ", s.content).into();
+            (s, "Running", None)
+          }
+        };
       let mut header = Line::from(vec![header_icon]);
       header.push_span(call.tool_name.clone().bold());
-      // 1:1 codex: Show "Running" during execution
       if !status_text.is_empty() {
-        header.push_span(format!(" {}", status_text).dim());
+        header.push_span(format!(" {status_text}").dim());
+      }
+      if let Some(ms) = duration_ms {
+        header.push_span(format!(" ({ms}ms)").dim());
       }
       lines.push(header);
 

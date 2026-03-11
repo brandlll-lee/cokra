@@ -271,6 +271,12 @@ fn tool_emitter_for_call(call: &ToolCall, cwd: &Path) -> ToolEmitter {
 }
 
 fn should_emit_exec_events(tool_name: &str) -> bool {
+  // MCP tools emit McpToolCallBegin/End through McpHandler directly; they render through
+  // the exec cell path via those events. Emitting ExecCommandBegin/End on top produces
+  // duplicate "Running" + "● Calling" / "● completed" rows for every MCP call.
+  if tool_name.starts_with("mcp__") {
+    return false;
+  }
   // Tradeoff: team/collab tools now render through dedicated notice cells instead of the
   // generic exec transcript, because duplicating both views produced the exact UX noise the
   // user reported: Running/✓ rows plus raw JSON outputs for the same action.

@@ -1,4 +1,5 @@
 //! 1:1 codex: write_file tool handler — requires absolute paths.
+//! Appends LSP diagnostics to the output on successful write.
 
 use std::fs;
 use std::path::PathBuf;
@@ -11,6 +12,8 @@ use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
+
+use super::diagnostics::collect_file_diagnostics;
 
 pub struct WriteFileHandler;
 
@@ -30,7 +33,11 @@ impl ToolHandler for WriteFileHandler {
     true
   }
 
-  fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+  async fn handle_async(
+    &self,
+    invocation: ToolInvocation,
+  ) -> Result<ToolOutput, FunctionCallError> {
+    let id = invocation.id.clone();
     let args: WriteFileArgs = invocation.parse_arguments()?;
 
     // 1:1 codex: require absolute paths.
@@ -53,7 +60,10 @@ impl ToolHandler for WriteFileHandler {
       FunctionCallError::Execution(format!("failed to write {}: {e}", path.display()))
     })?;
 
-    Ok(ToolOutput::success(format!("wrote {}", path.display())).with_id(invocation.id))
+    let diag_suffix = collect_file_diagnostics(&path).await;
+    Ok(
+      ToolOutput::success(format!("wrote {}{}", path.display(), diag_suffix)).with_id(id),
+    )
   }
 }
 
@@ -65,8 +75,8 @@ mod tests {
   use crate::tools::context::ToolInvocation;
   use crate::tools::registry::ToolHandler;
 
-  #[test]
-  fn writes_file_content() {
+  #[tokio::test]
+  async fn writes_file_content() {
     let path = std::env::temp_dir().join(format!("cokra-write-{}.txt", uuid::Uuid::new_v4()));
 
     let inv = ToolInvocation {
@@ -83,7 +93,7 @@ mod tests {
       runtime: None,
     };
 
-    let out = WriteFileHandler.handle(inv).expect("write file");
+    let out = WriteFileHandler.handle_async(inv).await.expect("write file");
     assert!(!out.is_error());
     let written = fs::read_to_string(&path).expect("read written file");
     assert_eq!(written, "hello".to_string());
@@ -91,8 +101,8 @@ mod tests {
     let _ = fs::remove_file(path);
   }
 
-  #[test]
-  fn rejects_relative_path() {
+  #[tokio::test]
+  async fn rejects_relative_path() {
     let inv = ToolInvocation {
       id: "2".to_string(),
       name: "write_file".to_string(),
@@ -108,7 +118,8 @@ mod tests {
     };
 
     let err = WriteFileHandler
-      .handle(inv)
+      .handle_async(inv)
+      .await
       .expect_err("should reject relative path");
     assert!(err.to_string().contains("absolute path"));
   }

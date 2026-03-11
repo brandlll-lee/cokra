@@ -49,9 +49,34 @@ impl McpConnectionManager {
     let mut tools = HashMap::new();
 
     for (server_name, server_config) in config.servers.iter().filter(|(_, cfg)| cfg.enabled) {
-      let client = Arc::new(connect_server(server_name, server_config).await?);
-      let tool_timeout = server_config.tool_timeout_sec.map(Duration::from_secs);
-      let listed_tools = list_tools(&client, tool_timeout).await?;
+      let connect_result = connect_server(server_name, server_config).await
+        .and_then(|client| {
+          let tool_timeout = server_config.tool_timeout_sec.map(Duration::from_secs);
+          // Wrap in a future-friendly way — we call list_tools below once client is ready
+          Ok((Arc::new(client), tool_timeout))
+        });
+
+      let (client, tool_timeout) = match connect_result {
+        Ok(v) => v,
+        Err(err) => {
+          if server_config.required {
+            return Err(err.context(format!("required MCP server `{server_name}` failed to connect")));
+          }
+          tracing::warn!("MCP server `{server_name}` failed to connect (non-required, skipping): {err:#}");
+          continue;
+        }
+      };
+
+      let listed_tools = match list_tools(&client, tool_timeout).await {
+        Ok(t) => t,
+        Err(err) => {
+          if server_config.required {
+            return Err(err.context(format!("required MCP server `{server_name}` failed to list tools")));
+          }
+          tracing::warn!("MCP server `{server_name}` failed to list tools (non-required, skipping): {err:#}");
+          continue;
+        }
+      };
 
       for tool in filter_tools(server_config, listed_tools) {
         let exposed_name = qualify_tool_name(server_name, tool.name.as_ref(), &tools);
@@ -378,5 +403,111 @@ fn empty_object_schema() -> JsonSchema {
     properties: BTreeMap::new(),
     required: Some(Vec::new()),
     additional_properties: Some(false.into()),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn empty_tools() -> HashMap<String, ManagedTool> {
+    HashMap::new()
+  }
+
+  fn make_tool(exposed: &str, server: &str, tool: &str) -> (String, ManagedTool) {
+    let spec = ToolSpec::new(
+      exposed,
+      "test",
+      JsonSchema::Object {
+        properties: BTreeMap::new(),
+        required: Some(vec![]),
+        additional_properties: None,
+      },
+      None,
+      ToolHandlerType::Mcp,
+      ToolPermissions::default(),
+    );
+    (
+      exposed.to_string(),
+      ManagedTool {
+        server: server.to_string(),
+        tool: tool.to_string(),
+        spec,
+      },
+    )
+  }
+
+  #[test]
+  fn qualify_tool_name_no_conflict() {
+    let tools = empty_tools();
+    let name = qualify_tool_name("github", "search_repos", &tools);
+    assert_eq!(name, "mcp__github__search_repos");
+  }
+
+  #[test]
+  fn qualify_tool_name_sanitizes_special_chars() {
+    let tools = empty_tools();
+    let name = qualify_tool_name("my-server.v2", "get/resource", &tools);
+    // non-alphanumeric/underscore/dash chars → underscore
+    assert!(!name.contains('.'));
+    assert!(!name.contains('/'));
+    assert!(name.starts_with("mcp__"));
+  }
+
+  #[test]
+  fn qualify_tool_name_suffix_on_conflict() {
+    let mut tools = empty_tools();
+    let (k, v) = make_tool("mcp__srv__tool", "srv", "tool");
+    tools.insert(k, v);
+
+    let name = qualify_tool_name("srv", "tool", &tools);
+    assert_eq!(name, "mcp__srv__tool_2");
+  }
+
+  #[test]
+  fn qualify_tool_name_suffix_increments() {
+    let mut tools = empty_tools();
+    for suffix in ["mcp__s__t", "mcp__s__t_2", "mcp__s__t_3"] {
+      let (k, v) = make_tool(suffix, "s", "t");
+      tools.insert(k, v);
+    }
+    let name = qualify_tool_name("s", "t", &tools);
+    assert_eq!(name, "mcp__s__t_4");
+  }
+
+  #[test]
+  fn qualify_tool_name_never_conflicts_with_builtin_names() {
+    // Built-in tool names never start with "mcp__" so they
+    // cannot clash with any MCP-qualified name.
+    let tools = empty_tools();
+    for builtin in ["shell", "edit_file", "write_file", "web_search", "diagnostics", "save_memory"] {
+      let qualified = qualify_tool_name("server", builtin, &tools);
+      assert!(
+        qualified.starts_with("mcp__server__"),
+        "expected mcp__ prefix, got {qualified}"
+      );
+      assert_ne!(qualified.as_str(), builtin);
+    }
+  }
+
+  #[test]
+  fn sanitize_tool_name_alphanumeric_passthrough() {
+    assert_eq!(sanitize_tool_name("hello_world-123"), "hello_world-123");
+  }
+
+  #[test]
+  fn sanitize_tool_name_replaces_dots_and_slashes() {
+    let s = sanitize_tool_name("a.b/c");
+    assert_eq!(s, "a_b_c");
+  }
+
+  #[test]
+  fn sanitize_tool_name_empty_returns_underscore() {
+    assert_eq!(sanitize_tool_name(""), "_");
+  }
+
+  #[test]
+  fn sanitize_tool_name_spaces_replaced() {
+    assert_eq!(sanitize_tool_name("my tool name"), "my_tool_name");
   }
 }

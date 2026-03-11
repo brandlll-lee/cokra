@@ -28,7 +28,7 @@ sqlx = { workspace = true }
 rmcp = { workspace = true }
 ratatui = { workspace = true, optional = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
-dirs = "5.0"
+dirs = "6"
 which = "6"
 libc = { workspace = true }
 async-trait = "0.1"

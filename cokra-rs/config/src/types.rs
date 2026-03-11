@@ -12,6 +12,10 @@ fn default_cwd() -> PathBuf {
   std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+fn default_true() -> bool {
+  true
+}
+
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -268,41 +272,128 @@ pub struct McpConfig {
   pub servers: HashMap<String, McpServerConfig>,
 }
 
-/// MCP server configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpServerConfig {
-  /// Transport configuration
-  pub transport: McpServerTransportConfig,
-  /// Whether server is enabled
-  pub enabled: bool,
-  /// Whether server is required
-  pub required: bool,
-  /// Startup timeout in seconds
-  pub startup_timeout_sec: Option<u64>,
-  /// Tool timeout in seconds
-  pub tool_timeout_sec: Option<u64>,
-  /// Enabled tools filter
-  pub enabled_tools: Option<Vec<String>>,
-  /// Disabled tools filter
-  pub disabled_tools: Option<Vec<String>>,
-}
-
-/// MCP server transport configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// MCP server transport configuration.
+///
+/// Discriminated by the presence of fields (codex-style flat schema):
+///   - `command` present → Stdio transport
+///   - `url` present     → StreamableHttp transport
+#[derive(Debug, Clone, Serialize)]
 pub enum McpServerTransportConfig {
-  /// stdio transport
   Stdio {
     command: String,
     args: Vec<String>,
     env: Option<HashMap<String, String>>,
     cwd: Option<PathBuf>,
   },
-  /// HTTP transport
   Http {
     url: String,
     bearer_token: Option<String>,
     headers: Option<HashMap<String, String>>,
   },
+}
+
+/// Flat (un-nested) deserialization shape — mirrors codex RawMcpServerConfig.
+/// Users write all fields directly under `[mcp.servers.<name>]`, no sub-table.
+#[derive(serde::Deserialize)]
+struct RawMcpServerConfig {
+  // ── Stdio fields ──────────────────────────────────────────────────────────
+  command: Option<String>,
+  #[serde(default)]
+  args: Vec<String>,
+  #[serde(default)]
+  env: Option<HashMap<String, String>>,
+  #[serde(default)]
+  cwd: Option<PathBuf>,
+
+  // ── HTTP fields ───────────────────────────────────────────────────────────
+  url: Option<String>,
+  #[serde(default)]
+  bearer_token: Option<String>,
+  #[serde(default)]
+  headers: Option<HashMap<String, String>>,
+
+  // ── Shared fields ─────────────────────────────────────────────────────────
+  #[serde(default = "default_true")]
+  enabled: bool,
+  #[serde(default)]
+  required: bool,
+  #[serde(default)]
+  startup_timeout_sec: Option<u64>,
+  #[serde(default)]
+  tool_timeout_sec: Option<u64>,
+  #[serde(default)]
+  enabled_tools: Option<Vec<String>>,
+  #[serde(default)]
+  disabled_tools: Option<Vec<String>>,
+}
+
+/// MCP server configuration.
+///
+/// **TOML format** (flat, no nested `[transport]` sub-table):
+///
+/// ```toml
+/// # Stdio
+/// [mcp.servers.my-server]
+/// command = "npx"
+/// args = ["-y", "some-mcp-package"]
+/// env = { API_KEY = "..." }
+///
+/// # HTTP
+/// [mcp.servers.my-http-server]
+/// url = "https://mcp.example.com/mcp/"
+/// bearer_token = "..."
+/// ```
+#[derive(Debug, Clone, Serialize)]
+pub struct McpServerConfig {
+  /// Transport configuration (derived from flat fields).
+  #[serde(flatten)]
+  pub transport: McpServerTransportConfig,
+  #[serde(default = "default_true")]
+  pub enabled: bool,
+  #[serde(default)]
+  pub required: bool,
+  pub startup_timeout_sec: Option<u64>,
+  pub tool_timeout_sec: Option<u64>,
+  pub enabled_tools: Option<Vec<String>>,
+  pub disabled_tools: Option<Vec<String>>,
+}
+
+impl<'de> serde::Deserialize<'de> for McpServerConfig {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: serde::Deserializer<'de>,
+  {
+    let raw = RawMcpServerConfig::deserialize(deserializer)?;
+
+    let transport = if let Some(command) = raw.command {
+      McpServerTransportConfig::Stdio {
+        command,
+        args: raw.args,
+        env: raw.env,
+        cwd: raw.cwd,
+      }
+    } else if let Some(url) = raw.url {
+      McpServerTransportConfig::Http {
+        url,
+        bearer_token: raw.bearer_token,
+        headers: raw.headers,
+      }
+    } else {
+      return Err(serde::de::Error::custom(
+        "MCP server config must have either `command` (stdio) or `url` (http)",
+      ));
+    };
+
+    Ok(McpServerConfig {
+      transport,
+      enabled: raw.enabled,
+      required: raw.required,
+      startup_timeout_sec: raw.startup_timeout_sec,
+      tool_timeout_sec: raw.tool_timeout_sec,
+      enabled_tools: raw.enabled_tools,
+      disabled_tools: raw.disabled_tools,
+    })
+  }
 }
 
 // ============================================================================

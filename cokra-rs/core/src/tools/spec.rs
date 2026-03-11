@@ -151,6 +151,9 @@ pub fn build_specs() -> Vec<ToolSpec> {
     request_user_input_tool(),
     view_image_tool(),
     web_fetch_tool(),
+    web_search_tool(),
+    save_memory_tool(),
+    diagnostics_tool(),
   ]
 }
 
@@ -1022,6 +1025,93 @@ fn view_image_tool() -> ToolSpec {
   ToolSpec::new(
     "view_image",
     "View a local image from the filesystem. Only use if given a full filepath by the user.",
+    obj(props, &["path"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn web_search_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "query".to_string(),
+    str_field("The search query to look up on the web."),
+  );
+  props.insert(
+    "num_results".to_string(),
+    int_field("Number of results to return (default: 8, max: 20)."),
+  );
+  props.insert(
+    "livecrawl".to_string(),
+    str_field(
+      "Live crawl mode for Exa backend: 'fallback' (default) or 'preferred'.",
+    ),
+  );
+  props.insert(
+    "context_max_characters".to_string(),
+    int_field("Maximum characters for context string (Exa backend, default: 10000)."),
+  );
+  ToolSpec::new(
+    "web_search",
+    "Search the web for information. Supports multiple backends: \
+     Exa (default, no key needed), Brave (set BRAVE_SEARCH_API_KEY), \
+     or SearXNG self-hosted (set SEARXNG_BASE_URL). \
+     Returns search results with titles, URLs, and summaries.",
+    obj(props, &["query"]),
+    None,
+    ToolHandlerType::Function,
+    ToolPermissions {
+      requires_approval: true,
+      allow_network: true,
+      allow_fs_write: false,
+    },
+  )
+}
+
+fn save_memory_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "fact".to_string(),
+    str_field(
+      "The specific fact or piece of information to remember. \
+       Should be a clear, self-contained statement.",
+    ),
+  );
+  ToolSpec::new(
+    "save_memory",
+    "Save a piece of information to persistent memory (~/.cokra/memory.md). \
+     Use this to remember important facts, preferences, or context about the user \
+     or project that should persist across sessions.",
+    obj(props, &["fact"]),
+    None,
+    ToolHandlerType::Function,
+    ToolPermissions {
+      requires_approval: true,
+      allow_network: false,
+      allow_fs_write: true,
+    },
+  )
+}
+
+fn diagnostics_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "path".to_string(),
+    str_field(
+      "Absolute or relative path to the source file to get diagnostics for.",
+    ),
+  );
+  props.insert(
+    "max_diagnostics".to_string(),
+    int_field("Maximum number of diagnostics to return (default: 50)."),
+  );
+  ToolSpec::new(
+    "diagnostics",
+    "Get LSP diagnostics (errors, warnings, hints) for a source file. \
+     Spawns the appropriate language server (rust-analyzer, typescript-language-server, \
+     pylsp, gopls, clangd, etc.) and returns all diagnostics. \
+     The language server must be installed and on PATH.",
     obj(props, &["path"]),
     None,
     ToolHandlerType::Function,

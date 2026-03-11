@@ -28,7 +28,10 @@ pub mod team_status;
 pub mod update_team_task;
 pub mod view_image;
 pub mod wait;
+pub mod diagnostics;
+pub mod save_memory;
 pub mod web_fetch;
+pub mod web_search;
 pub mod write_file;
 
 use std::sync::Arc;
@@ -112,4 +115,7 @@ pub fn register_builtin_handlers(
     Arc::new(request_user_input::RequestUserInputHandler),
   );
   registry.register_handler("view_image", Arc::new(view_image::ViewImageHandler));
+  registry.register_handler("web_search", Arc::new(web_search::WebSearchHandler));
+  registry.register_handler("save_memory", Arc::new(save_memory::SaveMemoryHandler));
+  registry.register_handler("diagnostics", Arc::new(diagnostics::DiagnosticsHandler));
 }

@@ -1,9 +1,14 @@
 use super::*;
+use crate::exec_cell::ExecCall;
+use crate::exec_cell::ExecCell;
+use crate::exec_cell::model::CommandOutput;
+use crate::exec_cell::new_active_exec_command;
 use crate::multi_agents;
 use crate::terminal_palette::light_blue;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::time::Duration;
 
 impl ChatWidget {
   pub(super) fn handle_notice_event(&mut self, event: &EventMsg) -> bool {
@@ -92,22 +97,78 @@ impl ChatWidget {
         }
       }
       EventMsg::McpToolCallBegin(e) => {
+        self.flush_answer_stream();
+        let fq_name = format!(
+          "mcp__{}__{}",
+          e.invocation.server, e.invocation.tool
+        );
+        let call = ExecCall {
+          command_id: e.call_id.clone(),
+          tool_name: fq_name.clone(),
+          command: fq_name.clone(),
+          cwd: std::path::PathBuf::from("."),
+          output: None,
+          start_time: Some(Instant::now()),
+          duration: None,
+        };
+        self.flush_active_exec_cell();
+        self.transcript.active_exec_cell = Some(Box::new(new_active_exec_command(
+          call.command_id.clone(),
+          call.tool_name.clone(),
+          call.command.clone(),
+          call.cwd.clone(),
+          self.animations_enabled(),
+        )));
+        self.transcript.pending_exec_calls.insert(e.call_id.clone(), call);
         self.set_status_override(
           format!("Calling {}.{}", e.invocation.server, e.invocation.tool),
           None,
           None,
         );
-        self.add_to_history_preserving_exec(PlainHistoryCell::new(vec![Line::from(format!(
-          "● Calling {}.{}",
-          e.invocation.server, e.invocation.tool
-        ))]));
+        self.sync_status_indicator();
+        self.bump_active_cell_revision();
       }
       EventMsg::McpToolCallEnd(e) => {
         self.clear_status_override();
-        self.add_to_history_preserving_exec(PlainHistoryCell::new(vec![Line::from(format!(
-          "● {}.{} completed ({}ms)",
-          e.invocation.server, e.invocation.tool, e.duration_ms
-        ))]));
+        let duration = Duration::from_millis(e.duration_ms);
+        // Determine output text and exit code from result
+        let (exit_code, output_text) = match &e.result {
+          cokra_protocol::McpToolCallResult::Ok { content } => {
+            let text = content
+              .iter()
+              .map(|block| match block {
+                cokra_protocol::McpContentBlock::Text { text } => text.clone(),
+                cokra_protocol::McpContentBlock::Image { .. } => "[image]".to_string(),
+                cokra_protocol::McpContentBlock::Resource { uri, text } => {
+                  text.clone().unwrap_or_else(|| uri.clone())
+                }
+              })
+              .collect::<Vec<_>>()
+              .join("\n");
+            (0i32, text)
+          }
+          cokra_protocol::McpToolCallResult::Err(err) => (1i32, err.clone()),
+        };
+        let output = CommandOutput { exit_code, output: output_text };
+        let (did_complete, should_flush) = if let Some(cell) = self
+          .transcript
+          .active_exec_cell
+          .as_mut()
+          .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
+        {
+          cell.complete_call(&e.call_id, output, duration);
+          (true, cell.should_flush())
+        } else {
+          (false, false)
+        };
+        if did_complete {
+          self.bump_active_cell_revision();
+        }
+        if should_flush {
+          self.flush_active_exec_cell();
+        }
+        self.transcript.pending_exec_calls.remove(&e.call_id);
+        self.sync_status_indicator();
       }
       EventMsg::WebSearchBegin(_) => {
         self.set_status_override("Searching the web", None, None);

@@ -22,14 +22,22 @@ use rmcp::service::RoleClient;
 use rmcp::service::RunningService;
 use rmcp::service;
 use rmcp::transport::child_process::TokioChildProcess;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::streamable_http_client::StreamableHttpClientWorker;
+use rmcp::transport::worker::WorkerTransport;
 use serde_json::Value;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time;
 
+type StreamableHttpTransport = WorkerTransport<StreamableHttpClientWorker<reqwest::Client>>;
+
 enum PendingTransport {
   ChildProcess {
     transport: TokioChildProcess,
+  },
+  StreamableHttp {
+    transport: StreamableHttpTransport,
   },
 }
 
@@ -90,11 +98,42 @@ impl RmcpClient {
   }
 
   pub async fn new_streamable_http_client(
-    _url: &str,
-    _bearer_token: Option<String>,
-    _headers: Option<HashMap<String, String>>,
+    url: &str,
+    bearer_token: Option<String>,
+    headers: Option<HashMap<String, String>>,
   ) -> Result<Self> {
-    Err(anyhow!("streamable HTTP MCP transport is not implemented"))
+    let mut reqwest_builder = reqwest::Client::builder();
+
+    let mut default_headers = reqwest::header::HeaderMap::new();
+    if let Some(token) = bearer_token {
+      let value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+        .map_err(|e| anyhow!("invalid bearer token header value: {e}"))?;
+      default_headers.insert(reqwest::header::AUTHORIZATION, value);
+    }
+    if let Some(hdrs) = headers {
+      for (key, value) in hdrs {
+        let hname = reqwest::header::HeaderName::from_bytes(key.as_bytes())
+          .map_err(|e| anyhow!("invalid header name '{key}': {e}"))?;
+        let hvalue = reqwest::header::HeaderValue::from_str(&value)
+          .map_err(|e| anyhow!("invalid header value for '{key}': {e}"))?;
+        default_headers.insert(hname, hvalue);
+      }
+    }
+    reqwest_builder = reqwest_builder.default_headers(default_headers);
+
+    let client = reqwest_builder
+      .build()
+      .map_err(|e| anyhow!("failed to build HTTP client for {url}: {e}"))?;
+
+    let config = StreamableHttpClientTransportConfig::with_uri(url);
+    let worker = StreamableHttpClientWorker::new(client, config);
+    let transport = WorkerTransport::spawn(worker);
+
+    Ok(Self {
+      state: Mutex::new(ClientState::Connecting {
+        transport: Some(PendingTransport::StreamableHttp { transport }),
+      }),
+    })
   }
 
   pub async fn initialize(
@@ -123,6 +162,14 @@ impl RmcpClient {
 
     let service = match transport {
       PendingTransport::ChildProcess { transport } => {
+        match timeout {
+          Some(duration) => time::timeout(duration, service::serve_client(handler.clone(), transport))
+            .await
+            .map_err(|_| anyhow!("timed out handshaking with MCP server after {duration:?}"))??,
+          None => service::serve_client(handler.clone(), transport).await?,
+        }
+      }
+      PendingTransport::StreamableHttp { transport } => {
         match timeout {
           Some(duration) => time::timeout(duration, service::serve_client(handler.clone(), transport))
             .await

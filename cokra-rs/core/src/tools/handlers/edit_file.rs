@@ -4,7 +4,7 @@
 //! - Exact match replacement (single or all occurrences)
 //! - Create new file when old_string is empty
 //! - CRLF normalisation
-//! - Returns unified diff output
+//! - Returns unified diff output + optional LSP diagnostics
 
 use std::fs;
 use std::path::PathBuf;
@@ -17,6 +17,8 @@ use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
+
+use super::diagnostics::collect_file_diagnostics;
 
 pub struct EditFileHandler;
 
@@ -39,7 +41,10 @@ impl ToolHandler for EditFileHandler {
     true
   }
 
-  fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+  async fn handle_async(
+    &self,
+    invocation: ToolInvocation,
+  ) -> Result<ToolOutput, FunctionCallError> {
     let id = invocation.id.clone();
     let args: EditFileArgs = invocation.parse_arguments()?;
 
@@ -68,8 +73,14 @@ impl ToolHandler for EditFileHandler {
       fs::write(&path, args.new_string.as_bytes()).map_err(|e| {
         FunctionCallError::Execution(format!("failed to write {}: {e}", path.display()))
       })?;
+      let diag_suffix = collect_file_diagnostics(&path).await;
       return Ok(
-        ToolOutput::success(format!("Created new file: {}", path.display())).with_id(id),
+        ToolOutput::success(format!(
+          "Created new file: {}{}",
+          path.display(),
+          diag_suffix
+        ))
+        .with_id(id),
       );
     }
 
@@ -129,11 +140,13 @@ impl ToolHandler for EditFileHandler {
     let replacements = if args.replace_all { count } else { 1 };
     let diff_summary = build_diff_summary(&normalised_old, &normalised_new, replacements);
 
+    let diag_suffix = collect_file_diagnostics(&path).await;
     Ok(
       ToolOutput::success(format!(
-        "Edit applied successfully to {}.\n{}",
+        "Edit applied successfully to {}.\n{}{}",
         path.display(),
-        diff_summary
+        diff_summary,
+        diag_suffix
       ))
       .with_id(id),
     )
@@ -187,8 +200,8 @@ mod tests {
     std::env::temp_dir().join(format!("cokra-edit-{}-{}.txt", name, uuid::Uuid::new_v4()))
   }
 
-  #[test]
-  fn creates_new_file_when_old_string_empty() {
+  #[tokio::test]
+  async fn creates_new_file_when_old_string_empty() {
     let path = temp_path("create");
     let inv = make_inv(
       "1",
@@ -198,15 +211,15 @@ mod tests {
         "new_string": "hello world"
       }),
     );
-    let out = EditFileHandler.handle(inv).unwrap();
+    let out = EditFileHandler.handle_async(inv).await.unwrap();
     assert!(!out.is_error());
     let content = fs::read_to_string(&path).unwrap();
     assert_eq!(content, "hello world");
     let _ = fs::remove_file(path);
   }
 
-  #[test]
-  fn single_replacement() {
+  #[tokio::test]
+  async fn single_replacement() {
     let path = temp_path("single");
     fs::write(&path, "aaa bbb ccc").unwrap();
     let inv = make_inv(
@@ -217,14 +230,14 @@ mod tests {
         "new_string": "BBB"
       }),
     );
-    let out = EditFileHandler.handle(inv).unwrap();
+    let out = EditFileHandler.handle_async(inv).await.unwrap();
     assert!(!out.is_error());
     assert_eq!(fs::read_to_string(&path).unwrap(), "aaa BBB ccc");
     let _ = fs::remove_file(path);
   }
 
-  #[test]
-  fn replace_all() {
+  #[tokio::test]
+  async fn replace_all() {
     let path = temp_path("replall");
     fs::write(&path, "foo bar foo baz foo").unwrap();
     let inv = make_inv(
@@ -236,14 +249,14 @@ mod tests {
         "replace_all": true
       }),
     );
-    let out = EditFileHandler.handle(inv).unwrap();
+    let out = EditFileHandler.handle_async(inv).await.unwrap();
     assert!(!out.is_error());
     assert_eq!(fs::read_to_string(&path).unwrap(), "qux bar qux baz qux");
     let _ = fs::remove_file(path);
   }
 
-  #[test]
-  fn rejects_multiple_matches_without_replace_all() {
+  #[tokio::test]
+  async fn rejects_multiple_matches_without_replace_all() {
     let path = temp_path("multi");
     fs::write(&path, "foo bar foo").unwrap();
     let inv = make_inv(
@@ -254,13 +267,13 @@ mod tests {
         "new_string": "baz"
       }),
     );
-    let err = EditFileHandler.handle(inv).unwrap_err();
+    let err = EditFileHandler.handle_async(inv).await.unwrap_err();
     assert!(err.to_string().contains("2 times"));
     let _ = fs::remove_file(path);
   }
 
-  #[test]
-  fn rejects_relative_path() {
+  #[tokio::test]
+  async fn rejects_relative_path() {
     let inv = make_inv(
       "5",
       serde_json::json!({
@@ -269,12 +282,12 @@ mod tests {
         "new_string": "b"
       }),
     );
-    let err = EditFileHandler.handle(inv).unwrap_err();
+    let err = EditFileHandler.handle_async(inv).await.unwrap_err();
     assert!(err.to_string().contains("absolute path"));
   }
 
-  #[test]
-  fn rejects_same_old_new() {
+  #[tokio::test]
+  async fn rejects_same_old_new() {
     let inv = make_inv(
       "6",
       serde_json::json!({
@@ -283,12 +296,12 @@ mod tests {
         "new_string": "same"
       }),
     );
-    let err = EditFileHandler.handle(inv).unwrap_err();
+    let err = EditFileHandler.handle_async(inv).await.unwrap_err();
     assert!(err.to_string().contains("must be different"));
   }
 
-  #[test]
-  fn rejects_old_string_not_found() {
+  #[tokio::test]
+  async fn rejects_old_string_not_found() {
     let path = temp_path("notfound");
     fs::write(&path, "hello world").unwrap();
     let inv = make_inv(
@@ -299,13 +312,13 @@ mod tests {
         "new_string": "replacement"
       }),
     );
-    let err = EditFileHandler.handle(inv).unwrap_err();
+    let err = EditFileHandler.handle_async(inv).await.unwrap_err();
     assert!(err.to_string().contains("not found"));
     let _ = fs::remove_file(path);
   }
 
-  #[test]
-  fn preserves_crlf_line_endings() {
+  #[tokio::test]
+  async fn preserves_crlf_line_endings() {
     let path = temp_path("crlf");
     fs::write(&path, "line1\r\nline2\r\nline3").unwrap();
     let inv = make_inv(
@@ -316,7 +329,7 @@ mod tests {
         "new_string": "LINE2"
       }),
     );
-    let out = EditFileHandler.handle(inv).unwrap();
+    let out = EditFileHandler.handle_async(inv).await.unwrap();
     assert!(!out.is_error());
     assert_eq!(
       fs::read_to_string(&path).unwrap(),
@@ -325,8 +338,8 @@ mod tests {
     let _ = fs::remove_file(path);
   }
 
-  #[test]
-  fn multiline_replacement() {
+  #[tokio::test]
+  async fn multiline_replacement() {
     let path = temp_path("multiline");
     fs::write(&path, "fn main() {\n  println!(\"old\");\n}\n").unwrap();
     let inv = make_inv(
@@ -337,7 +350,7 @@ mod tests {
         "new_string": "  println!(\"new\");\n  println!(\"extra\");"
       }),
     );
-    let out = EditFileHandler.handle(inv).unwrap();
+    let out = EditFileHandler.handle_async(inv).await.unwrap();
     assert!(!out.is_error());
     assert_eq!(
       fs::read_to_string(&path).unwrap(),
@@ -346,8 +359,8 @@ mod tests {
     let _ = fs::remove_file(path);
   }
 
-  #[test]
-  fn whitespace_hint_when_trimmed_match_exists() {
+  #[tokio::test]
+  async fn whitespace_hint_when_trimmed_match_exists() {
     let path = temp_path("wshint");
     fs::write(&path, "  hello  \n  world  \n").unwrap();
     let inv = make_inv(
@@ -358,7 +371,7 @@ mod tests {
         "new_string": "replaced"
       }),
     );
-    let err = EditFileHandler.handle(inv).unwrap_err();
+    let err = EditFileHandler.handle_async(inv).await.unwrap_err();
     assert!(err.to_string().contains("whitespace"));
     let _ = fs::remove_file(path);
   }

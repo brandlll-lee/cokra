@@ -9,7 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 # MCP
-rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client"] }
+rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 
 # Runtime
 tokio = { workspace = true, features = ["process", "io-util", "time", "sync"] }
