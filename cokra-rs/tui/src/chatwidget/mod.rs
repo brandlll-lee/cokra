@@ -1,4 +1,5 @@
 mod exec_events;
+mod interrupts;
 mod notice_events;
 mod session;
 mod session_events;
@@ -25,7 +26,6 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPane;
 use crate::history_cell::AgentMessageCell;
-use crate::history_cell::ApprovalRequestedHistoryCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::UserHistoryCell;
@@ -37,6 +37,7 @@ use crate::render::renderable::RenderableItem;
 use crate::tui::FrameRequester;
 use crate::tui::InlineViewportSizing;
 
+use self::interrupts::InterruptManager;
 use self::session::SessionState;
 use self::session::StatusSnapshot;
 pub use self::session::TokenUsage;
@@ -64,6 +65,7 @@ pub(crate) struct ChatWidget {
   app_event_tx: AppEventSender,
   last_render_width: Cell<u16>,
   stream_render_mode: StreamRenderMode,
+  interrupts: InterruptManager,
 }
 
 impl ChatWidget {
@@ -80,6 +82,7 @@ impl ChatWidget {
       app_event_tx,
       last_render_width: Cell::new(0),
       stream_render_mode,
+      interrupts: InterruptManager::default(),
     }
   }
 
@@ -136,14 +139,87 @@ impl ChatWidget {
     self.add_boxed_history(Box::new(cell));
   }
 
+  fn add_to_history_preserving_exec(&mut self, cell: impl HistoryCell + 'static) {
+    self.app_event_tx.insert_boxed_history_cell(Box::new(cell));
+  }
+
   fn add_boxed_history(&mut self, cell: Box<dyn HistoryCell>) {
     self.flush_active_exec_cell();
     self.app_event_tx.insert_boxed_history_cell(cell);
   }
 
   fn append_boxed_history(&mut self, cell: Box<dyn HistoryCell>) {
-    self.flush_active_exec_cell();
     self.app_event_tx.insert_boxed_history_cell(cell);
+  }
+
+  fn is_streaming(&self) -> bool {
+    self.transcript.stream_controller.is_some()
+  }
+
+  /// Flush the answer stream: finalize the active stream controller and emit
+  /// its buffered content as committed history.
+  fn flush_answer_stream(&mut self) {
+    let wrap_width = self.streaming_wrap_width();
+
+    if let Some(filter) = self.transcript.xml_tool_filter.as_mut() {
+      let remaining = filter.flush();
+      if !remaining.is_empty() {
+        let controller = self
+          .transcript
+          .stream_controller
+          .get_or_insert_with(|| crate::streaming::controller::StreamController::new(wrap_width));
+        controller.set_width_if_uncommitted(wrap_width);
+        let _ = controller.push(&remaining);
+        self.refresh_streaming_agent_preview();
+      }
+    }
+    self.transcript.xml_tool_filter = None;
+
+    if self.stream_render_mode == StreamRenderMode::ScrollbackFirst
+      && let Some(controller) = self.transcript.stream_controller.as_mut()
+      && let Some(cell) = controller.drain_committed_now()
+    {
+      self.append_boxed_history(cell);
+    }
+
+    if let Some(mut controller) = self.transcript.stream_controller.take()
+      && let Some(cell) = controller.finalize()
+    {
+      match self.stream_render_mode {
+        StreamRenderMode::AnimatedPreview => self
+          .app_event_tx
+          .insert_boxed_history_cell(cell),
+        StreamRenderMode::ScrollbackFirst => self.append_boxed_history(cell),
+      }
+    }
+
+    if self.stream_render_mode == StreamRenderMode::ScrollbackFirst {
+      self.clear_streaming_agent_preview();
+    }
+  }
+
+  /// Defer an event if a stream is active, or handle it immediately.
+  ///
+  /// Once anything is queued we keep queueing to preserve FIFO ordering
+  /// (e.g. ExecEnd must not arrive before its ExecBegin).
+  #[inline]
+  fn defer_or_handle(
+    &mut self,
+    push: impl FnOnce(&mut InterruptManager),
+    handle: impl FnOnce(&mut Self),
+  ) {
+    if self.is_streaming() || !self.interrupts.is_empty() {
+      push(&mut self.interrupts);
+    } else {
+      handle(self);
+    }
+  }
+
+  fn flush_interrupt_queue(&mut self) -> Option<ChatWidgetAction> {
+    let mut mgr = std::mem::take(&mut self.interrupts);
+    let action = mgr.flush_all(self);
+    self.interrupts = mgr;
+    action
   }
 
   fn flush_stream_controllers(&mut self) {
@@ -192,6 +268,9 @@ impl ChatWidget {
     if self.stream_render_mode == StreamRenderMode::ScrollbackFirst {
       self.clear_streaming_agent_preview();
     }
+
+    // The stream is now finalized — flush any deferred interrupts.
+    self.flush_interrupt_queue();
   }
 
   fn bump_active_cell_revision(&mut self) {
@@ -444,7 +523,11 @@ impl ChatWidget {
       EventMsg::AgentMessageDelta(e) | EventMsg::AgentMessageContentDelta(e) => {
         self.on_agent_message_delta(&e.item_id, &e.delta);
       }
-      EventMsg::AgentMessage(e) => self.on_agent_message(&e.item_id, &e.content),
+      EventMsg::AgentMessage(e) => {
+        if let Some(action) = self.on_agent_message(&e.item_id, &e.content) {
+          return Some(action);
+        }
+      }
       EventMsg::TokenCount(e) => self.on_token_count(e),
       EventMsg::SessionConfigured(e) => self.on_session_configured(e),
       EventMsg::ThreadNameUpdated(e) => {
@@ -453,16 +536,34 @@ impl ChatWidget {
           e.name
         ))]));
       }
-      EventMsg::ExecCommandBegin(e) => self.on_exec_command_begin(e),
+      EventMsg::ExecCommandBegin(e) => {
+        let e2 = e.clone();
+        self.defer_or_handle(
+          |q| q.push_exec_begin(e.clone()),
+          |s| s.handle_exec_begin_now(&e2),
+        );
+      }
       EventMsg::ExecCommandOutputDelta(e) => self.on_exec_command_output_delta(e),
-      EventMsg::ExecCommandEnd(e) => self.on_exec_command_end(e),
+      EventMsg::ExecCommandEnd(e) => {
+        let e2 = e.clone();
+        self.defer_or_handle(
+          |q| q.push_exec_end(e.clone()),
+          |s| s.handle_exec_end_now(&e2),
+        );
+      }
       EventMsg::ExecApprovalRequest(e) => {
-        self.add_to_history(ApprovalRequestedHistoryCell {
-          command: e.command.clone(),
-        });
-        return Some(ChatWidgetAction::ShowApproval(e.clone()));
+        // Approval requests must NEVER be deferred: the agent halts and waits
+        // for the user's decision, so no further stream deltas will arrive.
+        // Deferring would cause a deadlock (stream waits for approval, approval
+        // waits for stream-end). Flush the stream + interrupt queue first, then
+        // show the approval overlay immediately.
+        self.flush_stream_controllers();
+        return Some(self.handle_exec_approval_now(e.clone()));
       }
       EventMsg::RequestUserInput(e) => {
+        // Same reasoning as ExecApprovalRequest: agent blocks waiting for the
+        // user, so deferring would deadlock. Flush stream then show immediately.
+        self.flush_stream_controllers();
         return Some(ChatWidgetAction::ShowRequestUserInput(e.clone()));
       }
       EventMsg::Warning(e) => {

@@ -152,11 +152,12 @@ const ANTHROPIC_SCOPE: &str = "org:create_api_key user:profile user:inference";
 const GITHUB_COPILOT_CLIENT_ID_B64: &str = "SXYxLmI1MDdhMDhjODdlY2ZlOTg=";
 
 // GitHub Copilot API headers (matching pi-mono)
+// NOTE: header names MUST be lowercase for HeaderName::from_static.
 const COPILOT_HEADERS: [(&str, &str); 4] = [
-  ("User-Agent", "GitHubCopilotChat/0.35.0"),
-  ("Editor-Version", "vscode/1.107.0"),
-  ("Editor-Plugin-Version", "copilot-chat/0.35.0"),
-  ("Copilot-Integration-Id", "vscode-chat"),
+  ("user-agent", "GitHubCopilotChat/0.35.0"),
+  ("editor-version", "vscode/1.107.0"),
+  ("editor-plugin-version", "copilot-chat/0.35.0"),
+  ("copilot-integration-id", "vscode-chat"),
 ];
 
 /// Normalize a GitHub Enterprise domain input.

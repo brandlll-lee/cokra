@@ -13,6 +13,8 @@ cokra-protocol = { path = "../protocol" }
 cokra-config = { path = "../config" }
 cokra-state = { path = "../state" }
 cokra-rmcp-client = { path = "../rmcp-client" }
+cokra-file-search = { path = "../file-search" }
+cokra-apply-patch = { path = "../apply-patch" }
 
 # External dependencies
 tokio = { workspace = true, features = ["full"] }
@@ -37,6 +39,7 @@ pin-project = "1.0"
 async-stream = "0.3"
 tokio-util = { workspace = true }
 base64 = "0.22"
+glob = "0.3"
 sha2 = "0.10"
 
 [features]

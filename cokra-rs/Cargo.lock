@@ -484,6 +484,7 @@ name = "cokra-apply-patch"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -569,12 +570,15 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "cokra-apply-patch",
  "cokra-config",
+ "cokra-file-search",
  "cokra-protocol",
  "cokra-rmcp-client",
  "cokra-state",
  "dirs 5.0.1",
  "futures",
+ "glob",
  "libc",
  "pin-project",
  "pretty_assertions",
@@ -627,6 +631,8 @@ dependencies = [
  "anyhow",
  "ignore",
  "nucleo",
+ "pretty_assertions",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -1579,6 +1585,12 @@ dependencies = [
  "openssl-sys",
  "url",
 ]
+
+[[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "globset"

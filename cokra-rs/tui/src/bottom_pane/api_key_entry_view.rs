@@ -67,6 +67,10 @@ impl ApiKeyEntryView {
 }
 
 impl BottomPaneView for ApiKeyEntryView {
+  fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    self
+  }
+
   fn handle_key_event(&mut self, key_event: KeyEvent) {
     match key_event {
       KeyEvent {

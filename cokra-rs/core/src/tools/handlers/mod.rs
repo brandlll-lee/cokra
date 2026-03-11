@@ -6,8 +6,11 @@ pub mod claim_team_messages;
 pub mod claim_team_task;
 pub mod cleanup_team;
 pub mod close_agent;
+pub mod code_search;
 pub mod create_team_task;
 pub mod dynamic;
+pub mod edit_file;
+pub mod glob;
 pub mod grep_files;
 pub mod handoff_team_task;
 pub mod list_dir;
@@ -25,6 +28,7 @@ pub mod team_status;
 pub mod update_team_task;
 pub mod view_image;
 pub mod wait;
+pub mod web_fetch;
 pub mod write_file;
 
 use std::sync::Arc;
@@ -32,15 +36,25 @@ use std::sync::Arc;
 use crate::mcp::McpConnectionManager;
 use crate::tools::registry::ToolRegistry;
 
-pub fn register_builtin_handlers(registry: &mut ToolRegistry, mcp_manager: Arc<McpConnectionManager>) {
+pub fn register_builtin_handlers(
+  registry: &mut ToolRegistry,
+  mcp_manager: Arc<McpConnectionManager>,
+) {
   registry.register_handler("apply_patch", Arc::new(apply_patch::ApplyPatchHandler));
+  registry.register_handler("edit_file", Arc::new(edit_file::EditFileHandler));
+  registry.register_handler("glob", Arc::new(glob::GlobHandler));
+  registry.register_handler("web_fetch", Arc::new(web_fetch::WebFetchHandler));
   registry.register_handler("read_file", Arc::new(read_file::ReadFileHandler));
   registry.register_handler("write_file", Arc::new(write_file::WriteFileHandler));
   registry.register_handler("list_dir", Arc::new(list_dir::ListDirHandler));
   registry.register_handler("grep_files", Arc::new(grep_files::GrepFilesHandler));
+  registry.register_handler("code_search", Arc::new(code_search::CodeSearchHandler));
   registry.register_handler("search_tool", Arc::new(dynamic::DynamicToolHandler));
   for tool_name in mcp_manager.tool_names() {
-    registry.register_handler(tool_name, Arc::new(mcp::McpHandler::new(Arc::clone(&mcp_manager))));
+    registry.register_handler(
+      tool_name,
+      Arc::new(mcp::McpHandler::new(Arc::clone(&mcp_manager))),
+    );
   }
   registry.register_handler("spawn_agent", Arc::new(spawn_agent::SpawnAgentHandler));
   registry.register_handler("send_input", Arc::new(send_input::SendInputHandler));

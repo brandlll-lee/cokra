@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
+use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -263,6 +264,10 @@ impl TurnExecutor {
     );
     messages.push(ModelMessage::User(env_context));
 
+    if let Some(ctx) = self.build_auto_context(&input.content).await? {
+      messages.push(ModelMessage::User(ctx));
+    }
+
     let history = if let Some(limit) = self.config.context_window_limit {
       self.session.get_history_for_prompt(limit).await
     } else {
@@ -272,6 +277,56 @@ impl TurnExecutor {
     messages.push(ModelMessage::User(input.content));
 
     Ok(messages)
+  }
+
+  async fn build_auto_context(&self, content: &str) -> Result<Option<String>, TurnError> {
+    let query = content.trim();
+    if query.len() < 12 {
+      return Ok(None);
+    }
+
+    let root = self.config.cwd.clone();
+    let query_string = query.to_string();
+    let params = cokra_file_search::SearchParams {
+      root,
+      query: query_string,
+      max_scanned_files: 800,
+      max_hits: 6,
+      max_matches_per_file: 4,
+      max_file_bytes: 192 * 1024,
+    };
+
+    let output = tokio::task::spawn_blocking(move || cokra_file_search::search(params))
+      .await
+      .map_err(map_auto_context_join_error)?
+      .map_err(|err| TurnError::SessionError(format!("auto context search failed: {err:#}")))?;
+
+    if output.hits.is_empty() {
+      return Ok(None);
+    }
+
+    let mut rendered = String::new();
+    rendered.push_str("<auto_context>\n");
+    rendered.push_str("The following snippets were automatically selected from the workspace based on the user's request.\n");
+    rendered.push_str("Use these paths and line numbers for navigation, and prefer read_file for full context when editing.\n\n");
+    rendered.push_str(&format!("query: {}\n", output.query));
+    rendered.push_str(&format!("root: {}\n", output.root.display()));
+    rendered.push_str(&format!("truncated: {}\n\n", output.truncated));
+
+    for hit in output.hits {
+      rendered.push_str(&format!(
+        "- file: {} (score: {})\n",
+        hit.path.display(),
+        hit.score
+      ));
+      for m in hit.matches {
+        rendered.push_str(&format!("  - L{}: {}\n", m.line, m.text));
+      }
+      rendered.push('\n');
+    }
+    rendered.push_str("</auto_context>");
+
+    Ok(Some(rendered))
   }
 
   async fn send_event(&self, event: Event) -> Result<(), TurnError> {
@@ -286,6 +341,10 @@ impl TurnExecutor {
   pub fn cancel_current_turn(&self) {
     self.cancellation_token.cancel();
   }
+}
+
+fn map_auto_context_join_error(err: JoinError) -> TurnError {
+  TurnError::SessionError(format!("auto context worker failed: {err}"))
 }
 
 #[derive(Debug, Clone)]
@@ -319,6 +378,7 @@ mod tests {
   use reqwest::Client;
   use tokio::sync::Mutex;
   use tokio::sync::mpsc;
+  use tempfile::tempdir;
 
   use cokra_protocol::ContentDeltaEvent;
   use cokra_protocol::EventMsg;
@@ -546,6 +606,54 @@ mod tests {
       turn_started_thread_id.as_deref(),
       Some(expected_thread_id.as_str())
     );
+  }
+
+  #[tokio::test]
+  async fn build_messages_includes_auto_context_snippets() -> anyhow::Result<()> {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+    std::fs::create_dir_all(root.join("core/src/tools")).expect("create dirs");
+    let target = root.join("core/src/tools/registry.rs");
+    std::fs::write(
+      &target,
+      "pub struct ToolRegistry {}\nimpl ToolRegistry { pub fn new() -> Self { Self {} } }\n",
+    )
+    .expect("write");
+
+    let model_client = build_client(OrderedProvider::new(vec![vec![ResponseEvent::EndTurn]])).await;
+    let tool_registry = Arc::new(ToolRegistry::new());
+    let tool_router = build_router(tool_registry.clone());
+    let session = Arc::new(Session::new());
+    let (tx_event, _rx_event) = mpsc::channel(64);
+
+    let mut cfg = test_config();
+    cfg.cwd = root.to_path_buf();
+
+    let executor = TurnExecutor::new(
+      model_client,
+      tool_registry,
+      tool_router,
+      session,
+      tx_event,
+      cfg,
+    );
+
+    let messages = executor
+      .build_messages(UserInput {
+        content: "Where is ToolRegistry registered?".to_string(),
+        attachments: Vec::new(),
+      })
+      .await?;
+
+    let ctx = messages.iter().filter_map(|msg| match msg {
+      crate::model::Message::User(text) if text.contains("<auto_context>") => Some(text),
+      _ => None,
+    });
+
+    let rendered = ctx.map(String::as_str).collect::<Vec<_>>().join("\n");
+    assert!(rendered.contains("ToolRegistry"));
+    assert!(rendered.contains(&target.display().to_string()));
+    Ok(())
   }
 
   #[tokio::test]

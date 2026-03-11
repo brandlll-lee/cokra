@@ -18,3 +18,7 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 ignore = "0.4"
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = "3.26.0"

@@ -42,7 +42,6 @@ use crate::app_event::StatusLineMode;
 use crate::app_event::UiMode;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPaneAction;
-use crate::bottom_pane::approval_overlay::ApprovalOverlay;
 use crate::bottom_pane::approval_overlay::ApprovalRequest;
 use crate::bottom_pane::chat_composer::ComposerSubmission;
 use crate::chatwidget::ActiveCellTranscriptKey;
@@ -425,21 +424,24 @@ impl App {
     }
 
     // Fallback: open the appropriate connect flow for this provider if known.
-    if let Some(entry) = PluginRegistry::find(&provider_id) {
+    // Use ProviderAuth::find_connect_entry to support both runtime ids ("github")
+    // and connect catalog ids ("github-copilot").
+    if let Some(entry) = ProviderAuth::find_connect_entry(&provider_id) {
+      let connect_id = entry.id.to_string();
       match entry.connect_method {
         ProviderConnectMethod::OAuth => {
           // start_oauth_connect will surface any missing env/config as an in-TUI error.
-          if let Err(err) = self.start_oauth_connect(&provider_id).await {
+          if let Err(err) = self.start_oauth_connect(&connect_id).await {
             self
               .chat_widget
               .add_to_history(PlainHistoryCell::new(vec![Line::from(
-                format!("● OAuth connect failed for {provider_id}: {err}").red(),
+                format!("● OAuth connect failed for {connect_id}: {err}").red(),
               )]));
           }
           return Ok(());
         }
         ProviderConnectMethod::ApiKey => {
-          self.open_api_key_entry(provider_id, model_id, effort);
+          self.open_api_key_entry(connect_id, model_id, effort);
           return Ok(());
         }
         ProviderConnectMethod::None => {}
@@ -558,8 +560,22 @@ impl App {
         )]));
     }
 
+    let mut runtime_registered = result.runtime_registered;
+
+    if !runtime_registered {
+      if let Ok(registered) = ProviderAuth::ensure_runtime_registered(
+        self.cokra.model_client().registry(),
+        self.cokra.config(),
+        provider_id,
+      )
+      .await
+      {
+        runtime_registered = registered;
+      }
+    }
+
     if let Some(entry) = PluginRegistry::find(provider_id) {
-      if !result.runtime_registered {
+      if !runtime_registered {
         self
           .chat_widget
           .add_to_history(PlainHistoryCell::new(vec![Line::from(
@@ -579,7 +595,7 @@ impl App {
     }
 
     self.cleanup_pending_oauth_flow(provider_id);
-    if result.runtime_registered {
+    if runtime_registered {
       self
         .open_connected_provider_models_popup(provider_id)
         .await?;
@@ -742,7 +758,13 @@ impl App {
         self.open_connect_provider_detail(provider);
       }
       AppEvent::StartOAuthConnect { provider_id } => {
-        self.start_oauth_connect(&provider_id).await?;
+        if let Err(err) = self.start_oauth_connect(&provider_id).await {
+          self
+            .chat_widget
+            .add_to_history(PlainHistoryCell::new(vec![Line::from(
+              format!("● OAuth connect failed for {provider_id}: {err}").red(),
+            )]));
+        }
       }
       AppEvent::CancelOAuthConnect { provider_id } => {
         if let Some(flow) = self.pending_oauth_flows.remove(&provider_id) {
@@ -754,7 +776,13 @@ impl App {
         self.chat_widget.bottom_pane.dismiss_active_view();
       }
       AppEvent::DisconnectProvider { provider_id } => {
-        self.disconnect_provider(&provider_id).await?;
+        if let Err(err) = self.disconnect_provider(&provider_id).await {
+          self
+            .chat_widget
+            .add_to_history(PlainHistoryCell::new(vec![Line::from(
+              format!("● Failed to disconnect provider {provider_id}: {err}").red(),
+            )]));
+        }
       }
       AppEvent::OpenReasoningPopup { model_id } => {
         self.open_reasoning_popup(model_id);
@@ -766,9 +794,16 @@ impl App {
         self.open_api_key_entry(provider_id, model_id, None);
       }
       AppEvent::ApplyModelSelection { model_id, effort } => {
-        self
-          .apply_model_selection_or_connect(model_id, effort)
-          .await?;
+        if let Err(err) = self
+          .apply_model_selection_or_connect(model_id.clone(), effort)
+          .await
+        {
+          self
+            .chat_widget
+            .add_to_history(PlainHistoryCell::new(vec![Line::from(
+              format!("● Failed to apply model selection {model_id}: {err}").red(),
+            )]));
+        }
       }
       AppEvent::OpenBackgroundApproval(req) => {
         self.open_background_approval(req);
@@ -782,15 +817,39 @@ impl App {
         model_id,
         effort,
       } => {
-        self
+        match self
           .register_provider_with_api_key(&provider_id, api_key)
-          .await?;
-        self
-          .apply_model_selection_or_connect(model_id, effort)
-          .await?;
+          .await
+        {
+          Ok(()) => {
+            if let Err(err) = self
+              .apply_model_selection_or_connect(model_id.clone(), effort)
+              .await
+            {
+              self
+                .chat_widget
+                .add_to_history(PlainHistoryCell::new(vec![Line::from(
+                  format!("● Failed to apply model selection {model_id}: {err}").red(),
+                )]));
+            }
+          }
+          Err(err) => {
+            self
+              .chat_widget
+              .add_to_history(PlainHistoryCell::new(vec![Line::from(
+                format!("● Failed to register API key for {provider_id}: {err}").red(),
+              )]));
+          }
+        }
       }
       AppEvent::OAuthCodeSubmitted { provider_id, input } => {
-        self.submit_oauth_code(&provider_id, input).await?;
+        if let Err(err) = self.submit_oauth_code(&provider_id, input).await {
+          self
+            .chat_widget
+            .add_to_history(PlainHistoryCell::new(vec![Line::from(
+              format!("● OAuth code submission failed for {provider_id}: {err}").red(),
+            )]));
+        }
       }
       AppEvent::OAuthCompleted {
         provider_id,
@@ -798,9 +857,19 @@ impl App {
       } => {
         self.chat_widget.bottom_pane.dismiss_active_view();
 
-        self
+        if let Err(err) = self
           .finalize_connected_provider(&provider_id, stored)
-          .await?;
+          .await
+        {
+          if let Some(flow) = self.pending_oauth_flows.remove(&provider_id) {
+            flow.cancel.cancel();
+          }
+          self
+            .chat_widget
+            .add_to_history(PlainHistoryCell::new(vec![Line::from(
+              format!("● OAuth connect succeeded but provider registration failed for {provider_id}: {err}").red(),
+            )]));
+        }
       }
       AppEvent::OAuthFailed {
         provider_id,
@@ -1676,11 +1745,11 @@ impl App {
           self
             .chat_widget
             .bottom_pane
-            .open_approval(ApprovalOverlay::new(ApprovalRequest {
+            .push_approval_request(ApprovalRequest {
               call_id: req.id,
               tool_name: req.tool_name,
               command: format!("{}  (cwd: {})", req.command, req.cwd.display()),
-            }));
+            });
         }
         ChatWidgetAction::ShowRequestUserInput(req) => {
           self.chat_widget.bottom_pane.push_user_input_request(req);
@@ -1697,7 +1766,6 @@ impl App {
       self.task_running = false;
       self.chat_widget.set_agent_turn_running(false);
       self.pending_approval = None;
-      self.chat_widget.bottom_pane.close_approval();
       if self.active_thread_id == self.primary_thread_id {
         self.submit_next_queued_submission().await?;
       }
@@ -2662,11 +2730,11 @@ impl App {
     self
       .chat_widget
       .bottom_pane
-      .open_approval(ApprovalOverlay::new(ApprovalRequest {
+      .push_approval_request(ApprovalRequest {
         call_id: req.id,
         tool_name: req.tool_name,
         command: format!("{}  (cwd: {})", req.command, req.cwd.display()),
-      }));
+      });
     self.sync_bottom_pane_context();
   }
 

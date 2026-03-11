@@ -336,6 +336,10 @@ impl ListSelectionView {
 
 // 1:1 codex: implement BottomPaneView so it can live on the view_stack.
 impl BottomPaneView for ListSelectionView {
+  fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    self
+  }
+
   fn inline_viewport_sizing(&self) -> InlineViewportSizing {
     InlineViewportSizing::ExpandForOverlay
   }

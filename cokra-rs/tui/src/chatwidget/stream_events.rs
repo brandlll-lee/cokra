@@ -6,6 +6,12 @@ use crate::xml_filter::strip_inline_xml_tool_tags;
 use cokra_protocol::AgentMessageContent;
 
 impl ChatWidget {
+  /// Called when a stream finishes (finalized or a non-stream message arrives).
+  /// Flushes any deferred interrupts that were queued while the stream was active.
+  fn handle_stream_finished(&mut self) -> Option<ChatWidgetAction> {
+    self.flush_interrupt_queue()
+  }
+
   pub(super) fn on_agent_message_delta(&mut self, item_id: &str, delta: &str) {
     let xml_filter = self
       .transcript
@@ -22,6 +28,9 @@ impl ChatWidget {
       .insert(item_id.to_string());
     let is_new = self.transcript.stream_controller.is_none();
     let wrap_width = self.streaming_wrap_width();
+    if is_new {
+      self.flush_active_exec_cell();
+    }
     let controller = self
       .transcript
       .stream_controller
@@ -44,9 +53,11 @@ impl ChatWidget {
     &mut self,
     item_id: &str,
     content: &[cokra_protocol::AgentMessageContent],
-  ) {
+  ) -> Option<ChatWidgetAction> {
     if self.transcript.streamed_agent_item_ids.contains(item_id) {
-      return;
+      // Content was already streamed via deltas; finalize the stream.
+      self.flush_answer_stream();
+      return self.handle_stream_finished();
     }
 
     let mut lines = Vec::new();
@@ -61,8 +72,10 @@ impl ChatWidget {
       }
     }
     if !lines.is_empty() {
+      self.flush_answer_stream();
       self.add_to_history(AgentMessageCell::new(lines, true));
     }
+    self.handle_stream_finished()
   }
 
   pub(super) fn on_plan_delta(&mut self, delta: &str) {
@@ -106,6 +119,75 @@ mod tests {
   use crate::tui::FrameRequester;
   use std::path::PathBuf;
   use tokio::sync::mpsc::unbounded_channel;
+
+  #[test]
+  fn animated_preview_flushes_exec_cell_before_agent_text() {
+    let (tx, mut rx) = unbounded_channel();
+    let sender = AppEventSender::new(tx);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::AnimatedPreview,
+    );
+
+    widget.handle_exec_begin_now(&cokra_protocol::ExecCommandBeginEvent {
+      thread_id: "thread-1".to_string(),
+      turn_id: "turn-1".to_string(),
+      command_id: "call-1".to_string(),
+      tool_name: "read_file".to_string(),
+      command: "src/main.rs".to_string(),
+      cwd: PathBuf::from("/tmp/project"),
+    });
+    widget.handle_exec_end_now(&cokra_protocol::ExecCommandEndEvent {
+      thread_id: "thread-1".to_string(),
+      turn_id: "turn-1".to_string(),
+      command_id: "call-1".to_string(),
+      exit_code: 0,
+      output: String::new(),
+    });
+
+    // Before agent text starts, exec cell should still be in active state (not flushed yet)
+    assert!(
+      widget.transcript.active_exec_cell.is_some(),
+      "exec cell should be active before agent text arrives"
+    );
+
+    // First agent delta should trigger flush of exec cell to history
+    widget.on_agent_message_delta("item-1", "Here is the answer");
+
+    let Some(AppEvent::InsertHistoryCell(exec_cell)) = rx.try_recv().ok() else {
+      panic!("expected exec cell to flush to history when agent text starts");
+    };
+    let exec_rendered = exec_cell
+      .display_lines(80)
+      .iter()
+      .map(|line| {
+        line
+          .spans
+          .iter()
+          .map(|span| span.content.clone())
+          .collect::<String>()
+      })
+      .collect::<Vec<_>>()
+      .join("\n");
+    assert!(exec_rendered.contains("Read src/main.rs"));
+
+    // Exec cell should no longer be active
+    assert!(
+      widget.transcript.active_exec_cell.is_none(),
+      "exec cell should be flushed after agent text starts"
+    );
+
+    // Subsequent deltas should not flush again (only commit animation events are allowed)
+    widget.on_agent_message_delta("item-1", " and more text");
+    while let Ok(event) = rx.try_recv() {
+      assert!(
+        matches!(event, AppEvent::StartCommitAnimation),
+        "subsequent deltas should only emit StartCommitAnimation, got {event:?}"
+      );
+    }
+  }
 
   #[test]
   fn agent_delta_updates_active_preview_immediately() {
@@ -210,7 +292,7 @@ mod tests {
       StreamRenderMode::ScrollbackFirst,
     );
 
-    widget.on_exec_command_begin(&cokra_protocol::ExecCommandBeginEvent {
+    widget.handle_exec_begin_now(&cokra_protocol::ExecCommandBeginEvent {
       thread_id: "thread-1".to_string(),
       turn_id: "turn-1".to_string(),
       command_id: "call-1".to_string(),
@@ -218,7 +300,7 @@ mod tests {
       command: "core/src".to_string(),
       cwd: PathBuf::from("/tmp/project"),
     });
-    widget.on_exec_command_end(&cokra_protocol::ExecCommandEndEvent {
+    widget.handle_exec_end_now(&cokra_protocol::ExecCommandEndEvent {
       thread_id: "thread-1".to_string(),
       turn_id: "turn-1".to_string(),
       command_id: "call-1".to_string(),

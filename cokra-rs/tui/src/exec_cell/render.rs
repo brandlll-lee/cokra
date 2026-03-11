@@ -22,6 +22,7 @@ use crate::wrapping::word_wrap_lines;
 
 pub(crate) const TOOL_CALL_MAX_LINES: usize = 5;
 const SHELL_TOOL_CALL_MAX_LINES: usize = 2;
+const EXPLORING_SUMMARY_MAX_ITEMS: usize = 3;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OutputLinesParams {
@@ -291,7 +292,7 @@ impl ExecCell {
       },
     ]));
 
-    let mut summary_lines = Vec::new();
+    let mut summary_items = Vec::new();
     let mut idx = 0usize;
     while idx < self.calls.len() {
       let call = &self.calls[idx];
@@ -305,18 +306,31 @@ impl ExecCell {
           }
           idx += 1;
         }
-        summary_lines.extend(wrap_exploring_line(width, "Read", names.join(", ")));
+        summary_items.push(wrap_exploring_line(width, "Read", names.join(", ")));
         continue;
       }
 
       let title = match call.tool_name.as_str() {
         "list_dir" => "List",
-        "grep_files" | "search_tool" => "Search",
+        "grep_files" | "search_tool" | "code_search" => "Search",
         _ => "Run",
       };
-      summary_lines.extend(wrap_exploring_line(width, title, call.command.clone()));
+      summary_items.push(wrap_exploring_line(width, title, call.command.clone()));
       idx += 1;
     }
+
+    let total = summary_items.len();
+    let omitted = total.saturating_sub(EXPLORING_SUMMARY_MAX_ITEMS);
+    let visible_items = summary_items
+      .into_iter()
+      .skip(omitted)
+      .flatten()
+      .collect::<Vec<_>>();
+    let mut summary_lines = Vec::new();
+    if omitted > 0 {
+      summary_lines.push(Line::from(Span::from(format!("… +{omitted} more")).dim()));
+    }
+    summary_lines.extend(visible_items);
 
     lines.extend(prefix_lines(summary_lines, "  └ ".dim(), "    ".into()));
     lines
@@ -325,8 +339,14 @@ impl ExecCell {
 
 fn wrap_exploring_line(width: u16, title: &str, content: String) -> Vec<Line<'static>> {
   let width = width.max(1) as usize;
-  let continuation = " ".repeat(title.len() + 1);
-  let available_width = width.saturating_sub(continuation.len()).max(1);
+  // "  └ " / "    " prefix added by prefix_lines is 4 chars wide.
+  const OUTER_PREFIX_WIDTH: usize = 4;
+  // Continuation indent aligns text after "<Title> " on the first line.
+  // The outer prefix_lines subsequent span ("    ") already provides 4 chars,
+  // so the inner continuation only needs (title.len() + 1) extra spaces.
+  let continuation_extra = " ".repeat(title.len() + 1);
+  let first_line_prefix_width = OUTER_PREFIX_WIDTH + title.len() + 1;
+  let available_width = width.saturating_sub(first_line_prefix_width).max(1);
   let wrapped = textwrap::wrap(&content, available_width);
 
   wrapped
@@ -339,7 +359,7 @@ fn wrap_exploring_line(width: u16, title: &str, content: String) -> Vec<Line<'st
           " ".into(),
         ])
       } else {
-        continuation.clone().into()
+        continuation_extra.clone().into()
       };
       let mut out = prefix;
       out.push_span(line.into_owned());
@@ -497,6 +517,76 @@ mod tests {
     assert!(
       !rendered.iter().any(|line| line.contains("line 8")),
       "shell preview should not keep more than two tail lines"
+    );
+  }
+
+  #[test]
+  fn exploring_summary_caps_visible_items() {
+    let mut cell = ExecCell::new(
+      ExecCall {
+        command_id: "call-1".to_string(),
+        tool_name: "code_search".to_string(),
+        command: "agentteams".to_string(),
+        cwd: PathBuf::from("/home/user/project"),
+        output: Some(CommandOutput {
+          exit_code: 0,
+          output: "{}".to_string(),
+        }),
+        start_time: None,
+        duration: Some(Duration::from_millis(1)),
+      },
+      false,
+    );
+    cell.push_call(ExecCall {
+      command_id: "call-2".to_string(),
+      tool_name: "code_search".to_string(),
+      command: "spawn_agent".to_string(),
+      cwd: PathBuf::from("/home/user/project"),
+      output: Some(CommandOutput {
+        exit_code: 0,
+        output: "{}".to_string(),
+      }),
+      start_time: None,
+      duration: Some(Duration::from_millis(1)),
+    });
+    cell.push_call(ExecCall {
+      command_id: "call-3".to_string(),
+      tool_name: "code_search".to_string(),
+      command: "team_status".to_string(),
+      cwd: PathBuf::from("/home/user/project"),
+      output: Some(CommandOutput {
+        exit_code: 0,
+        output: "{}".to_string(),
+      }),
+      start_time: None,
+      duration: Some(Duration::from_millis(1)),
+    });
+    cell.push_call(ExecCall {
+      command_id: "call-4".to_string(),
+      tool_name: "code_search".to_string(),
+      command: "cleanup_team".to_string(),
+      cwd: PathBuf::from("/home/user/project"),
+      output: Some(CommandOutput {
+        exit_code: 0,
+        output: "{}".to_string(),
+      }),
+      start_time: None,
+      duration: Some(Duration::from_millis(1)),
+    });
+
+    let rendered = cell
+      .display_lines(80)
+      .iter()
+      .map(Line::to_string)
+      .collect::<Vec<_>>();
+
+    assert!(rendered.iter().any(|line| line.contains("Search spawn_agent")));
+    assert!(rendered.iter().any(|line| line.contains("Search team_status")));
+    assert!(rendered.iter().any(|line| line.contains("Search cleanup_team")));
+    assert!(rendered.iter().any(|line| line.contains("… +1 more")));
+    assert!(
+      !rendered.iter().any(|line| line.contains("agentteams")),
+      "exploring summary should hide earliest items, showing only the latest 3"
     );
   }
 }

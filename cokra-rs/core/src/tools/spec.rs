@@ -122,10 +122,13 @@ pub fn build_specs() -> Vec<ToolSpec> {
     shell_tool(),
     unified_exec_tool(),
     apply_patch_tool(),
+    edit_file_tool(),
     read_file_tool(),
     write_file_tool(),
     list_dir_tool(),
     grep_files_tool(),
+    glob_tool(),
+    code_search_tool(),
     search_tool(),
     spawn_agent_tool(),
     send_input_tool(),
@@ -147,6 +150,7 @@ pub fn build_specs() -> Vec<ToolSpec> {
     plan_tool(),
     request_user_input_tool(),
     view_image_tool(),
+    web_fetch_tool(),
   ]
 }
 
@@ -208,7 +212,9 @@ fn shell_tool() -> ToolSpec {
   );
   props.insert(
     "sandbox_permissions".to_string(),
-    str_field("Optional sandbox mode: use_default, with_additional_permissions, or require_escalated."),
+    str_field(
+      "Optional sandbox mode: use_default, with_additional_permissions, or require_escalated.",
+    ),
   );
   props.insert(
     "justification".to_string(),
@@ -218,7 +224,9 @@ fn shell_tool() -> ToolSpec {
     "prefix_rule".to_string(),
     JsonSchema::Array {
       items: Box::new(str_field("Command prefix segment.")),
-      description: Some("Optional reusable command prefix rule, for example [\"cargo\", \"test\"].".to_string()),
+      description: Some(
+        "Optional reusable command prefix rule, for example [\"cargo\", \"test\"].".to_string(),
+      ),
     },
   );
   props.insert(
@@ -241,7 +249,9 @@ fn unified_exec_tool() -> ToolSpec {
     "command".to_string(),
     JsonSchema::Array {
       items: Box::new(str_field("Program or argument segment.")),
-      description: Some("Full argv as an array. The first element must be the program.".to_string()),
+      description: Some(
+        "Full argv as an array. The first element must be the program.".to_string(),
+      ),
     },
   );
   props.insert(
@@ -256,7 +266,9 @@ fn unified_exec_tool() -> ToolSpec {
   );
   props.insert(
     "sandbox_permissions".to_string(),
-    str_field("Optional sandbox mode: use_default, with_additional_permissions, or require_escalated."),
+    str_field(
+      "Optional sandbox mode: use_default, with_additional_permissions, or require_escalated.",
+    ),
   );
   props.insert(
     "justification".to_string(),
@@ -266,7 +278,9 @@ fn unified_exec_tool() -> ToolSpec {
     "prefix_rule".to_string(),
     JsonSchema::Array {
       items: Box::new(str_field("Command prefix segment.")),
-      description: Some("Optional reusable command prefix rule, for example [\"cargo\", \"test\"].".to_string()),
+      description: Some(
+        "Optional reusable command prefix rule, for example [\"cargo\", \"test\"].".to_string(),
+      ),
     },
   );
   props.insert(
@@ -337,6 +351,41 @@ fn permission_profile_schema() -> JsonSchema {
     required: Some(Vec::new()),
     additional_properties: Some(false.into()),
   }
+}
+
+fn edit_file_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "file_path".to_string(),
+    str_field("Absolute path to the file to edit."),
+  );
+  props.insert(
+    "old_string".to_string(),
+    str_field(
+      "The text to replace. Must match exactly (including whitespace and indentation). \
+       Use an empty string to create a new file.",
+    ),
+  );
+  props.insert(
+    "new_string".to_string(),
+    str_field("The replacement text. Must be different from old_string."),
+  );
+  props.insert(
+    "replace_all".to_string(),
+    bool_field(
+      "When true, replace all occurrences of old_string. Default false (single replacement).",
+    ),
+  );
+  ToolSpec::new(
+    "edit_file",
+    "Make precise text replacements in an existing file. Finds old_string and replaces it with \
+     new_string. Use this for targeted edits instead of rewriting entire files. Supports CRLF \
+     normalisation and whitespace-aware error hints. Use empty old_string to create a new file.",
+    obj(props, &["file_path", "old_string", "new_string"]),
+    None,
+    ToolHandlerType::Function,
+    mutating_permissions(),
+  )
 }
 
 fn apply_patch_tool() -> ToolSpec {
@@ -436,6 +485,31 @@ fn list_dir_tool() -> ToolSpec {
   )
 }
 
+fn glob_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "pattern".to_string(),
+    str_field("The glob pattern to match files against (e.g. \"*.rs\", \"**/*.ts\")."),
+  );
+  props.insert(
+    "path".to_string(),
+    str_field(
+      "Optional directory to search in. Defaults to the session working directory. \
+       Can be absolute or relative to the working directory.",
+    ),
+  );
+  ToolSpec::new(
+    "glob",
+    "Find files by glob pattern. Returns matching file paths sorted alphabetically. \
+     Uses ripgrep for fast gitignore-aware file discovery. Results are capped at 100 files. \
+     Use this instead of shell commands like find or ls for file discovery.",
+    obj(props, &["pattern"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
 fn grep_files_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
   props.insert(
@@ -458,6 +532,33 @@ fn grep_files_tool() -> ToolSpec {
     "grep_files",
     "Finds files whose contents match the pattern and lists them by modification time. Use this instead of shell commands like grep or rg for searching code.",
     obj(props, &["pattern"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn code_search_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert("query".to_string(), str_field("Search query text."));
+  props.insert(
+    "path".to_string(),
+    str_field(
+      "Optional directory or file path to search. Defaults to the session working directory.",
+    ),
+  );
+  props.insert(
+    "limit".to_string(),
+    int_field("Maximum number of files to return (default 10)."),
+  );
+  props.insert(
+    "max_matches_per_file".to_string(),
+    int_field("Maximum snippet matches per file (default 8)."),
+  );
+  ToolSpec::new(
+    "code_search",
+    "Search the local workspace for code/text matching a query and return ranked file hits with line-numbered snippets.",
+    obj(props, &["query"]),
     None,
     ToolHandlerType::Function,
     default_permissions(),
@@ -876,6 +977,39 @@ fn request_user_input_tool() -> ToolSpec {
     None,
     ToolHandlerType::Function,
     default_permissions(),
+  )
+}
+
+fn web_fetch_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "url".to_string(),
+    str_field("The URL to fetch content from. Must start with http:// or https://."),
+  );
+  props.insert(
+    "format".to_string(),
+    str_field(
+      "Response format: 'text' (default, HTML converted to plain text), \
+       'html' (raw HTML), or 'raw' (unprocessed response body).",
+    ),
+  );
+  props.insert(
+    "timeout".to_string(),
+    int_field("Optional timeout in seconds (default 30, max 120)."),
+  );
+  ToolSpec::new(
+    "web_fetch",
+    "Fetch content from a URL. Supports HTML-to-text conversion for readable output. \
+     Use this to read web documentation, API references, or any online resource. \
+     Response is capped at 5MB with automatic text truncation for large pages.",
+    obj(props, &["url"]),
+    None,
+    ToolHandlerType::Function,
+    ToolPermissions {
+      requires_approval: true,
+      allow_network: true,
+      allow_fs_write: false,
+    },
   )
 }
 

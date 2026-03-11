@@ -141,7 +141,7 @@ impl ExecCell {
   pub(crate) fn is_exploring_call(call: &ExecCall) -> bool {
     matches!(
       call.tool_name.as_str(),
-      "read_file" | "list_dir" | "grep_files" | "search_tool"
+      "read_file" | "list_dir" | "grep_files" | "search_tool" | "code_search"
     )
   }
 }
@@ -186,5 +186,15 @@ mod tests {
         .is_some(),
       "completed exploring groups should keep coalescing until the transcript flushes them"
     );
+  }
+
+  #[test]
+  fn code_search_is_treated_as_exploring() {
+    let cell = ExecCell::new(
+      exploring_call("c1", "code_search", "spawn_agent", true),
+      false,
+    );
+
+    assert!(cell.is_exploring_cell());
   }
 }

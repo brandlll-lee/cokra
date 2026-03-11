@@ -323,6 +323,11 @@ fn summarize_tool_display_command(call: &ToolCall, cwd: &Path) -> Option<String>
       .get("query")
       .and_then(Value::as_str)
       .map(ToString::to_string),
+    "code_search" => call
+      .args
+      .get("query")
+      .and_then(Value::as_str)
+      .map(ToString::to_string),
     _ => None,
   }
 }
@@ -675,7 +680,13 @@ fn map_tool_error(err: ToolError) -> FunctionCallError {
 
 #[cfg(test)]
 mod tests {
+  use std::path::Path;
+
+  use serde_json::json;
+
   use super::should_emit_exec_events;
+  use super::summarize_tool_display_command;
+  use super::ToolCall;
 
   #[test]
   fn collab_tools_skip_exec_transcript_events() {
@@ -683,5 +694,22 @@ mod tests {
     assert!(!should_emit_exec_events("wait"));
     assert!(!should_emit_exec_events("team_status"));
     assert!(should_emit_exec_events("read_file"));
+  }
+
+  #[test]
+  fn code_search_uses_query_as_display_command() {
+    let call = ToolCall {
+      tool_name: "code_search".to_string(),
+      call_id: "call-1".to_string(),
+      args: json!({
+        "query": "spawn_agent",
+        "path": "/tmp/project"
+      }),
+    };
+
+    assert_eq!(
+      summarize_tool_display_command(&call, Path::new("/tmp/project")),
+      Some("spawn_agent".to_string())
+    );
   }
 }

@@ -1,2 +1,0 @@
-// Stub - see openrouter.rs
-pub struct OpenRouterProvider;

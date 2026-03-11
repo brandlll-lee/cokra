@@ -152,11 +152,6 @@ impl AuthManager {
             "API key is empty".to_string(),
           ));
         }
-        if key.len() < 10 {
-          return Err(AuthError::InvalidCredentials(
-            "API key is too short".to_string(),
-          ));
-        }
         Ok(())
       }
       Credentials::OAuth {
@@ -487,6 +482,24 @@ mod tests {
 
     let invalid = Credentials::ApiKey { key: String::new() };
     assert!(manager.validate(&invalid).is_err());
+  }
+
+  #[test]
+  fn validate_accepts_short_api_keys() {
+    let manager = AuthManager::memory();
+
+    let short_key = Credentials::ApiKey {
+      key: "short".to_string(),
+    };
+    assert!(
+      manager.validate(&short_key).is_ok(),
+      "short API keys must not be rejected by length check"
+    );
+
+    let single_char = Credentials::ApiKey {
+      key: "x".to_string(),
+    };
+    assert!(manager.validate(&single_char).is_ok());
   }
 
   #[test]

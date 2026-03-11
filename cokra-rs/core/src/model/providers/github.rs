@@ -79,6 +79,9 @@ impl GitHubCopilotProvider {
       .map(str::trim)
       .filter(|value| !value.is_empty())
       .map(ToString::to_string)
+      .or_else(|| {
+        super::super::oauth_connect::get_github_base_url_from_token(access_token)
+      })
       .unwrap_or_else(|| provider_base_url(&config, enterprise_url.as_deref()));
 
     Ok(Self {

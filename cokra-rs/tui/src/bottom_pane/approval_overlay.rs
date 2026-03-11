@@ -1,20 +1,26 @@
+//! 1:1 codex ApprovalOverlay: a BottomPaneView backed by ListSelectionView.
+//!
+//! When the agent requests approval, this view replaces the composer in the
+//! bottom pane, showing the tool/command and a list of selectable options.
+
+use crossterm::event::KeyCode;
+use crossterm::event::KeyEvent;
+use crossterm::event::KeyEventKind;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Alignment;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
-use ratatui::text::Span;
-use ratatui::widgets::Block;
-use ratatui::widgets::BorderType;
-use ratatui::widgets::Borders;
-use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
-use ratatui::widgets::Widget;
 
-use crate::wrapping::RtOptions;
-use crate::wrapping::word_wrap_lines;
+use super::bottom_pane_view::BottomPaneView;
+use super::list_selection_view::ListSelectionView;
+use super::list_selection_view::SelectionItem;
+use super::list_selection_view::SelectionViewParams;
+use crate::app_event_sender::AppEventSender;
+use crate::render::renderable::ColumnRenderable;
+use crate::render::renderable::Renderable;
+use crate::tui::InlineViewportSizing;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ApprovalRequest {
@@ -30,116 +36,170 @@ pub(crate) enum ApprovalChoice {
   Deny,
 }
 
-#[derive(Clone, Debug)]
+/// 1:1 codex ApprovalOverlay: modal view shown in the bottom pane view_stack.
 pub(crate) struct ApprovalOverlay {
   request: ApprovalRequest,
-  selected: ApprovalChoice,
+  list: ListSelectionView,
+  options: Vec<ApprovalChoice>,
+  done: bool,
+  selected_choice: Option<ApprovalChoice>,
 }
 
 impl ApprovalOverlay {
-  pub(crate) fn new(request: ApprovalRequest) -> Self {
-    Self {
-      request,
-      selected: ApprovalChoice::Allow,
-    }
-  }
+  pub(crate) fn new(request: ApprovalRequest, app_event_tx: AppEventSender) -> Self {
+    let options = vec![
+      ApprovalChoice::Allow,
+      ApprovalChoice::AllowAlways,
+      ApprovalChoice::Deny,
+    ];
 
-  pub(crate) fn selected(&self) -> ApprovalChoice {
-    self.selected
-  }
+    let header = build_header(&request);
 
-  fn option_span(&self, choice: ApprovalChoice, label: &str) -> Span<'static> {
-    if self.selected == choice {
-      label.to_string().bold().add_modifier(Modifier::REVERSED)
-    } else {
-      label.to_string().into()
-    }
-  }
+    let items = vec![
+      SelectionItem {
+        name: "Yes, proceed".to_string(),
+        dismiss_on_select: false,
+        ..Default::default()
+      },
+      SelectionItem {
+        name: "Yes, and don't ask again for this tool in this session".to_string(),
+        dismiss_on_select: false,
+        ..Default::default()
+      },
+      SelectionItem {
+        name: "No, and tell the agent what to do differently".to_string(),
+        dismiss_on_select: false,
+        ..Default::default()
+      },
+    ];
 
-  fn content_lines(&self, inner_width: u16) -> Vec<Line<'static>> {
-    let inner_width = inner_width.max(1);
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    // Wrap the tool/command so narrow terminals still display the full context.
-    for line in [
-      Line::from(format!("Tool: {}", self.request.tool_name)),
-      Line::from(format!("Command: {}", self.request.command)),
-    ] {
-      let wrapped = word_wrap_lines(vec![line], RtOptions::new(inner_width as usize));
-      lines.extend(wrapped);
-    }
-
-    lines.push(Line::from(""));
-
-    lines.push(Line::from(vec![
-      self.option_span(ApprovalChoice::Allow, "[Allow]"),
-      Span::raw("  "),
-      self.option_span(ApprovalChoice::AllowAlways, "[Allow Always]"),
-      Span::raw("  "),
-      self.option_span(ApprovalChoice::Deny, "[Deny]"),
+    let header = Box::new(ColumnRenderable::with([
+      Line::from(
+        "Would you like to allow the following tool call?".bold(),
+      )
+      .into(),
+      Line::from("").into(),
+      header,
     ]));
 
-    lines
-  }
-
-  pub(crate) fn desired_height(&self, width: u16) -> u16 {
-    // Border consumes 2 rows; content wraps to the remaining width.
-    let inner_width = width.saturating_sub(2).max(1);
-    let content_rows = self
-      .content_lines(inner_width)
-      .len()
-      .try_into()
-      .unwrap_or(u16::MAX);
-    content_rows.saturating_add(2)
-  }
-
-  pub(crate) fn move_left(&mut self) {
-    self.selected = match self.selected {
-      ApprovalChoice::Allow => ApprovalChoice::Allow,
-      ApprovalChoice::AllowAlways => ApprovalChoice::Allow,
-      ApprovalChoice::Deny => ApprovalChoice::AllowAlways,
+    let params = SelectionViewParams {
+      footer_hint: Some(Line::from(vec![
+        "Press ".into(),
+        "Enter".bold(),
+        " to confirm, ".into(),
+        "y".bold(),
+        " allow, ".into(),
+        "a".bold(),
+        " always, ".into(),
+        "n".bold(),
+        "/".into(),
+        "Esc".bold(),
+        " deny".into(),
+      ])),
+      items,
+      header,
+      ..Default::default()
     };
+
+    let list = ListSelectionView::new(params, app_event_tx);
+
+    Self {
+      request,
+      list,
+      options,
+      done: false,
+      selected_choice: None,
+    }
   }
 
-  pub(crate) fn move_right(&mut self) {
-    self.selected = match self.selected {
-      ApprovalChoice::Allow => ApprovalChoice::AllowAlways,
-      ApprovalChoice::AllowAlways => ApprovalChoice::Deny,
-      ApprovalChoice::Deny => ApprovalChoice::Deny,
-    };
+  pub(crate) fn request(&self) -> &ApprovalRequest {
+    &self.request
   }
 
-  pub(crate) fn render(&self, area: Rect, buf: &mut Buffer) {
-    if area.width < 10 || area.height < 5 {
+  pub(crate) fn take_choice(&mut self) -> Option<ApprovalChoice> {
+    self.selected_choice.take()
+  }
+
+  fn apply_selection(&mut self, idx: usize) {
+    if self.done {
       return;
     }
-
-    let w = area.width.saturating_sub(2).min(96).max(10);
-    let desired_h = self.desired_height(w);
-    let h = desired_h.min(area.height.saturating_sub(0).max(1));
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let modal = Rect {
-      x,
-      y,
-      width: w,
-      height: h,
-    };
-
-    Clear.render(modal, buf);
-
-    let block = Block::default()
-      .title("Approval Required")
-      .borders(Borders::ALL)
-      .border_type(BorderType::Rounded);
-
-    let inner_width = modal.width.saturating_sub(2).max(1);
-    let lines = self.content_lines(inner_width);
-
-    Paragraph::new(lines)
-      .block(block)
-      .alignment(Alignment::Left)
-      .wrap(Wrap { trim: true })
-      .render(modal, buf);
+    if let Some(choice) = self.options.get(idx) {
+      self.selected_choice = Some(*choice);
+      self.done = true;
+    }
   }
+}
+
+impl BottomPaneView for ApprovalOverlay {
+  fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    self
+  }
+
+  fn inline_viewport_sizing(&self) -> InlineViewportSizing {
+    InlineViewportSizing::ExpandForOverlay
+  }
+
+  fn handle_key_event(&mut self, key_event: KeyEvent) {
+    if key_event.kind != KeyEventKind::Press {
+      return;
+    }
+    // Shortcut keys: y=Allow, a=AllowAlways, n=Deny
+    match key_event.code {
+      KeyCode::Char('y') => {
+        self.apply_selection(0);
+        return;
+      }
+      KeyCode::Char('a') => {
+        self.apply_selection(1);
+        return;
+      }
+      KeyCode::Char('n') => {
+        self.apply_selection(2);
+        return;
+      }
+      _ => {}
+    }
+    self.list.handle_key_event(key_event);
+    if let Some(idx) = self.list.take_last_selected_index() {
+      self.apply_selection(idx);
+    }
+  }
+
+  fn is_complete(&self) -> bool {
+    self.done
+  }
+
+  fn on_cancel(&mut self) -> bool {
+    // Esc = Deny
+    self.selected_choice = Some(ApprovalChoice::Deny);
+    self.done = true;
+    true
+  }
+}
+
+impl Renderable for ApprovalOverlay {
+  fn desired_height(&self, width: u16) -> u16 {
+    self.list.desired_height(width)
+  }
+
+  fn render(&self, area: Rect, buf: &mut Buffer) {
+    self.list.render(area, buf);
+  }
+
+  fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+    self.list.cursor_pos(area)
+  }
+}
+
+fn build_header(request: &ApprovalRequest) -> Box<dyn Renderable> {
+  let lines = vec![
+    Line::from(vec![
+      "Tool: ".into(),
+      request.tool_name.clone().bold(),
+    ]),
+    Line::from(""),
+    Line::from(request.command.clone()),
+  ];
+  Box::new(Paragraph::new(lines).wrap(Wrap { trim: false }))
 }

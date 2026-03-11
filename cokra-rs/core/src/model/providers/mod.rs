@@ -396,13 +396,11 @@ async fn register_stored_connect_providers(
     if entry.id == "openai" && openai_codex_present {
       continue;
     }
-    let stored = auth
-      .load_for_runtime_registration(entry.id)
-      .await
-      .ok()
-      .flatten();
-    let Some(stored) = stored else {
-      continue;
+    let stored = match auth.load_for_runtime_registration(entry.id).await {
+      Ok(Some(stored)) => stored,
+      Ok(None) => continue,
+      Err(super::auth::AuthError::TokenExpired(_)) => continue,
+      Err(_) => continue,
     };
     let Some(token) = registration_token_for_stored(entry.runtime_registration, &stored) else {
       continue;
@@ -548,6 +546,7 @@ pub fn registration_token_for_stored(
         .to_string(),
       )
     }
+    RuntimeRegistrationKind::None => None,
     _ => match &stored.credentials {
       super::auth::Credentials::ApiKey { key } => Some(key.clone()),
       super::auth::Credentials::OAuth { access_token, .. } => Some(access_token.clone()),
@@ -869,5 +868,82 @@ mod tests {
     assert_eq!(payload["token"], json!("oauth-access"));
     assert_eq!(payload["projectId"], json!("proj-123"));
     assert_eq!(payload.as_object().map(|value| value.len()), Some(2));
+  }
+
+  #[test]
+  fn registration_token_for_github_copilot_oauth_returns_access_token() {
+    let stored = StoredCredentials::new(
+      "github-copilot",
+      Credentials::OAuth {
+        access_token: "ghu_copilot_token".to_string(),
+        refresh_token: "ghu_github_token".to_string(),
+        expires_at: 1_777_777_777,
+        account_id: None,
+        enterprise_url: None,
+      },
+    );
+
+    let token = registration_token_for_stored(RuntimeRegistrationKind::GitHubCopilot, &stored);
+    assert_eq!(token.as_deref(), Some("ghu_copilot_token"));
+  }
+
+  #[test]
+  fn registration_token_for_anthropic_oauth_returns_access_token() {
+    let stored = StoredCredentials::new(
+      "anthropic-oauth",
+      Credentials::OAuth {
+        access_token: "claude_access_token".to_string(),
+        refresh_token: "claude_refresh_token".to_string(),
+        expires_at: 1_777_777_777,
+        account_id: None,
+        enterprise_url: None,
+      },
+    );
+
+    let token = registration_token_for_stored(RuntimeRegistrationKind::Anthropic, &stored);
+    assert_eq!(token.as_deref(), Some("claude_access_token"));
+  }
+
+  #[test]
+  fn registration_token_for_openrouter_api_key_returns_key() {
+    let stored = StoredCredentials::new(
+      "openrouter",
+      Credentials::ApiKey {
+        key: "sk-or-v1-abc123".to_string(),
+      },
+    );
+
+    let token = registration_token_for_stored(RuntimeRegistrationKind::OpenRouter, &stored);
+    assert_eq!(token.as_deref(), Some("sk-or-v1-abc123"));
+  }
+
+  #[test]
+  fn registration_token_for_none_returns_none_for_any_credentials() {
+    let stored = StoredCredentials::new(
+      "no-runtime",
+      Credentials::ApiKey {
+        key: "sk-some-key".to_string(),
+      },
+    );
+
+    let token = registration_token_for_stored(RuntimeRegistrationKind::None, &stored);
+    assert!(token.is_none());
+  }
+
+  #[test]
+  fn registration_token_for_github_copilot_device_code_returns_none() {
+    let stored = StoredCredentials::new(
+      "github-copilot",
+      Credentials::DeviceCode {
+        device_code: "device_abc".to_string(),
+        user_code: "USER-CODE".to_string(),
+        verification_url: "https://github.com/login/device".to_string(),
+        expires_in: 900,
+        interval: 5,
+      },
+    );
+
+    let token = registration_token_for_stored(RuntimeRegistrationKind::GitHubCopilot, &stored);
+    assert!(token.is_none());
   }
 }

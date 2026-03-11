@@ -5,15 +5,17 @@ use crate::exec_cell::ExecCall;
 use crate::exec_cell::ExecCell;
 use crate::exec_cell::model::CommandOutput;
 use crate::exec_cell::new_active_exec_command;
+use crate::history_cell::ApprovalRequestedHistoryCell;
 use crate::history_cell::ExecHistoryCell;
+use cokra_protocol::ExecApprovalRequestEvent;
 
 impl ChatWidget {
   fn sync_exec_status_indicator(&mut self) {
     self.sync_status_indicator();
   }
 
-  pub(super) fn on_exec_command_begin(&mut self, event: &cokra_protocol::ExecCommandBeginEvent) {
-    self.flush_stream_controllers();
+  pub(super) fn handle_exec_begin_now(&mut self, event: &cokra_protocol::ExecCommandBeginEvent) {
+    self.flush_answer_stream();
 
     let call = ExecCall {
       command_id: event.command_id.clone(),
@@ -84,7 +86,21 @@ impl ChatWidget {
     }
   }
 
-  pub(super) fn on_exec_command_end(&mut self, event: &cokra_protocol::ExecCommandEndEvent) {
+  pub(super) fn handle_exec_approval_now(
+    &mut self,
+    ev: ExecApprovalRequestEvent,
+  ) -> ChatWidgetAction {
+    self.flush_answer_stream();
+    // Use preserving variant: the exec cell (e.g. apply_patch) is still Running
+    // and will be completed by the subsequent ExecCommandEnd event. Flushing it
+    // here would strand a half-finished "Running" cell in the transcript.
+    self.add_to_history_preserving_exec(ApprovalRequestedHistoryCell {
+      command: ev.command.clone(),
+    });
+    ChatWidgetAction::ShowApproval(ev)
+  }
+
+  pub(super) fn handle_exec_end_now(&mut self, event: &cokra_protocol::ExecCommandEndEvent) {
     let mut call = self
       .transcript
       .pending_exec_calls
@@ -214,8 +230,8 @@ mod tests {
   fn exec_end_restores_working_status_when_no_active_exec_calls_remain() {
     let mut widget = make_widget();
 
-    widget.on_exec_command_begin(&begin_event("call-1", "read_file", "read_file"));
-    widget.on_exec_command_end(&end_event("call-1"));
+    widget.handle_exec_begin_now(&begin_event("call-1", "read_file", "read_file"));
+    widget.handle_exec_end_now(&end_event("call-1"));
 
     let status = widget
       .bottom_pane
@@ -229,9 +245,9 @@ mod tests {
   fn exec_end_switches_status_back_to_remaining_active_call() {
     let mut widget = make_widget();
 
-    widget.on_exec_command_begin(&begin_event("call-1", "list_dir", "list_dir"));
-    widget.on_exec_command_begin(&begin_event("call-2", "read_file", "read_file"));
-    widget.on_exec_command_end(&end_event("call-2"));
+    widget.handle_exec_begin_now(&begin_event("call-1", "list_dir", "list_dir"));
+    widget.handle_exec_begin_now(&begin_event("call-2", "read_file", "read_file"));
+    widget.handle_exec_end_now(&end_event("call-2"));
 
     let status = widget
       .bottom_pane
@@ -245,7 +261,7 @@ mod tests {
   fn exec_end_does_not_duplicate_output_when_end_contains_full_snapshot() {
     let mut widget = make_widget();
 
-    widget.on_exec_command_begin(&begin_event("call-1", "read_file", "read_file"));
+    widget.handle_exec_begin_now(&begin_event("call-1", "read_file", "read_file"));
     widget.on_exec_command_output_delta(&delta_event("call-1", "a\n"));
 
     // Simulate a producer that sends deltas and then includes the full snapshot in the end event.
@@ -256,7 +272,7 @@ mod tests {
       exit_code: 0,
       output: "a\nb\n".to_string(),
     };
-    widget.on_exec_command_end(&end);
+    widget.handle_exec_end_now(&end);
 
     let cell = widget
       .transcript
@@ -278,7 +294,7 @@ mod tests {
         delta: "**Investigating rendering code** gathering files".to_string(),
       },
     ));
-    widget.on_exec_command_begin(&begin_event("call-1", "read_file", "read_file"));
+    widget.handle_exec_begin_now(&begin_event("call-1", "read_file", "read_file"));
 
     let status = widget
       .bottom_pane
@@ -286,7 +302,7 @@ mod tests {
       .expect("status should stay visible while exec runs");
     assert_eq!(status.header(), "Running read_file");
 
-    widget.on_exec_command_end(&end_event("call-1"));
+    widget.handle_exec_end_now(&end_event("call-1"));
 
     let status = widget
       .bottom_pane
@@ -300,12 +316,12 @@ mod tests {
   fn sequential_exploring_calls_stay_in_one_exec_cell() {
     let mut widget = make_widget();
 
-    widget.on_exec_command_begin(&begin_event("call-1", "list_dir", "cokra-rs"));
-    widget.on_exec_command_end(&end_event("call-1"));
-    widget.on_exec_command_begin(&begin_event("call-2", "read_file", "PROJECT_STRUCTURE.md"));
-    widget.on_exec_command_end(&end_event("call-2"));
-    widget.on_exec_command_begin(&begin_event("call-3", "search_tool", "ExecCell"));
-    widget.on_exec_command_end(&end_event("call-3"));
+    widget.handle_exec_begin_now(&begin_event("call-1", "list_dir", "cokra-rs"));
+    widget.handle_exec_end_now(&end_event("call-1"));
+    widget.handle_exec_begin_now(&begin_event("call-2", "read_file", "PROJECT_STRUCTURE.md"));
+    widget.handle_exec_end_now(&end_event("call-2"));
+    widget.handle_exec_begin_now(&begin_event("call-3", "search_tool", "ExecCell"));
+    widget.handle_exec_end_now(&end_event("call-3"));
 
     let cell = widget
       .transcript
@@ -330,27 +346,72 @@ mod tests {
   }
 
   #[test]
-  fn agent_preview_does_not_replace_active_exec_cell() {
+  fn sequential_code_search_calls_stay_in_one_exec_cell() {
     let mut widget = make_widget();
 
-    widget.on_exec_command_begin(&begin_event("call-1", "list_dir", "cokra-rs"));
-    widget.on_agent_message_delta("item-1", "I'll inspect the top-level layout.");
-    widget.on_exec_command_begin(&begin_event("call-2", "read_file", "Cargo.toml"));
+    widget.handle_exec_begin_now(&begin_event("call-1", "code_search", "agentteams"));
+    widget.handle_exec_end_now(&end_event("call-1"));
+    widget.handle_exec_begin_now(&begin_event("call-2", "code_search", "spawn_agent"));
+    widget.handle_exec_end_now(&end_event("call-2"));
 
     let cell = widget
       .transcript
       .active_exec_cell
       .as_ref()
       .and_then(|c| c.as_any().downcast_ref::<ExecCell>())
-      .expect("expected active exec cell");
-    assert_eq!(cell.calls.len(), 2);
+      .expect("expected grouped code_search exec cell");
 
-    let lines = widget
-      .active_cell_transcript_lines(80)
-      .expect("expected combined live transcript");
-    let rendered = lines.iter().map(Line::to_string).collect::<Vec<_>>().join("\n");
-    assert!(rendered.contains("I'll inspect the top-level layout."));
-    assert!(rendered.contains("List cokra-rs"));
-    assert!(rendered.contains("Read Cargo.toml"));
+    assert_eq!(cell.calls.len(), 2);
+    assert!(cell.is_exploring_cell());
+
+    let rendered = cell
+      .display_lines(80)
+      .iter()
+      .map(Line::to_string)
+      .collect::<Vec<_>>()
+      .join("\n");
+    assert!(rendered.contains("Explored"));
+    assert!(rendered.contains("Search agentteams"));
+    assert!(rendered.contains("Search spawn_agent"));
+  }
+
+  #[test]
+  fn agent_text_flushes_exec_cell_and_subsequent_exec_starts_new_cell() {
+    let (tx, mut rx) = unbounded_channel();
+    let sender = AppEventSender::new(tx);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::AnimatedPreview,
+    );
+    widget.set_agent_turn_running(true);
+
+    widget.handle_exec_begin_now(&begin_event("call-1", "list_dir", "cokra-rs"));
+    // First agent delta should flush the exec cell (1:1 codex: handle_streaming_delta flushes active cell)
+    widget.on_agent_message_delta("item-1", "I'll inspect the top-level layout.");
+
+    // exec cell for call-1 should now be in history (flushed)
+    let Some(AppEvent::InsertHistoryCell(exec_cell)) = rx.try_recv().ok() else {
+      panic!("expected call-1 exec cell to be flushed to history when agent text starts");
+    };
+    let exec_rendered = exec_cell
+      .display_lines(80)
+      .iter()
+      .map(Line::to_string)
+      .collect::<Vec<_>>()
+      .join("\n");
+    assert!(exec_rendered.contains("List cokra-rs"));
+
+    // After agent text flushes exec cell, a new exec begin starts a fresh exec cell
+    widget.handle_exec_begin_now(&begin_event("call-2", "read_file", "Cargo.toml"));
+
+    let cell = widget
+      .transcript
+      .active_exec_cell
+      .as_ref()
+      .and_then(|c| c.as_any().downcast_ref::<ExecCell>())
+      .expect("expected new active exec cell for call-2");
+    assert_eq!(cell.calls.len(), 1, "call-2 should be in a fresh exec cell, not merged with call-1");
   }
 }

@@ -79,6 +79,10 @@ impl OAuthConnectView {
 }
 
 impl BottomPaneView for OAuthConnectView {
+  fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    self
+  }
+
   fn inline_viewport_sizing(&self) -> InlineViewportSizing {
     // Tradeoff: keep OAuth login as a stable dialog in inline mode instead of
     // expanding the viewport, because resize redraws would otherwise push the

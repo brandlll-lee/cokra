@@ -344,7 +344,6 @@ impl ProviderRegistry {
 
   pub async fn list_connect_catalog(&self) -> Vec<ProviderInfo> {
     let auth = self.auth.clone();
-    let configs = self.configs.read().await.clone();
     let mut providers = PluginRegistry::entries()
       .into_iter()
       .map(|item| {
@@ -368,24 +367,7 @@ impl ProviderRegistry {
       } else {
         false
       };
-      let runtime_connected = PluginRegistry::find(&provider.id)
-        .and_then(|entry| {
-          entry
-            .runtime_provider_id
-            .map(|runtime_provider_id| (entry, runtime_provider_id))
-        })
-        .and_then(|(entry, runtime_provider_id)| {
-          configs
-            .get(runtime_provider_id)
-            .map(|config| (entry, config))
-        })
-        .is_some_and(|(_entry, config)| {
-          config
-            .headers
-            .get("x-cokra-connect-source")
-            .is_some_and(|source| source == &provider.id)
-        });
-      provider.authenticated = env_connected || stored_connected || runtime_connected;
+      provider.authenticated = env_connected || stored_connected;
     }
 
     providers.sort_by(|a, b| a.name.cmp(&b.name));
@@ -666,7 +648,9 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_connect_catalog_marks_runtime_registered_oauth_source_connected() {
+  async fn test_connect_catalog_header_tag_does_not_affect_connected_status() {
+    // Phase 4: runtime_connected via x-cokra-connect-source header is removed.
+    // Only env vars and stored credentials determine connect catalog status.
     let home = tempfile::tempdir().expect("tempdir");
     unsafe {
       std::env::set_var("HOME", home.path());
@@ -705,8 +689,53 @@ mod tests {
       .find(|provider| provider.id == "openai")
       .expect("openai provider");
 
-    assert!(openai_codex.authenticated);
+    // Neither provider has stored credentials or env vars, so both are not connected
+    // regardless of any header tags on registered runtime providers.
+    assert!(!openai_codex.authenticated);
     assert!(!openai.authenticated);
+
+    unsafe {
+      std::env::remove_var("HOME");
+    }
+  }
+
+  #[tokio::test]
+  async fn test_connect_catalog_stored_credentials_mark_provider_connected() {
+    use crate::model::auth::AuthManager;
+    use crate::model::auth::Credentials;
+    use crate::model::auth::StoredCredentials;
+
+    let home = tempfile::tempdir().expect("tempdir");
+    unsafe {
+      std::env::set_var("HOME", home.path());
+      std::env::remove_var("OPENAI_API_KEY");
+      std::env::remove_var("ANTHROPIC_API_KEY");
+    }
+
+    let auth = AuthManager::new().expect("auth manager");
+    auth
+      .save_stored(StoredCredentials::new(
+        "openai",
+        Credentials::ApiKey {
+          key: "sk-stored-key-123".to_string(),
+        },
+      ))
+      .await
+      .expect("save stored");
+
+    let registry = ProviderRegistry::new();
+    let providers = registry.list_connect_catalog().await;
+    let openai = providers
+      .iter()
+      .find(|provider| provider.id == "openai")
+      .expect("openai provider");
+    let anthropic = providers
+      .iter()
+      .find(|provider| provider.id == "anthropic")
+      .expect("anthropic provider");
+
+    assert!(openai.authenticated, "stored credentials should mark openai as connected");
+    assert!(!anthropic.authenticated, "no credentials for anthropic");
 
     unsafe {
       std::env::remove_var("HOME");

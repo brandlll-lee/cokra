@@ -4,6 +4,8 @@
 //! this trait. When the view stack is non-empty, the topmost view **replaces**
 //! the composer in rendering and key handling.
 
+use std::any::Any;
+
 use crossterm::event::KeyEvent;
 
 use crate::render::renderable::Renderable;
@@ -11,6 +13,8 @@ use crate::tui::InlineViewportSizing;
 
 /// 1:1 codex: trait implemented by every view shown in the bottom pane.
 pub(crate) trait BottomPaneView: Renderable {
+  /// Downcast support for extracting concrete view state after popping.
+  fn as_any_mut(&mut self) -> &mut dyn Any;
   /// Controls how inline-mode viewport sizing behaves while this view is active.
   ///
   /// Dialog-style views should preserve visible history so resize redraws do not

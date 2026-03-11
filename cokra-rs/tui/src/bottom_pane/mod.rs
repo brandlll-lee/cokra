@@ -80,9 +80,6 @@ pub(crate) struct BottomPane {
   /// 1:1 codex view_stack: views displayed instead of the composer.
   view_stack: Vec<Box<dyn BottomPaneView>>,
 
-  /// Approval overlay renders on top of whatever is active.
-  approval_overlay: Option<ApprovalOverlay>,
-
   /// Inline status indicator shown above the composer while a task is running.
   status: Option<StatusIndicatorWidget>,
   queued_user_messages: QueuedUserMessages,
@@ -100,7 +97,6 @@ impl BottomPane {
     Self {
       composer: ChatComposer::new(),
       view_stack: Vec::new(),
-      approval_overlay: None,
       status: None,
       queued_user_messages: QueuedUserMessages::new(),
       app_event_tx,
@@ -186,12 +182,10 @@ impl BottomPane {
     self.composer.flush_burst_if_due(Instant::now())
   }
 
-  pub(crate) fn open_approval(&mut self, overlay: ApprovalOverlay) {
-    self.approval_overlay = Some(overlay);
-  }
-
-  pub(crate) fn close_approval(&mut self) {
-    self.approval_overlay = None;
+  /// 1:1 codex push_approval_request: push an ApprovalOverlay as a view.
+  pub(crate) fn push_approval_request(&mut self, request: approval_overlay::ApprovalRequest) {
+    let overlay = ApprovalOverlay::new(request, self.app_event_tx.clone());
+    self.push_view(Box::new(overlay));
   }
 
   /// 1:1 codex: push a view onto the view_stack.
@@ -222,30 +216,15 @@ impl BottomPane {
   }
 
   pub(crate) fn desired_height(&self, width: u16) -> u16 {
-    let base = self.as_renderable().desired_height(width);
-    if let Some(overlay) = &self.approval_overlay {
-      // Reserve space above the composer for the approval modal so it doesn't
-      // overlap the input box (Codex parity).
-      //
-      // Tradeoff: this increases the viewport height request while approval is
-      // pending, shrinking the visible transcript area.
-      let overlay_h = overlay.desired_height(width);
-      base.saturating_add(overlay_h)
-    } else {
-      base
-    }
+    self.as_renderable().desired_height(width)
   }
 
   pub(crate) fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-    if self.approval_overlay.is_some() {
-      return None;
-    }
     self.as_renderable().cursor_pos(area)
   }
 
   pub(crate) fn has_interactive_overlay(&self) -> bool {
-    self.approval_overlay.is_some()
-      || !self.view_stack.is_empty()
+    !self.view_stack.is_empty()
       || self.composer.has_command_popup()
   }
 
@@ -254,10 +233,6 @@ impl BottomPane {
   }
 
   pub(crate) fn inline_viewport_sizing(&self) -> InlineViewportSizing {
-    if self.approval_overlay.is_some() {
-      return InlineViewportSizing::ExpandForOverlay;
-    }
-
     if let Some(view) = self.active_view() {
       return view.inline_viewport_sizing();
     }
@@ -270,50 +245,30 @@ impl BottomPane {
   }
 
   /// 1:1 codex: key event routing.
-  /// Layer 1: approval overlay (highest priority)
-  /// Layer 2: view_stack top (replaces composer)
-  /// Layer 3: composer (default)
+  /// Layer 1: view_stack top (replaces composer, includes approval)
+  /// Layer 2: composer (default)
   pub(crate) fn handle_key(&mut self, key: KeyEvent) -> BottomPaneAction {
-    // Layer 1: approval overlay intercepts everything.
-    if let Some(overlay) = self.approval_overlay.as_mut() {
-      match key.code {
-        KeyCode::Left => overlay.move_left(),
-        KeyCode::Right | KeyCode::Tab => overlay.move_right(),
-        KeyCode::Enter => {
-          let selected = overlay.selected();
-          self.approval_overlay = None;
-          return BottomPaneAction::ApprovalDecision(selected);
-        }
-        KeyCode::Esc => {
-          self.approval_overlay = None;
-          return BottomPaneAction::ApprovalDecision(ApprovalChoice::Deny);
-        }
-        _ => {}
-      }
-      return BottomPaneAction::None;
-    }
-
-    // Layer 2: 1:1 codex view_stack routing.
+    // Layer 1: 1:1 codex view_stack routing (approval is now a view).
     if !self.view_stack.is_empty() {
       let last_idx = self.view_stack.len() - 1;
       let view = &mut self.view_stack[last_idx];
 
       if key.code == KeyCode::Esc && view.on_cancel() {
-        self.view_stack.pop();
-        return BottomPaneAction::None;
+        let mut popped = self.view_stack.pop();
+        return Self::check_approval_decision(&mut popped);
       }
 
       view.handle_key_event(key);
 
       if view.is_complete() {
-        self.view_stack.pop();
-        return BottomPaneAction::None;
+        let mut popped = self.view_stack.pop();
+        return Self::check_approval_decision(&mut popped);
       }
 
       return BottomPaneAction::None;
     }
 
-    // Layer 3: composer (default).
+    // Layer 2: composer (default).
     match self.composer.handle_key_event(key) {
       ComposerAction::None => BottomPaneAction::None,
       ComposerAction::Queue => self
@@ -330,6 +285,23 @@ impl BottomPane {
         .unwrap_or(BottomPaneAction::None),
       ComposerAction::SlashCommand(cmd) => BottomPaneAction::SlashCommand(cmd),
     }
+  }
+
+  /// When a popped view is an ApprovalOverlay, extract the decision.
+  fn check_approval_decision(
+    popped: &mut Option<Box<dyn BottomPaneView>>,
+  ) -> BottomPaneAction {
+    if let Some(view) = popped {
+      if let Some(overlay) = view
+        .as_any_mut()
+        .downcast_mut::<ApprovalOverlay>()
+      {
+        if let Some(choice) = overlay.take_choice() {
+          return BottomPaneAction::ApprovalDecision(choice);
+        }
+      }
+    }
+    BottomPaneAction::None
   }
 
   pub(crate) fn handle_paste(&mut self, text: String) {
@@ -382,31 +354,8 @@ impl BottomPane {
     if area.is_empty() {
       return;
     }
-    if let Some(overlay) = &self.approval_overlay {
-      // Layout: overlay gets its own vertical slice above the composer so it
-      // never covers the input box.
-      let overlay_h_raw = overlay.desired_height(area.width);
-      let min_content_h: u16 = 1;
-      let overlay_h = overlay_h_raw.min(area.height.saturating_sub(min_content_h));
-
-      let overlay_area = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: overlay_h,
-      };
-      let content_area = Rect {
-        x: area.x,
-        y: area.y.saturating_add(overlay_h),
-        width: area.width,
-        height: area.height.saturating_sub(overlay_h),
-      };
-
-      self.as_renderable().render(content_area, buf);
-      overlay.render(overlay_area, buf);
-    } else {
-      self.as_renderable().render(area, buf);
-    }
+    // Approval is now a view in the view_stack, rendered via as_renderable().
+    self.as_renderable().render(area, buf);
   }
 }
 
@@ -439,6 +388,10 @@ mod tests {
   }
 
   impl BottomPaneView for FakeView {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+      self
+    }
+
     fn inline_viewport_sizing(&self) -> InlineViewportSizing {
       self.sizing
     }
