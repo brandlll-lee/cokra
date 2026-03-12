@@ -8,6 +8,7 @@ pub mod cleanup_team;
 pub mod close_agent;
 pub mod code_search;
 pub mod create_team_task;
+pub mod diagnostics;
 pub mod dynamic;
 pub mod edit_file;
 pub mod glob;
@@ -17,19 +18,21 @@ pub mod list_dir;
 pub mod mcp;
 pub mod plan;
 pub mod read_file;
+pub mod read_many_files;
 pub mod read_team_messages;
 pub mod request_user_input;
+pub mod save_memory;
 pub mod send_input;
 pub mod send_team_message;
 pub mod shell;
+pub mod skill;
 pub mod spawn_agent;
 pub mod submit_team_plan;
 pub mod team_status;
+pub mod todo;
 pub mod update_team_task;
 pub mod view_image;
 pub mod wait;
-pub mod diagnostics;
-pub mod save_memory;
 pub mod web_fetch;
 pub mod web_search;
 pub mod write_file;
@@ -118,4 +121,12 @@ pub fn register_builtin_handlers(
   registry.register_handler("web_search", Arc::new(web_search::WebSearchHandler));
   registry.register_handler("save_memory", Arc::new(save_memory::SaveMemoryHandler));
   registry.register_handler("diagnostics", Arc::new(diagnostics::DiagnosticsHandler));
+  registry.register_handler("skill", Arc::new(skill::SkillHandler));
+  registry.register_handler(
+    "read_many_files",
+    Arc::new(read_many_files::ReadManyFilesHandler),
+  );
+  // todo_read 已废弃（1:1 opencode registry.ts:110 `// TodoReadTool`）
+  // todo_write 返回完整 JSON 列表，模型不需要单独读取工具
+  registry.register_handler("todo_write", Arc::new(todo::TodoWriteHandler));
 }

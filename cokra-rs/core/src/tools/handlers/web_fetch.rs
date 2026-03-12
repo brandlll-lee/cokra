@@ -70,9 +70,7 @@ impl ToolHandler for WebFetchHandler {
 
     let client = reqwest::Client::builder()
       .timeout(std::time::Duration::from_secs(timeout_secs))
-      .user_agent(
-        "Mozilla/5.0 (compatible; cokra/1.0; +https://github.com/nicepkg/cokra)",
-      )
+      .user_agent("Mozilla/5.0 (compatible; cokra/1.0; +https://github.com/nicepkg/cokra)")
       .redirect(reqwest::redirect::Policy::limited(10))
       .build()
       .map_err(|e| FunctionCallError::Execution(format!("failed to build HTTP client: {e}")))?;
@@ -83,9 +81,7 @@ impl ToolHandler for WebFetchHandler {
       .header("Accept-Language", "en-US,en;q=0.9")
       .send()
       .await
-      .map_err(|e| {
-        FunctionCallError::RespondToModel(format!("HTTP request failed: {e}"))
-      })?;
+      .map_err(|e| FunctionCallError::RespondToModel(format!("HTTP request failed: {e}")))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -102,18 +98,19 @@ impl ToolHandler for WebFetchHandler {
       .to_string();
 
     // Check content length header
-    if let Some(len) = response.content_length() {
-      if len as usize > MAX_RESPONSE_BYTES {
-        return Err(FunctionCallError::RespondToModel(format!(
-          "Response too large ({} bytes, max {})",
-          len, MAX_RESPONSE_BYTES
-        )));
-      }
+    if let Some(len) = response.content_length()
+      && len as usize > MAX_RESPONSE_BYTES
+    {
+      return Err(FunctionCallError::RespondToModel(format!(
+        "Response too large ({} bytes, max {})",
+        len, MAX_RESPONSE_BYTES
+      )));
     }
 
-    let bytes = response.bytes().await.map_err(|e| {
-      FunctionCallError::Execution(format!("failed to read response body: {e}"))
-    })?;
+    let bytes = response
+      .bytes()
+      .await
+      .map_err(|e| FunctionCallError::Execution(format!("failed to read response body: {e}")))?;
 
     if bytes.len() > MAX_RESPONSE_BYTES {
       return Err(FunctionCallError::RespondToModel(format!(
@@ -155,9 +152,7 @@ impl ToolHandler for WebFetchHandler {
       if was_truncated { " [truncated]" } else { "" }
     );
 
-    Ok(
-      ToolOutput::success(format!("Fetched: {title}\n\n{final_output}")).with_id(id),
-    )
+    Ok(ToolOutput::success(format!("Fetched: {title}\n\n{final_output}")).with_id(id))
   }
 }
 
@@ -186,8 +181,25 @@ fn html_to_text(html: &str) -> String {
 
   // Replace block-level tags with newlines
   for tag in &[
-    "br", "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "tr", "hr", "blockquote",
-    "section", "article", "header", "footer", "nav", "main",
+    "br",
+    "p",
+    "div",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "li",
+    "tr",
+    "hr",
+    "blockquote",
+    "section",
+    "article",
+    "header",
+    "footer",
+    "nav",
+    "main",
   ] {
     s = s.replace(&format!("<{tag}"), &format!("\n<{tag}"));
     s = s.replace(&format!("</{tag}>"), &format!("</{tag}>\n"));

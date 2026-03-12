@@ -5,7 +5,10 @@
 use super::AuthError;
 use super::AuthRequest;
 use super::AuthType;
+use super::CredentialStorage;
 use super::Credentials;
+use super::FileCredentialStorage;
+use super::MemoryCredentialStorage;
 use super::Result;
 use super::StoredCredentials;
 use super::oauth::DeviceCodeResponse;
@@ -13,9 +16,6 @@ use super::oauth::OAuthConfig;
 use super::oauth::OAuthManager;
 use super::resolver::AuthResolver;
 use super::resolver::EnvAuthResolver;
-use super::storage::CredentialStorage;
-use super::storage::FileCredentialStorage;
-use super::storage::MemoryCredentialStorage;
 
 /// Authentication manager
 ///
@@ -289,7 +289,7 @@ impl AuthManager {
           }
           let config = if provider_id == "google-gemini-cli" || provider_id == "google-antigravity"
           {
-            crate::model::oauth_connect::oauth_refresh_config_for_provider_with_stored(
+            crate::model::auth_orchestrator::oauth_refresh_config_for_provider_with_stored(
               provider_id,
               Some(&stored),
             )?
@@ -419,14 +419,13 @@ impl AuthManager {
           redirect_uri: "urn:ietf:wg:oauth:2.0:oob".to_string(),
         })
       }
-      _ => crate::model::oauth_connect::oauth_refresh_config_for_provider(provider_id)?.ok_or_else(
-        || {
+      _ => crate::model::auth_orchestrator::oauth_refresh_config_for_provider(provider_id)?
+        .ok_or_else(|| {
           AuthError::OAuthError(format!(
             "OAuth device flow is not configured for provider {}",
             provider_id
           ))
-        },
-      ),
+        }),
     }
   }
 }

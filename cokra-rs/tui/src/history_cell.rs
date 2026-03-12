@@ -489,10 +489,17 @@ impl HistoryCell for UserHistoryCell {
     // filled bar surface so the UI stays consistent across terminals.
     let mut out: Vec<Line<'static>> = Vec::new();
     if let Some(imgs) = wrapped_remote_images {
-      out.extend(fill_user_message_bar_lines_with_gutter(imgs, width, style, gutter.clone()));
+      out.extend(fill_user_message_bar_lines_with_gutter(
+        imgs,
+        width,
+        style,
+        gutter.clone(),
+      ));
     }
     if let Some(msg) = wrapped_message {
-      out.extend(fill_user_message_bar_lines_with_gutter(msg, width, style, gutter));
+      out.extend(fill_user_message_bar_lines_with_gutter(
+        msg, width, style, gutter,
+      ));
     }
     out
   }
@@ -1010,6 +1017,84 @@ pub(crate) fn new_proposed_plan_stream(
   }
 }
 
+// ── Todo Update Cell ─────────────────────────────────────────────────────────
+// Fuses OpenCode [•]/[✓]/[ ] checkbox icons, Codex cyan+strikethrough styling,
+// and Claude Code's `N tasks (M done, K open)` summary line.
+
+#[derive(Debug)]
+pub(crate) struct TodoUpdateCell {
+  pub(crate) todos: Vec<cokra_protocol::TodoItemEvent>,
+}
+
+impl TodoUpdateCell {
+  pub(crate) fn new(todos: Vec<cokra_protocol::TodoItemEvent>) -> Self {
+    Self { todos }
+  }
+}
+
+impl HistoryCell for TodoUpdateCell {
+  fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    use cokra_protocol::TodoItemStatus;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Header: `• Todo` (Codex "• Updated Plan" pattern)
+    lines.push(vec!["• ".dim(), "Todo".bold()].into());
+
+    if self.todos.is_empty() {
+      lines.push(Line::from("  (empty)".dim().italic()));
+      return lines;
+    }
+
+    // Summary: `  N tasks (M done, K open)` (Claude Code pattern)
+    let done = self
+      .todos
+      .iter()
+      .filter(|t| t.status == TodoItemStatus::Completed)
+      .count();
+    let open = self.todos.len() - done;
+    lines.push(Line::from(
+      format!(
+        "  {} tasks ({} done, {} open)",
+        self.todos.len(),
+        done,
+        open
+      )
+      .dim()
+      .italic(),
+    ));
+
+    // Items with checkbox icons (OpenCode + Codex fusion)
+    for item in &self.todos {
+      let (icon, item_style) = match item.status {
+        TodoItemStatus::InProgress => (
+          "[•] ",
+          Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        ),
+        TodoItemStatus::Pending => ("[ ] ", Style::default().dim()),
+        TodoItemStatus::Completed => (
+          "[✓] ",
+          Style::default().dim().add_modifier(Modifier::CROSSED_OUT),
+        ),
+        TodoItemStatus::Cancelled => (
+          "[✗] ",
+          Style::default().dim().add_modifier(Modifier::CROSSED_OUT),
+        ),
+      };
+
+      let content = &item.content;
+      lines.push(Line::from(vec![
+        Span::styled(format!("  {icon}"), item_style),
+        Span::styled(content.clone(), item_style),
+      ]));
+    }
+
+    lines
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1194,7 +1279,9 @@ mod tests {
   #[test]
   fn user_message_bar_lines_fill_available_width_with_gutter() {
     let style = Style::default().bg(Color::DarkGray);
-    let gutter_style = Style::default().add_modifier(Modifier::BOLD | Modifier::DIM).patch(style);
+    let gutter_style = Style::default()
+      .add_modifier(Modifier::BOLD | Modifier::DIM)
+      .patch(style);
     let lines = fill_user_message_bar_lines_with_gutter(
       vec![Line::from("hello world")],
       16,
@@ -1207,5 +1294,81 @@ mod tests {
     let rendered = lines_to_string(&lines);
     assert!(rendered.starts_with(" > "));
     assert!(rendered.contains("hello world"));
+  }
+
+  fn make_todo(
+    id: &str,
+    content: &str,
+    status: cokra_protocol::TodoItemStatus,
+  ) -> cokra_protocol::TodoItemEvent {
+    cokra_protocol::TodoItemEvent {
+      id: id.to_string(),
+      content: content.to_string(),
+      status,
+      priority: None,
+    }
+  }
+
+  #[test]
+  fn todo_update_cell_renders_header() {
+    let cell = TodoUpdateCell::new(vec![make_todo(
+      "1",
+      "Write tests",
+      cokra_protocol::TodoItemStatus::Pending,
+    )]);
+    let rendered = lines_to_string(&cell.display_lines(80));
+    assert!(rendered.contains("Todo"));
+  }
+
+  #[test]
+  fn todo_update_cell_renders_empty_state() {
+    let cell = TodoUpdateCell::new(vec![]);
+    let rendered = lines_to_string(&cell.display_lines(80));
+    assert!(rendered.contains("Todo"));
+    assert!(rendered.contains("empty"));
+  }
+
+  #[test]
+  fn todo_update_cell_renders_summary_counts() {
+    let cell = TodoUpdateCell::new(vec![
+      make_todo("1", "Done task", cokra_protocol::TodoItemStatus::Completed),
+      make_todo("2", "Open task", cokra_protocol::TodoItemStatus::Pending),
+      make_todo(
+        "3",
+        "Active task",
+        cokra_protocol::TodoItemStatus::InProgress,
+      ),
+    ]);
+    let rendered = lines_to_string(&cell.display_lines(80));
+    assert!(rendered.contains("3 tasks"));
+    assert!(rendered.contains("1 done"));
+    assert!(rendered.contains("2 open"));
+  }
+
+  #[test]
+  fn todo_update_cell_renders_status_icons() {
+    let cell = TodoUpdateCell::new(vec![
+      make_todo("1", "pending item", cokra_protocol::TodoItemStatus::Pending),
+      make_todo(
+        "2",
+        "active item",
+        cokra_protocol::TodoItemStatus::InProgress,
+      ),
+      make_todo("3", "done item", cokra_protocol::TodoItemStatus::Completed),
+      make_todo(
+        "4",
+        "cancelled item",
+        cokra_protocol::TodoItemStatus::Cancelled,
+      ),
+    ]);
+    let rendered = lines_to_string(&cell.display_lines(80));
+    assert!(rendered.contains("[ ]"));
+    assert!(rendered.contains("[•]"));
+    assert!(rendered.contains("[✓]"));
+    assert!(rendered.contains("[✗]"));
+    assert!(rendered.contains("pending item"));
+    assert!(rendered.contains("active item"));
+    assert!(rendered.contains("done item"));
+    assert!(rendered.contains("cancelled item"));
   }
 }

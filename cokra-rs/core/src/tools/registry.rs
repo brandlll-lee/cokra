@@ -118,7 +118,10 @@ impl ToolRegistry {
 
   pub fn get_handler(&self, name: &str) -> Option<&Arc<dyn ToolHandler>> {
     let resolved = self.resolve_name(name);
-    self.handlers.get(resolved).or_else(|| self.handlers.get(name))
+    self
+      .handlers
+      .get(resolved)
+      .or_else(|| self.handlers.get(name))
   }
 
   pub fn get_spec(&self, name: &str) -> Option<&ToolSpec> {

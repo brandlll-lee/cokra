@@ -6,9 +6,9 @@ use reqwest::Client;
 use serde_json::Value;
 use serde_json::json;
 
-use super::connect_catalog::RuntimeRegistrationKind;
 use super::error::ModelError;
 use super::error::Result;
+use super::provider_catalog::RuntimeRegistrationKind;
 use super::registry::ProviderRegistry;
 use super::streaming::OpenAIUsageParser;
 use super::streaming::StreamingConfig;
@@ -389,7 +389,7 @@ async fn register_stored_connect_providers(
 
   let openai_codex_present = auth.load("openai-codex").await.ok().flatten().is_some();
 
-  for entry in super::connect_catalog::connect_provider_catalog() {
+  for entry in super::provider_catalog::connect_provider_catalog() {
     if entry.runtime_registration == RuntimeRegistrationKind::None {
       continue;
     }
@@ -764,7 +764,7 @@ mod tests {
   use super::registration_token_for_stored;
   use crate::model::auth::Credentials;
   use crate::model::auth::StoredCredentials;
-  use crate::model::connect_catalog::RuntimeRegistrationKind;
+  use crate::model::provider_catalog::RuntimeRegistrationKind;
   use crate::model::types::ChatRequest;
   use crate::model::types::Message;
   use serde_json::json;

@@ -215,3 +215,83 @@ Before generating any code, output a 3-line plan:
 - You find yourself writing a function with "Helper", "Utils2", "Temp", or "Fix" in the name
 - You are copying more than 5 lines from elsewhere in the codebase
 - You are adding a try/catch or null-check just to avoid understanding why something fails
+
+## Phase 3 工具系统 (cokra-rs/core/src/tools/)
+
+### 新增工具
+
+| 工具名称 | 处理器文件 | 存储路径 | 说明 |
+|---|---|---|---|
+| `skill` | `handlers/skill.rs` | `.cokra/skills/**/SKILL.md` | 加载领域专属 Skill 指令 |
+| `read_many_files` | `handlers/read_many_files.rs` | — | 批量读取最多 20 个文件 |
+| `todo_read` | `handlers/todo.rs` | `~/.cokra/todos.json` | 读取 todo 列表 |
+| `todo_write` | `handlers/todo.rs` | `~/.cokra/todos.json` | 全量覆写 todo 列表 |
+
+### skill 工具
+
+Skill 文件格式（`SKILL.md`）：
+```markdown
+---
+name: my-skill
+description: 这个 skill 做什么
+---
+
+skill 的完整指令内容...
+```
+
+Skill 搜索路径（优先级从低到高）：
+1. `~/.cokra/skills/**/SKILL.md` — 全局用户 skills
+2. `.cokra/skills/**/SKILL.md` — 项目级 skills（从 cwd 向上遍历，子目录覆盖父目录）
+
+### todo 工具
+
+- `todo_write` 接收完整列表并**全量覆写**（1:1 gemini-cli 设计）
+- 同时最多 **1 个** `in_progress` 任务（约束在 `validate_todos()` 中执行）
+- 状态枚举：`pending` / `in_progress` / `completed` / `cancelled`
+- 优先级枚举：`high` / `medium` / `low`（默认 `medium`）
+
+### Hooks 系统 (tools/hooks/)
+
+```
+tools/hooks/
+├── mod.rs        — 模块声明
+├── config.rs     — HooksConfig (TOML [[hooks.after_tool_call]] 段)
+├── registry.rs   — HooksRegistry (按事件分组存储 hooks，dispatch 调度)
+├── runner.rs     — command_hook() 工厂，外部命令 hook 执行（stdin JSON）
+└── types.rs      — Hook/HookResult/HookPayload/HookEvent 核心类型
+```
+
+事件类型：
+- `BeforeToolCall` — 工具执行前，可通过 `FailedAbort` 阻断
+- `AfterToolCall`  — 工具执行后
+- `AfterTurn`      — Turn 完成后
+
+Hook 执行约定（外部命令）：
+- 退出码 `0` → `HookResult::Success`
+- 退出码 `2` → `HookResult::FailedAbort`（主动阻断工具调用）
+- 其他非零 → `HookResult::FailedContinue`（记录错误但继续）
+- 超时 → `HookResult::FailedContinue`（进程被 kill）
+
+配置示例（`.cokra/config.toml`）：
+```toml
+[[hooks.after_tool_call]]
+name = "notify"
+command = "notify-send 'cokra: tool completed'"
+timeout_ms = 5000
+
+[[hooks.after_turn]]
+name = "log-turn"
+command = "/usr/local/bin/log-turn.sh"
+```
+
+### Diff Tracking + Metrics (tools/diff_tracker.rs)
+
+- `TurnMetrics` — 每次 Turn 的工具调用统计（总次数、成功/失败、最慢工具、耗时）
+- `FileChangeTracker` — 追踪写入/编辑/删除操作，生成 `DiffSummary`
+- `TurnTimer` — 单次工具调用计时器（`Instant` 封装）
+- `to_summary_line()` — 生成可读摘要（用于 TUI TurnCompleteHistoryCell）
+
+集成点：
+- `ToolRouter::dispatch_tool_call` 前后各记录一次 `ToolCallRecord`
+- 写文件操作（`edit_file`/`write_file`/`apply_patch`）调用 `FileChangeTracker::record_*`
+- Turn 结束时通过 `AfterTurn` hook payload 附带 metrics 信息

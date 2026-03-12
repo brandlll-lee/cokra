@@ -51,7 +51,10 @@ struct ExaSearchArgs {
   num_results: u32,
   #[serde(skip_serializing_if = "Option::is_none")]
   livecrawl: Option<String>,
-  #[serde(rename = "contextMaxCharacters", skip_serializing_if = "Option::is_none")]
+  #[serde(
+    rename = "contextMaxCharacters",
+    skip_serializing_if = "Option::is_none"
+  )]
   context_max_characters: Option<u32>,
 }
 
@@ -229,10 +232,10 @@ async fn search_exa(
 fn parse_exa_response(body: &str, query: &str) -> Result<String, FunctionCallError> {
   // Try SSE format first: lines starting with "data: "
   for line in body.lines() {
-    if let Some(json_str) = line.strip_prefix("data: ") {
-      if let Ok(resp) = serde_json::from_str::<ExaMcpResponse>(json_str) {
-        return extract_exa_text(resp, query);
-      }
+    if let Some(json_str) = line.strip_prefix("data: ")
+      && let Ok(resp) = serde_json::from_str::<ExaMcpResponse>(json_str)
+    {
+      return extract_exa_text(resp, query);
     }
   }
 
@@ -267,7 +270,9 @@ fn extract_exa_text(resp: ExaMcpResponse, query: &str) -> Result<String, Functio
     .unwrap_or_else(|| format!("No search results found for \"{query}\""));
 
   let truncated = truncate_to_chars(text, MAX_CONTENT_CHARS);
-  Ok(format!("Web search results for \"{query}\":\n\n{truncated}"))
+  Ok(format!(
+    "Web search results for \"{query}\":\n\n{truncated}"
+  ))
 }
 
 // ── Brave backend ─────────────────────────────────────────────────────────────
@@ -305,10 +310,7 @@ async fn search_brave(
   let results = resp.web.map(|w| w.results).unwrap_or_default();
 
   if results.is_empty() {
-    return Ok(format!(
-      "No search results found for \"{}\"",
-      args.query
-    ));
+    return Ok(format!("No search results found for \"{}\"", args.query));
   }
 
   let mut output = format!("Web search results for \"{}\":\n\n", args.query);
@@ -342,7 +344,9 @@ async fn search_searxng(
     ])
     .send()
     .await
-    .map_err(|e| FunctionCallError::RespondToModel(format!("SearXNG search request failed: {e}")))?;
+    .map_err(|e| {
+      FunctionCallError::RespondToModel(format!("SearXNG search request failed: {e}"))
+    })?;
 
   if !response.status().is_success() {
     let status = response.status();
@@ -357,10 +361,7 @@ async fn search_searxng(
     .map_err(|e| FunctionCallError::Execution(format!("failed to parse SearXNG response: {e}")))?;
 
   if resp.results.is_empty() {
-    return Ok(format!(
-      "No search results found for \"{}\"",
-      args.query
-    ));
+    return Ok(format!("No search results found for \"{}\"", args.query));
   }
 
   let mut output = format!("Web search results for \"{}\":\n\n", args.query);
@@ -384,8 +385,14 @@ fn truncate_to_chars(s: String, max: usize) -> String {
     return s;
   }
   // Find a valid UTF-8 boundary at or before `max` bytes.
-  let boundary = (0..=max).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0);
-  format!("{}\n\n[Content truncated at {max} characters]", &s[..boundary])
+  let boundary = (0..=max)
+    .rev()
+    .find(|&i| s.is_char_boundary(i))
+    .unwrap_or(0);
+  format!(
+    "{}\n\n[Content truncated at {max} characters]",
+    &s[..boundary]
+  )
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -431,7 +438,8 @@ mod tests {
 
   #[test]
   fn parse_exa_plain_json_response() {
-    let json_body = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Hello world"}]}}"#;
+    let json_body =
+      r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Hello world"}]}}"#;
     let result = parse_exa_response(json_body, "hello").unwrap();
     assert!(result.contains("Hello world"));
   }
@@ -470,8 +478,7 @@ mod tests {
 
   #[test]
   fn custom_num_results_parsed() {
-    let args: WebSearchArgs =
-      serde_json::from_str(r#"{"query":"test","num_results":5}"#).unwrap();
+    let args: WebSearchArgs = serde_json::from_str(r#"{"query":"test","num_results":5}"#).unwrap();
     assert_eq!(args.num_results, 5);
   }
 }

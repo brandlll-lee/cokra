@@ -166,10 +166,7 @@ impl Approvable<ShellRequest> for ShellRuntime {
     vec![format!("shell:{}", req.command.join(" "))]
   }
 
-  fn exec_approval_requirement(
-    &self,
-    req: &ShellRequest,
-  ) -> Option<ExecApprovalRequirement> {
+  fn exec_approval_requirement(&self, req: &ShellRequest) -> Option<ExecApprovalRequirement> {
     Some(eval_exec_approval(
       &req.command,
       &cokra_protocol::SandboxPolicy::DangerFullAccess,

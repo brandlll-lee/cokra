@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::AuthError;
+use super::CredentialStorage;
 use super::Credentials;
 use super::Result;
 use super::StoredCredentials;
-use super::storage::CredentialStorage;
 
 /// OAuth provider configuration.
 #[derive(Debug, Clone)]

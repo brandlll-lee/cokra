@@ -103,10 +103,20 @@ impl ActiveTranscriptState {
       return None;
     }
     let agent_preview = self.active_agent_preview.as_ref();
+    // Include the exploring-cell animation tick so the overlay/viewport cache
+    // is invalidated on every spinner frame, driving continuous redraws.
+    let exec_animation_tick = self
+      .active_exec_cell
+      .as_ref()
+      .and_then(|cell| cell.as_any().downcast_ref::<crate::exec_cell::ExecCell>())
+      .and_then(|cell| cell.exploring_animation_tick());
+    let animation_tick = agent_preview
+      .and_then(|cell| cell.transcript_animation_tick())
+      .or(exec_animation_tick);
     Some(ActiveCellTranscriptKey {
       revision: self.active_cell_revision,
       is_stream_continuation: agent_preview.is_some_and(|cell| cell.is_stream_continuation()),
-      animation_tick: agent_preview.and_then(|cell| cell.transcript_animation_tick()),
+      animation_tick,
     })
   }
 
@@ -197,7 +207,10 @@ mod tests {
       .iter()
       .map(Line::to_string)
       .collect::<Vec<_>>();
-    assert_eq!(rendered, vec!["● preview".to_string(), "".to_string(), "exec".to_string()]);
+    assert_eq!(
+      rendered,
+      vec!["● preview".to_string(), "".to_string(), "exec".to_string()]
+    );
   }
 
   #[test]

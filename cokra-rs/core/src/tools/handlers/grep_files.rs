@@ -89,7 +89,7 @@ impl ToolHandler for GrepFilesHandler {
       search_results.join("\n")
     };
 
-    let mut out = ToolOutput::success(content);
+    let out = ToolOutput::success(content);
     Ok(
       out
         .with_success(!search_results.is_empty())

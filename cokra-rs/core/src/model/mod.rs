@@ -9,24 +9,26 @@
 //! - [AuthManager]: handles authentication (API Key, OAuth, Bearer Token)
 //! - Provider implementations in [providers]
 
+pub mod auth_orchestrator;
 pub mod client;
-pub mod connect_catalog;
 pub mod error;
 pub mod metadata;
 pub mod models_dev;
 pub mod oauth_connect;
 pub mod plugin_registry;
 pub mod provider;
-pub mod provider_auth;
+pub mod provider_catalog;
 pub mod registry;
 pub mod streaming;
 pub mod transform;
 pub mod types;
 
 pub mod auth;
+pub mod auth_store;
 pub mod providers;
 
 // Re-exports
+pub use auth_orchestrator::ProviderAuth;
 pub use client::ModelClient;
 pub use error::ModelError;
 pub use error::Result;
@@ -35,7 +37,8 @@ pub use metadata::ModelMetadataManager;
 pub use plugin_registry::PluginRegistry;
 pub use provider::ModelProvider;
 pub use provider::ProviderInfo;
-pub use provider_auth::ProviderAuth;
+pub use provider_catalog::ProviderCatalogEntry;
+pub use provider_catalog::RuntimeRegistrationKind;
 pub use registry::ProviderRegistry;
 pub use streaming::AnthropicUsageParser;
 pub use streaming::OpenAIUsageParser;

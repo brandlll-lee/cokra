@@ -7,8 +7,8 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::exec::format_exec_output_for_model_structured;
 use crate::exec::SandboxPermissions;
+use crate::exec::format_exec_output_for_model_structured;
 use crate::exec_policy::eval_exec_approval;
 use crate::session::Session;
 use crate::shell::default_user_shell;
@@ -68,6 +68,10 @@ pub struct ToolRunContext {
   pub approval_policy: AskForApproval,
   pub sandbox_policy: SandboxPolicy,
   pub has_managed_network_requirements: bool,
+  /// When `true`, `dispatch_tool_call` will skip emitting `ExecCommandBegin`
+  /// because the caller already emitted it ahead of time (e.g. to guarantee
+  /// the TUI sees all Begin events before any End events arrive).
+  pub begin_already_emitted: bool,
 }
 
 impl ToolRunContext {
@@ -88,6 +92,7 @@ impl ToolRunContext {
       approval_policy,
       sandbox_policy,
       has_managed_network_requirements: false,
+      begin_already_emitted: false,
     }
   }
 }
@@ -178,7 +183,7 @@ impl ToolRouter {
       tool_name: &call.tool_name,
       cwd: &run_ctx.cwd,
     };
-    if emit_exec_events {
+    if emit_exec_events && !run_ctx.begin_already_emitted {
       emitter.begin(event_ctx.clone()).await;
     }
 
@@ -270,7 +275,7 @@ fn tool_emitter_for_call(call: &ToolCall, cwd: &Path) -> ToolEmitter {
   ToolEmitter::with_display_command(call.tool_name.clone(), display_command)
 }
 
-fn should_emit_exec_events(tool_name: &str) -> bool {
+pub(crate) fn should_emit_exec_events(tool_name: &str) -> bool {
   // MCP tools emit McpToolCallBegin/End through McpHandler directly; they render through
   // the exec cell path via those events. Emitting ExecCommandBegin/End on top produces
   // duplicate "Running" + "● Calling" / "● completed" rows for every MCP call.
@@ -302,7 +307,7 @@ fn should_emit_exec_events(tool_name: &str) -> bool {
   )
 }
 
-fn summarize_tool_display_command(call: &ToolCall, cwd: &Path) -> Option<String> {
+pub(crate) fn summarize_tool_display_command(call: &ToolCall, cwd: &Path) -> Option<String> {
   match call.tool_name.as_str() {
     "read_file" => call
       .args
@@ -338,7 +343,7 @@ fn summarize_tool_display_command(call: &ToolCall, cwd: &Path) -> Option<String>
   }
 }
 
-fn summarize_path_for_display(path: &str, cwd: &Path) -> String {
+pub(crate) fn summarize_path_for_display(path: &str, cwd: &Path) -> String {
   let path = PathBuf::from(path);
   if let Ok(relative) = path.strip_prefix(cwd)
     && !relative.as_os_str().is_empty()
@@ -690,9 +695,9 @@ mod tests {
 
   use serde_json::json;
 
+  use super::ToolCall;
   use super::should_emit_exec_events;
   use super::summarize_tool_display_command;
-  use super::ToolCall;
 
   #[test]
   fn collab_tools_skip_exec_transcript_events() {

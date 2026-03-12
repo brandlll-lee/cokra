@@ -50,7 +50,7 @@ impl ToolHandler for CreateTeamTaskHandler {
         .await;
     }
 
-    let mut out =
+    let out =
       ToolOutput::success(serde_json::to_string(&task).map_err(|err| {
         FunctionCallError::Fatal(format!("failed to serialize team task: {err}"))
       })?);

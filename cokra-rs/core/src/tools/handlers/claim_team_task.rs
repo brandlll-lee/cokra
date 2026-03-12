@@ -58,7 +58,7 @@ impl ToolHandler for ClaimTeamTaskHandler {
         .await;
     }
 
-    let mut out = ToolOutput::success(serde_json::to_string(&task).map_err(|err| {
+    let out = ToolOutput::success(serde_json::to_string(&task).map_err(|err| {
       FunctionCallError::Fatal(format!("failed to serialize claimed task: {err}"))
     })?);
     Ok(out.with_id(invocation.id))

@@ -13,7 +13,7 @@ use cokra_protocol::ResponseEvent;
 use super::auth::AuthManager;
 use super::error::ModelError;
 use super::error::Result;
-use super::plugin_registry::PluginRegistry;
+use super::provider_catalog::find_provider_catalog_entry;
 use super::providers::register_provider_by_registration;
 use super::providers::registration_token_for_stored;
 use super::registry::ProviderRegistryRef;
@@ -149,7 +149,7 @@ impl ModelClient {
     else {
       return Ok(());
     };
-    let Some(entry) = PluginRegistry::find(&source_entry_id) else {
+    let Some(entry) = find_provider_catalog_entry(&source_entry_id) else {
       return Ok(());
     };
 

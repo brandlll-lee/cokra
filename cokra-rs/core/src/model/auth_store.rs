@@ -1,48 +1,173 @@
-//! Credential storage
-//!
-//! Handles persistent storage of credentials
+//! Authentication credential storage and persisted auth records.
 
-use super::AuthError;
-use super::Credentials;
-use super::Result;
-use super::StoredCredentials;
+use crate::model::auth::AuthError;
+use crate::model::auth::Result;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
-/// Credential storage trait
+/// Credentials for authenticating with a provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Credentials {
+  /// API Key authentication.
+  #[serde(rename = "api_key")]
+  ApiKey { key: String },
+
+  /// OAuth authentication.
+  #[serde(rename = "oauth")]
+  OAuth {
+    /// Access token.
+    access_token: String,
+
+    /// Refresh token.
+    refresh_token: String,
+
+    /// Expiration timestamp (Unix seconds).
+    expires_at: u64,
+
+    /// Optional account ID.
+    #[serde(default)]
+    account_id: Option<String>,
+
+    /// Optional enterprise URL.
+    #[serde(default)]
+    enterprise_url: Option<String>,
+  },
+
+  /// Bearer token authentication.
+  #[serde(rename = "bearer")]
+  Bearer { token: String },
+
+  /// Device code for OAuth flow.
+  #[serde(rename = "device_code")]
+  DeviceCode {
+    /// Device code.
+    device_code: String,
+
+    /// User code.
+    user_code: String,
+
+    /// Verification URL.
+    verification_url: String,
+
+    /// Expiration time.
+    expires_in: u64,
+
+    /// Polling interval.
+    interval: u64,
+  },
+}
+
+impl Credentials {
+  /// Get the actual credential value for HTTP requests.
+  pub fn get_value(&self) -> String {
+    match self {
+      Credentials::ApiKey { key } => key.clone(),
+      Credentials::OAuth { access_token, .. } => access_token.clone(),
+      Credentials::Bearer { token } => token.clone(),
+      Credentials::DeviceCode { device_code, .. } => device_code.clone(),
+    }
+  }
+
+  /// Check if credentials are expired (for OAuth).
+  pub fn is_expired(&self) -> bool {
+    match self {
+      Credentials::OAuth { expires_at, .. } => *expires_at < chrono::Utc::now().timestamp() as u64,
+      _ => false,
+    }
+  }
+
+  /// Get the Authorization header value.
+  pub fn get_auth_header(&self) -> String {
+    match self {
+      Credentials::ApiKey { key } => format!("Bearer {key}"),
+      Credentials::OAuth { access_token, .. } => format!("Bearer {access_token}"),
+      Credentials::Bearer { token } => format!("Bearer {token}"),
+      Credentials::DeviceCode { device_code, .. } => format!("Bearer {device_code}"),
+    }
+  }
+}
+
+/// Stored credentials with metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredCredentials {
+  /// Provider ID.
+  pub provider_id: String,
+
+  /// Actual credentials.
+  pub credentials: Credentials,
+
+  /// When these credentials were stored.
+  pub stored_at: u64,
+
+  /// Display name for the account.
+  #[serde(default)]
+  pub account_name: Option<String>,
+
+  /// Optional metadata.
+  #[serde(default)]
+  pub metadata: serde_json::Value,
+}
+
+impl StoredCredentials {
+  /// Create new stored credentials.
+  pub fn new(provider_id: impl Into<String>, credentials: Credentials) -> Self {
+    Self {
+      provider_id: provider_id.into(),
+      credentials,
+      stored_at: chrono::Utc::now().timestamp() as u64,
+      account_name: None,
+      metadata: serde_json::json!({}),
+    }
+  }
+
+  /// Set account name.
+  pub fn with_account_name(mut self, name: impl Into<String>) -> Self {
+    self.account_name = Some(name.into());
+    self
+  }
+
+  /// Set metadata.
+  pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+    self.metadata = metadata;
+    self
+  }
+}
+
+/// Credential storage trait.
 #[async_trait::async_trait]
 pub trait CredentialStorage: Send + Sync {
-  /// Load credentials for a provider
+  /// Load credentials for a provider.
   async fn load(&self, provider_id: &str) -> Result<Option<StoredCredentials>>;
 
-  /// Save credentials
+  /// Save credentials.
   async fn save(&self, credentials: StoredCredentials) -> Result<()>;
 
-  /// Delete credentials
+  /// Delete credentials.
   async fn delete(&self, provider_id: &str) -> Result<()>;
 
-  /// List all stored provider IDs
+  /// List all stored provider IDs.
   async fn list(&self) -> Result<Vec<String>>;
 }
 
-/// File-based credential storage
+/// File-based credential storage.
 pub struct FileCredentialStorage {
-  /// Path to the storage file
+  /// Path to the storage file.
   storage_path: PathBuf,
 }
 
 impl FileCredentialStorage {
-  /// Create a new file storage
+  /// Create a new file storage.
   pub fn new(storage_path: impl AsRef<Path>) -> Self {
     Self {
       storage_path: storage_path.as_ref().to_path_buf(),
     }
   }
 
-  /// Get the default Cokra auth storage path
+  /// Get the default Cokra auth storage path.
   pub fn default_path() -> Result<PathBuf> {
     let home = dirs::home_dir()
       .ok_or_else(|| AuthError::StorageError("No home directory found".to_string()))?;
@@ -50,19 +175,19 @@ impl FileCredentialStorage {
     Ok(home.join(".cokra").join("auth.json"))
   }
 
-  /// Create with default path
+  /// Create with default path.
   pub fn default_storage() -> Result<Self> {
     Ok(Self::new(Self::default_path()?))
   }
 
-  /// Load the storage file
+  /// Load the storage file.
   fn load_file(&self) -> Result<CredentialStore> {
     if !self.storage_path.exists() {
       return Ok(CredentialStore::default());
     }
 
     let content = std::fs::read_to_string(&self.storage_path)
-      .map_err(|e| AuthError::StorageError(format!("Failed to read auth file: {}", e)))?;
+      .map_err(|e| AuthError::StorageError(format!("Failed to read auth file: {e}")))?;
 
     if content.trim().is_empty() {
       return Ok(CredentialStore::default());
@@ -83,19 +208,18 @@ impl FileCredentialStorage {
     Ok(store)
   }
 
-  /// Save the storage file
+  /// Save the storage file.
   fn save_file(&self, store: &CredentialStore) -> Result<()> {
-    // Ensure parent directory exists
     if let Some(parent) = self.storage_path.parent() {
       std::fs::create_dir_all(parent)
-        .map_err(|e| AuthError::StorageError(format!("Failed to create auth directory: {}", e)))?;
+        .map_err(|e| AuthError::StorageError(format!("Failed to create auth directory: {e}")))?;
     }
 
     let content = serde_json::to_string_pretty(store)
-      .map_err(|e| AuthError::StorageError(format!("Failed to serialize auth: {}", e)))?;
+      .map_err(|e| AuthError::StorageError(format!("Failed to serialize auth: {e}")))?;
 
     std::fs::write(&self.storage_path, content)
-      .map_err(|e| AuthError::StorageError(format!("Failed to write auth file: {}", e)))?;
+      .map_err(|e| AuthError::StorageError(format!("Failed to write auth file: {e}")))?;
 
     Ok(())
   }
@@ -123,7 +247,7 @@ impl CredentialStorage for FileCredentialStorage {
     let mut store = self.load_file()?;
     let provider_id = credentials.provider_id.clone();
     store.credentials.insert(
-      provider_id.clone(),
+      provider_id,
       StoredCredentialData {
         credentials: credentials.credentials,
         stored_at: credentials.stored_at,
@@ -146,14 +270,14 @@ impl CredentialStorage for FileCredentialStorage {
   }
 }
 
-/// In-memory credential storage (for testing)
+/// In-memory credential storage (for testing).
 #[derive(Default)]
 pub struct MemoryCredentialStorage {
   credentials: std::sync::Arc<std::sync::Mutex<HashMap<String, StoredCredentialData>>>,
 }
 
 impl MemoryCredentialStorage {
-  /// Create a new memory storage
+  /// Create a new memory storage.
   pub fn new() -> Self {
     Self::default()
   }
@@ -202,14 +326,14 @@ impl CredentialStorage for MemoryCredentialStorage {
   }
 }
 
-/// Internal credential store structure
+/// Internal credential store structure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CredentialStore {
   credentials: HashMap<String, StoredCredentialData>,
   version: u32,
 }
 
-/// Stored credential data (simplified version for storage)
+/// Stored credential data (simplified version for storage).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredCredentialData {
   credentials: Credentials,
@@ -230,6 +354,7 @@ impl Default for CredentialStore {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use pretty_assertions::assert_eq;
 
   #[tokio::test]
   async fn test_memory_storage() {
@@ -254,7 +379,7 @@ mod tests {
     let creds = Credentials::OAuth {
       access_token: "test".to_string(),
       refresh_token: "refresh".to_string(),
-      expires_at: 0, // Expired
+      expires_at: 0,
       account_id: None,
       enterprise_url: None,
     };

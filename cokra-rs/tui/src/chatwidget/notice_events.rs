@@ -98,10 +98,7 @@ impl ChatWidget {
       }
       EventMsg::McpToolCallBegin(e) => {
         self.flush_answer_stream();
-        let fq_name = format!(
-          "mcp__{}__{}",
-          e.invocation.server, e.invocation.tool
-        );
+        let fq_name = format!("mcp__{}__{}", e.invocation.server, e.invocation.tool);
         let call = ExecCall {
           command_id: e.call_id.clone(),
           tool_name: fq_name.clone(),
@@ -119,7 +116,10 @@ impl ChatWidget {
           call.cwd.clone(),
           self.animations_enabled(),
         )));
-        self.transcript.pending_exec_calls.insert(e.call_id.clone(), call);
+        self
+          .transcript
+          .pending_exec_calls
+          .insert(e.call_id.clone(), call);
         self.set_status_override(
           format!("Calling {}.{}", e.invocation.server, e.invocation.tool),
           None,
@@ -149,7 +149,10 @@ impl ChatWidget {
           }
           cokra_protocol::McpToolCallResult::Err(err) => (1i32, err.clone()),
         };
-        let output = CommandOutput { exit_code, output: output_text };
+        let output = CommandOutput {
+          exit_code,
+          output: output_text,
+        };
         let (did_complete, should_flush) = if let Some(cell) = self
           .transcript
           .active_exec_cell
@@ -298,6 +301,11 @@ impl ChatWidget {
           lines.push(Line::from(format!("  {marker} {}", item.step)));
         }
         self.add_to_history_preserving_exec(PlainHistoryCell::new(lines));
+      }
+      EventMsg::TodoUpdate(todo_event) => {
+        self.add_to_history_preserving_exec(crate::history_cell::TodoUpdateCell::new(
+          todo_event.todos.clone(),
+        ));
       }
       EventMsg::EnteredReviewMode(e) => {
         let hint = e

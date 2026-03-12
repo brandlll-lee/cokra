@@ -76,9 +76,9 @@ impl ToolHandler for SaveMemoryHandler {
 
     let new_content = append_memory(&current_content, &sanitized);
 
-    tokio::fs::write(&memory_path, &new_content).await.map_err(|e| {
-      FunctionCallError::Execution(format!("failed to write memory file: {e}"))
-    })?;
+    tokio::fs::write(&memory_path, &new_content)
+      .await
+      .map_err(|e| FunctionCallError::Execution(format!("failed to write memory file: {e}")))?;
 
     let message = format!("Remembered: \"{sanitized}\"");
     Ok(ToolOutput::success(message).with_id(id))
@@ -163,10 +163,7 @@ mod tests {
 
   #[test]
   fn sanitize_collapses_newlines() {
-    assert_eq!(
-      sanitize_fact("line one\nline two"),
-      "line one line two"
-    );
+    assert_eq!(sanitize_fact("line one\nline two"), "line one line two");
   }
 
   #[test]
@@ -215,8 +212,7 @@ mod tests {
 
   #[test]
   fn append_memory_preserves_after_section() {
-    let existing =
-      format!("{MEMORY_SECTION_HEADER}\n- old fact\n\n## Other Section\nContent\n");
+    let existing = format!("{MEMORY_SECTION_HEADER}\n- old fact\n\n## Other Section\nContent\n");
     let result = append_memory(&existing, "another fact");
     assert!(result.contains("## Other Section"));
     assert!(result.contains("- another fact"));

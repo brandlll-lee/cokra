@@ -35,6 +35,24 @@ impl ChatWidget {
       .and_then(|cell| cell.with_added_call(call.clone()));
 
     if let Some(merged_exec_cell) = merged_exec_cell {
+      // ScrollbackFirst: before merging the new call, emit a snapshot of the
+      // *current* completed state so the user sees the exploring list grow in
+      // scrollback. We only emit when the current cell has no active calls
+      // (all calls have output), which guarantees the snapshot shows
+      // "● Explored" with no spinner residue.
+      if self.stream_render_mode == StreamRenderMode::ScrollbackFirst {
+        if let Some(cell) = self
+          .transcript
+          .active_exec_cell
+          .as_ref()
+          .and_then(|cell| cell.as_any().downcast_ref::<ExecCell>())
+          .filter(|cell| !cell.is_active())
+        {
+          self
+            .app_event_tx
+            .insert_boxed_history_cell(Box::new(cell.scrollback_snapshot()));
+        }
+      }
       if let Some(cell) = self
         .transcript
         .active_exec_cell
@@ -339,7 +357,14 @@ mod tests {
       .map(Line::to_string)
       .collect::<Vec<_>>()
       .join("\n");
-    assert!(rendered.contains("Explored"));
+    // While the cell lives in active_exec_cell (turn still in progress) it
+    // always shows "Exploring" with a spinner, regardless of whether
+    // individual calls are finished. It becomes "Explored" only after
+    // flush_active_cell() at turn end.
+    assert!(
+      rendered.contains("Exploring"),
+      "expected Exploring while cell is live: {rendered}"
+    );
     assert!(rendered.contains("List cokra-rs"));
     assert!(rendered.contains("Read PROJECT_STRUCTURE.md"));
     assert!(rendered.contains("Search ExecCell"));
@@ -370,9 +395,125 @@ mod tests {
       .map(Line::to_string)
       .collect::<Vec<_>>()
       .join("\n");
-    assert!(rendered.contains("Explored"));
+    // Same as above: live cell always shows "Exploring" until flushed.
+    assert!(
+      rendered.contains("Exploring"),
+      "expected Exploring while cell is live: {rendered}"
+    );
     assert!(rendered.contains("Search agentteams"));
     assert!(rendered.contains("Search spawn_agent"));
+  }
+
+  fn make_scrollback_first_widget() -> (ChatWidget, tokio::sync::mpsc::UnboundedReceiver<AppEvent>)
+  {
+    let (tx, rx) = unbounded_channel();
+    let sender = AppEventSender::new(tx);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::ScrollbackFirst,
+    );
+    widget.set_agent_turn_running(true);
+    (widget, rx)
+  }
+
+  #[test]
+  fn scrollback_first_exploring_cell_writes_snapshot_on_each_new_call() {
+    let (mut widget, mut rx) = make_scrollback_first_widget();
+
+    // First exploring call — no snapshot yet (nothing to snapshot before it).
+    widget.handle_exec_begin_now(&begin_event("call-1", "list_dir", "cokra-rs"));
+    assert!(
+      rx.try_recv().is_err(),
+      "first exploring call should not emit a scrollback snapshot"
+    );
+
+    // Complete call-1: the cell is now fully idle (no active calls).
+    widget.handle_exec_end_now(&end_event("call-1"));
+    assert!(
+      rx.try_recv().is_err(),
+      "exec_end alone should not emit a snapshot"
+    );
+
+    // Second exploring call — active_exec_cell is now !is_active(), so a snapshot is emitted.
+    widget.handle_exec_begin_now(&begin_event("call-2", "read_file", "Cargo.toml"));
+    let snapshot_event = rx
+      .try_recv()
+      .expect("expected scrollback snapshot after second call");
+    let AppEvent::InsertHistoryCell(snapshot) = snapshot_event else {
+      panic!("expected InsertHistoryCell event");
+    };
+    assert!(
+      snapshot.is_stream_continuation(),
+      "scrollback snapshot should be marked as stream continuation to suppress blank line"
+    );
+    let rendered = snapshot
+      .display_lines(80)
+      .iter()
+      .map(|l| l.to_string())
+      .collect::<Vec<_>>()
+      .join("\n");
+    assert!(
+      rendered.contains("Explored"),
+      "snapshot should show Explored (no spinner): {rendered}"
+    );
+    assert!(
+      rendered.contains("List cokra-rs"),
+      "snapshot should contain the first call: {rendered}"
+    );
+    assert!(
+      !rendered.contains("Cargo.toml"),
+      "snapshot should NOT yet contain the second call: {rendered}"
+    );
+
+    // Complete call-2, then start call-3 — should emit another snapshot (now with 2 calls).
+    widget.handle_exec_end_now(&end_event("call-2"));
+    widget.handle_exec_begin_now(&begin_event("call-3", "glob", "**/*.rs"));
+    let snapshot2_event = rx.try_recv().expect("expected second scrollback snapshot");
+    let AppEvent::InsertHistoryCell(snapshot2) = snapshot2_event else {
+      panic!("expected InsertHistoryCell event");
+    };
+    let rendered2 = snapshot2
+      .display_lines(80)
+      .iter()
+      .map(|l| l.to_string())
+      .collect::<Vec<_>>()
+      .join("\n");
+    assert!(
+      rendered2.contains("Explored"),
+      "second snapshot should show Explored (no spinner): {rendered2}"
+    );
+    assert!(
+      rendered2.contains("List cokra-rs"),
+      "second snapshot should contain call-1: {rendered2}"
+    );
+    assert!(
+      rendered2.contains("Read Cargo.toml"),
+      "second snapshot should contain call-2: {rendered2}"
+    );
+    assert!(
+      !rendered2.contains("glob"),
+      "second snapshot should NOT yet contain call-3: {rendered2}"
+    );
+  }
+
+  #[test]
+  fn animated_preview_exploring_cell_does_not_emit_intermediate_snapshots() {
+    let mut widget = make_widget();
+
+    widget.handle_exec_begin_now(&begin_event("call-1", "list_dir", "cokra-rs"));
+    widget.handle_exec_begin_now(&begin_event("call-2", "read_file", "Cargo.toml"));
+
+    // In AnimatedPreview mode no intermediate snapshots are written; the cell
+    // is shown live in the viewport only.
+    let cell = widget
+      .transcript
+      .active_exec_cell
+      .as_ref()
+      .and_then(|c| c.as_any().downcast_ref::<ExecCell>())
+      .expect("expected active exec cell");
+    assert_eq!(cell.calls.len(), 2);
   }
 
   #[test]
@@ -412,6 +553,10 @@ mod tests {
       .as_ref()
       .and_then(|c| c.as_any().downcast_ref::<ExecCell>())
       .expect("expected new active exec cell for call-2");
-    assert_eq!(cell.calls.len(), 1, "call-2 should be in a fresh exec cell, not merged with call-1");
+    assert_eq!(
+      cell.calls.len(),
+      1,
+      "call-2 should be in a fresh exec cell, not merged with call-1"
+    );
   }
 }

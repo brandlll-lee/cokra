@@ -736,68 +736,22 @@ impl TeamRuntime {
 }
 
 fn build_spawned_agent_system_prompt(base: &str, nickname: Option<&str>, role: &str) -> String {
-  let mut out = String::with_capacity(base.len() + 800);
+  let mut out =
+    String::with_capacity(base.len() + crate::prompts::AGENT_SPAWNED_SUFFIX.len() + 128);
   out.push_str(base);
-  out.push_str("\n\n# Agent Teams: spawned teammate mode\n\n");
-  out.push_str(
-    "You are a spawned teammate agent inside Cokra Agent Teams. Your job is to help @main by working on a specific subtask.\n",
-  );
   if let Some(nickname) = nickname.map(str::trim).filter(|value| !value.is_empty()) {
-    out.push_str(&format!("Your teammate nickname is @{nickname}.\n"));
+    out.push_str(&format!("\nYour teammate nickname is @{nickname}."));
   }
   if !role.trim().is_empty() && !role.eq_ignore_ascii_case("default") {
-    out.push_str(&format!("Your teammate role is {role}.\n"));
+    out.push_str(&format!("\nYour teammate role is {role}."));
   }
-  out.push_str("\n");
-  out.push_str(
-    "- You may do research, comparisons, design discussion, or drafting even when the task is not directly editing code.\n",
-  );
-  out.push_str(
-    "- Do not refuse a task solely because it is \"not a coding task\". Instead: do your best, be explicit about what you can verify locally, and list what would need external verification if required.\n",
-  );
-  out.push_str(
-    "- If the user question is general (not about this repository), answer directly without trying to force a workspace/code inspection first.\n",
-  );
-  out.push_str(
-    "- Do not invent product timelines, deprecations, pricing, or other time-sensitive facts. If you are unsure, say so and keep claims scoped.\n",
-  );
-  out.push_str(
-    "- Do not call request_user_input. Spawned teammates cannot ask the human directly; make a reasonable assumption or report the missing information back to @main.\n",
-  );
-  out.push_str(
-    "- Keep outputs concise and oriented toward helping @main (key findings, clear recommendation, and any follow-up questions).\n",
-  );
+  out.push_str(crate::prompts::AGENT_SPAWNED_SUFFIX);
   out
 }
 
 /// 为主代理（leader/orchestrator）构建 agent-teams 系统提示后缀。
 /// 当 agent-teams 功能启用时，追加到主代理的系统提示末尾。
+/// Prompt text lives in `src/prompts/agent_leader.md`.
 pub(crate) fn build_leader_agent_teams_prompt_suffix() -> &'static str {
-  r#"
-
-# Agent Teams: orchestrator mode
-
-You have access to agent teams tools for spawning and managing teammate agents.
-
-## Critical rules for agent teams:
-
-1. **Always use tool calls**: You MUST use the `spawn_agent` tool to create teammates. Never pretend to spawn agents by writing XML or fake tool calls in your text output.
-
-2. **Always wait for results**: After spawning agents and sending them input, you MUST use the `wait` tool to wait for their completion. The `wait` tool returns the actual output from each agent.
-
-3. **Never fabricate agent outputs**: You do NOT know what agents will say until `wait` returns their completed status with output. Never write fake responses on behalf of your teammates.
-
-4. **Re-wait on timeout**: If `wait` returns with agents still in `Running` status, call `wait` again with a longer timeout. Do not assume the task failed.
-
-5. **Use appropriate timeouts**: For complex discussion/research tasks, use timeout_ms of 120000 (2 minutes) or higher. The default 30 seconds is often too short for LLM-powered agents.
-
-6. **Clean up**: Use `close_agent` or `cleanup_team` when the team's work is complete.
-
-## Tool usage pattern:
-1. `spawn_agent` with `task` parameter → returns agent_id
-2. `wait` with agent_ids → returns status + output when agents complete
-3. `send_input` to provide follow-up messages to specific agents
-4. `wait` again for responses
-5. `close_agent` or `cleanup_team` when done
-"#
+  crate::prompts::AGENT_LEADER_SUFFIX
 }

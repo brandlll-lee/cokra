@@ -135,14 +135,18 @@ fn validate_exec_request(
     .get("sandbox_permissions")
     .map(|value| serde_json::from_value::<SandboxPermissions>(value.clone()))
     .transpose()
-    .map_err(|err| ValidationError::InvalidArguments(format!("invalid sandbox_permissions: {err}")))?
+    .map_err(|err| {
+      ValidationError::InvalidArguments(format!("invalid sandbox_permissions: {err}"))
+    })?
     .unwrap_or(SandboxPermissions::UseDefault);
 
   let additional_permissions = args
     .get("additional_permissions")
     .map(|value| serde_json::from_value::<PermissionProfile>(value.clone()))
     .transpose()
-    .map_err(|err| ValidationError::InvalidArguments(format!("invalid additional_permissions: {err}")))?;
+    .map_err(|err| {
+      ValidationError::InvalidArguments(format!("invalid additional_permissions: {err}"))
+    })?;
 
   if expects_argv {
     let _ = args
@@ -162,12 +166,14 @@ fn validate_exec_request(
     }
   }
 
-  if let Some(justification) = args.get("justification") {
-    if justification.as_str().is_none_or(|value| value.trim().is_empty()) {
-      return Err(ValidationError::InvalidArguments(
-        "justification must be a non-empty string".to_string(),
-      ));
-    }
+  if let Some(justification) = args.get("justification")
+    && justification
+      .as_str()
+      .is_none_or(|value| value.trim().is_empty())
+  {
+    return Err(ValidationError::InvalidArguments(
+      "justification must be a non-empty string".to_string(),
+    ));
   }
 
   if sandbox_permissions.requires_additional_permissions() {

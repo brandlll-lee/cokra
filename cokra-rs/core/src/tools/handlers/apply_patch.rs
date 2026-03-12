@@ -31,8 +31,7 @@ impl ToolHandler for ApplyPatchHandler {
     match cokra_apply_patch::apply_patch(&args.patch, cwd) {
       Ok(affected) => {
         let summary = cokra_apply_patch::format_summary(&affected);
-        let total =
-          affected.added.len() + affected.modified.len() + affected.deleted.len();
+        let total = affected.added.len() + affected.modified.len() + affected.deleted.len();
         Ok(
           ToolOutput::success(format!(
             "apply_patch applied ({} file(s) changed)\n{summary}",
@@ -51,7 +50,8 @@ impl ToolHandler for ApplyPatchHandler {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::tools::context::{ToolInvocation, ToolPayload};
+  use crate::tools::context::ToolInvocation;
+  use crate::tools::context::ToolPayload;
   use std::path::PathBuf;
   use tempfile::tempdir;
 
@@ -141,8 +141,7 @@ mod tests {
     let result = handler.handle(inv).expect("handle");
     assert!(result.text_content().contains("1 file(s) changed"));
 
-    let contents =
-      std::fs::read_to_string(dir.path().join("sub/file.txt")).expect("read");
+    let contents = std::fs::read_to_string(dir.path().join("sub/file.txt")).expect("read");
     assert_eq!(contents, "content\n");
   }
 

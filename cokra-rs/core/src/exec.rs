@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
-use serde::Serialize;
 use serde::Deserialize;
+use serde::Serialize;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
@@ -162,9 +162,7 @@ pub struct ModelStructuredExecMetadata {
 /// Best-effort decode for the model-structured exec envelope.
 ///
 /// Returns `None` if the payload is not in the expected shape.
-pub fn try_parse_model_structured_exec_output(
-  content: &str,
-) -> Option<ModelStructuredExecOutput> {
+pub fn try_parse_model_structured_exec_output(content: &str) -> Option<ModelStructuredExecOutput> {
   let trimmed = content.trim();
   // Fast-path heuristic: avoid JSON parsing for typical tool outputs.
   if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
@@ -776,7 +774,8 @@ mod tests {
 
   #[test]
   fn try_parse_model_structured_exec_output_decodes_output_and_metadata() {
-    let payload = r#"{"output":"line1\nline2\n","metadata":{"exit_code":7,"duration_seconds":1.5}}"#;
+    let payload =
+      r#"{"output":"line1\nline2\n","metadata":{"exit_code":7,"duration_seconds":1.5}}"#;
     let parsed = try_parse_model_structured_exec_output(payload).expect("expected envelope");
     assert_eq!(parsed.metadata.exit_code, 7);
     assert_eq!(parsed.metadata.duration_seconds, 1.5);

@@ -154,6 +154,10 @@ pub fn build_specs() -> Vec<ToolSpec> {
     web_search_tool(),
     save_memory_tool(),
     diagnostics_tool(),
+    skill_tool(),
+    read_many_files_tool(),
+    // todo_read 已废弃（1:1 opencode registry.ts:110 `// TodoReadTool`）
+    todo_write_tool(),
   ]
 }
 
@@ -1044,9 +1048,7 @@ fn web_search_tool() -> ToolSpec {
   );
   props.insert(
     "livecrawl".to_string(),
-    str_field(
-      "Live crawl mode for Exa backend: 'fallback' (default) or 'preferred'.",
-    ),
+    str_field("Live crawl mode for Exa backend: 'fallback' (default) or 'preferred'."),
   );
   props.insert(
     "context_max_characters".to_string(),
@@ -1098,9 +1100,7 @@ fn diagnostics_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
   props.insert(
     "path".to_string(),
-    str_field(
-      "Absolute or relative path to the source file to get diagnostics for.",
-    ),
+    str_field("Absolute or relative path to the source file to get diagnostics for."),
   );
   props.insert(
     "max_diagnostics".to_string(),
@@ -1116,6 +1116,111 @@ fn diagnostics_tool() -> ToolSpec {
     None,
     ToolHandlerType::Function,
     default_permissions(),
+  )
+}
+
+/// 1:1 opencode SkillTool: description 由调用方动态注入（含 <available_skills> 列表）。
+/// 调用 `handlers::skill::build_skill_description(cwd).await` 获取描述字符串。
+pub fn skill_tool_with_description(description: impl Into<String>) -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "name".to_string(),
+    str_field("要加载的 skill 名称，必须是工具描述中 <available_skills> 列出的之一。"),
+  );
+  ToolSpec::new(
+    "skill",
+    description,
+    obj(props, &["name"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn skill_tool() -> ToolSpec {
+  skill_tool_with_description(
+    "加载领域专属 Skill，获取详细指令和工作流。\n\
+     当识别到任务匹配某个 skill 时，使用此工具加载完整 skill 指令。\n\
+     Skill 内容以 <skill_content name=\"...\"> 块返回，包含指令、工作流和附属资源文件列表。",
+  )
+}
+
+fn read_many_files_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "paths".to_string(),
+    JsonSchema::Array {
+      items: Box::new(str_field("要读取文件的绝对路径。")),
+      description: Some("要读取的绝对路径列表，最多 20 个。".to_string()),
+    },
+  );
+  props.insert(
+    "offset".to_string(),
+    int_field("每个文件从第几行开始（1-indexed，默认 1）。"),
+  );
+  props.insert(
+    "limit".to_string(),
+    int_field("每个文件最多读取多少行（默认 2000，最大 2000）。"),
+  );
+  ToolSpec::new(
+    "read_many_files",
+    "批量读取多个文件内容。一次最多读取 20 个文件，每个文件最多 2000 行。\
+     路径必须为绝对路径。读取失败的文件单独报错，不中断整批。\
+     输出格式：每个文件以 === <path> === 为分隔头，内容格式为 L{n}: {content}。",
+    obj(props, &["paths"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn todo_write_tool() -> ToolSpec {
+  let mut todo_item_props = BTreeMap::new();
+  todo_item_props.insert("id".to_string(), str_field("任务唯一标识符。"));
+  todo_item_props.insert("content".to_string(), str_field("任务内容描述（非空）。"));
+  todo_item_props.insert(
+    "status".to_string(),
+    str_field(
+      "任务状态：pending / in_progress / completed / cancelled。同时最多 1 个 in_progress。",
+    ),
+  );
+  todo_item_props.insert(
+    "priority".to_string(),
+    str_field("任务优先级：high / medium / low（默认 medium）。"),
+  );
+
+  let todo_item_schema = JsonSchema::Object {
+    properties: todo_item_props,
+    required: Some(vec![
+      "id".to_string(),
+      "content".to_string(),
+      "status".to_string(),
+    ]),
+    additional_properties: Some(false.into()),
+  };
+
+  let mut props = BTreeMap::new();
+  props.insert(
+    "todos".to_string(),
+    JsonSchema::Array {
+      items: Box::new(todo_item_schema),
+      description: Some("完整的 todo 列表（全量覆写）。传空数组清空列表。".to_string()),
+    },
+  );
+
+  ToolSpec::new(
+    "todo_write",
+    "全量覆写 todo 任务列表（存储于 ~/.cokra/todos.json）。\
+     接收完整列表并原子替换当前列表。同时最多 1 个 in_progress 任务。\
+     使用场景：任务开始时创建计划，执行过程中更新状态，完成后标记 completed。",
+    obj(props, &["todos"]),
+    None,
+    ToolHandlerType::Function,
+    ToolPermissions {
+      requires_approval: false,
+      allow_network: false,
+      allow_fs_write: true,
+    },
   )
 }
 

@@ -107,6 +107,9 @@ pub enum EventMsg {
   // ========== PLAN ==========
   PlanUpdate(UpdatePlanArgs),
 
+  // ========== TODO ==========
+  TodoUpdate(TodoUpdateEvent),
+
   // ========== SHUTDOWN ==========
   ShutdownComplete,
 
@@ -1058,6 +1061,44 @@ pub struct UpdatePlanArgs {
   #[serde(default)]
   pub explanation: Option<String>,
   pub plan: Vec<PlanItemArg>,
+}
+
+// ---------- Todo Events ----------
+
+/// Todo item status (1:1 opencode Todo.Info)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoItemStatus {
+  Pending,
+  InProgress,
+  Completed,
+  Cancelled,
+}
+
+/// Todo item priority
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoItemPriority {
+  High,
+  Medium,
+  Low,
+}
+
+/// A single todo item for protocol-level transport.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoItemEvent {
+  pub id: String,
+  #[serde(alias = "description")]
+  pub content: String,
+  pub status: TodoItemStatus,
+  #[serde(default)]
+  pub priority: Option<TodoItemPriority>,
+}
+
+/// Todo list update event emitted by todo_write handler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoUpdateEvent {
+  pub todos: Vec<TodoItemEvent>,
 }
 
 // ---------- Review Mode Events ----------

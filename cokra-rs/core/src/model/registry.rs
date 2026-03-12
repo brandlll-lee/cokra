@@ -12,8 +12,9 @@ use super::auth::AuthManager;
 use super::error::ModelError;
 use super::error::Result;
 use super::models_dev::ModelsDevClient;
-use super::plugin_registry::PluginRegistry;
 use super::provider::ProviderInfo;
+use super::provider_catalog::connect_provider_catalog;
+use super::provider_catalog::find_provider_catalog_entry;
 
 /// Provider Registry
 ///
@@ -344,14 +345,14 @@ impl ProviderRegistry {
 
   pub async fn list_connect_catalog(&self) -> Vec<ProviderInfo> {
     let auth = self.auth.clone();
-    let mut providers = PluginRegistry::entries()
+    let mut providers = connect_provider_catalog()
       .into_iter()
       .map(|item| {
         ProviderInfo::new(item.id, item.name)
           .connect_method(item.connect_method)
           .connectable(true)
-          .env_vars(item.env_vars)
-          .models(item.default_models)
+          .env_vars(item.env_vars())
+          .models(item.default_models())
       })
       .collect::<Vec<_>>();
 
@@ -391,7 +392,7 @@ impl ProviderRegistry {
 
     let mut results = Vec::new();
     for provider in connected {
-      let Some(entry) = PluginRegistry::find(&provider.id) else {
+      let Some(entry) = find_provider_catalog_entry(&provider.id) else {
         continue;
       };
       let Some(model_provider_id) = entry.primary_model_provider_id() else {
@@ -660,7 +661,7 @@ mod tests {
       std::env::remove_var("GOOGLE_API_KEY");
     }
 
-    let registry = ProviderRegistry::new();
+    let registry = ProviderRegistry::new_with_auth(Some(Arc::new(AuthManager::memory())));
     registry
       .register_with_config(
         TestProvider {
@@ -705,14 +706,12 @@ mod tests {
     use crate::model::auth::Credentials;
     use crate::model::auth::StoredCredentials;
 
-    let home = tempfile::tempdir().expect("tempdir");
     unsafe {
-      std::env::set_var("HOME", home.path());
       std::env::remove_var("OPENAI_API_KEY");
       std::env::remove_var("ANTHROPIC_API_KEY");
     }
 
-    let auth = AuthManager::new().expect("auth manager");
+    let auth = Arc::new(AuthManager::memory());
     auth
       .save_stored(StoredCredentials::new(
         "openai",
@@ -723,7 +722,7 @@ mod tests {
       .await
       .expect("save stored");
 
-    let registry = ProviderRegistry::new();
+    let registry = ProviderRegistry::new_with_auth(Some(auth));
     let providers = registry.list_connect_catalog().await;
     let openai = providers
       .iter()
@@ -734,11 +733,10 @@ mod tests {
       .find(|provider| provider.id == "anthropic")
       .expect("anthropic provider");
 
-    assert!(openai.authenticated, "stored credentials should mark openai as connected");
+    assert!(
+      openai.authenticated,
+      "stored credentials should mark openai as connected"
+    );
     assert!(!anthropic.authenticated, "no credentials for anthropic");
-
-    unsafe {
-      std::env::remove_var("HOME");
-    }
   }
 }

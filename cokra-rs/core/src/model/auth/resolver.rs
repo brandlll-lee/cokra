@@ -2,9 +2,11 @@
 //!
 //! Resolvers handle different ways of obtaining credentials
 
+use super::CredentialStorage;
 use super::Credentials;
+use super::FileCredentialStorage;
 use super::Result;
-use super::find_auth_provider;
+use crate::model::provider_catalog::find_provider_catalog_entry;
 
 /// Trait for resolving credentials from various sources
 pub trait AuthResolver: Send + Sync {
@@ -28,7 +30,7 @@ impl EnvAuthResolver {
 
   /// Get environment variable mappings for providers
   fn get_env_vars_for_provider(provider_id: &str) -> Option<Vec<String>> {
-    if let Some(descriptor) = find_auth_provider(provider_id) {
+    if let Some(descriptor) = find_provider_catalog_entry(provider_id) {
       return Some(descriptor.env_vars());
     }
 
@@ -145,18 +147,18 @@ impl AuthResolver for ConfigAuthResolver {
 ///
 /// Resolves credentials from persistent storage
 pub struct StorageAuthResolver {
-  storage: std::sync::Arc<dyn super::storage::CredentialStorage>,
+  storage: std::sync::Arc<dyn CredentialStorage>,
 }
 
 impl StorageAuthResolver {
   /// Create a new storage resolver
-  pub fn new(storage: std::sync::Arc<dyn super::storage::CredentialStorage>) -> Self {
+  pub fn new(storage: std::sync::Arc<dyn CredentialStorage>) -> Self {
     Self { storage }
   }
 
   /// Create with default file storage
   pub fn default_storage() -> Result<Self> {
-    let storage = std::sync::Arc::new(super::storage::FileCredentialStorage::default_storage()?);
+    let storage = std::sync::Arc::new(FileCredentialStorage::default_storage()?);
     Ok(Self::new(storage))
   }
 }

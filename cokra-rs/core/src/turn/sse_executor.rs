@@ -376,6 +376,46 @@ impl SseTurnExecutor {
         });
       }
 
+      // Pre-emit all ExecCommandBegin events before spawning any tool
+      // execution futures. This guarantees the TUI sees every Begin event
+      // before any End event arrives, giving the "Exploring" UI a visible
+      // window even for sub-millisecond tools executed in parallel.
+      for call in &function_calls {
+        let tool_name = &call.function.name;
+        if crate::tools::router::should_emit_exec_events(tool_name) {
+          let args: serde_json::Value =
+            serde_json::from_str(&call.function.arguments).unwrap_or_default();
+          let tool_call_tmp = ToolCall {
+            tool_name: tool_name.clone(),
+            call_id: call.id.clone(),
+            args,
+          };
+          let display_command = if tool_name == "shell" {
+            tool_call_tmp
+              .args
+              .get("command")
+              .and_then(|v| v.as_str())
+              .unwrap_or("shell")
+              .to_string()
+          } else {
+            crate::tools::router::summarize_tool_display_command(&tool_call_tmp, &self.config.cwd)
+              .unwrap_or_else(|| tool_name.clone())
+          };
+          self
+            .send_event(EventMsg::ExecCommandBegin(
+              cokra_protocol::ExecCommandBeginEvent {
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+                command_id: call.id.clone(),
+                tool_name: tool_name.clone(),
+                command: display_command,
+                cwd: self.config.cwd.clone(),
+              },
+            ))
+            .await?;
+        }
+      }
+
       let mut in_flight = FuturesOrdered::new();
       for call in function_calls {
         in_flight.push_back(self.execute_tool_call(
@@ -487,6 +527,9 @@ impl SseTurnExecutor {
     );
     run_ctx.has_managed_network_requirements = self.config.has_managed_network_requirements;
     run_ctx.tx_event = Some(self.tx_event.clone());
+    // Begin events are pre-emitted in run_sse_interaction before tool
+    // execution starts, so tell dispatch_tool_call to skip the duplicate.
+    run_ctx.begin_already_emitted = true;
 
     // 1:1 codex: only Fatal errors abort the turn. All other tool errors
     // (InvalidArguments, Execution, ToolNotFound, Validation,

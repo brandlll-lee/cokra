@@ -63,6 +63,7 @@ pub(crate) struct ChatWidget {
   pub(crate) bottom_pane: BottomPane,
   session: SessionState,
   app_event_tx: AppEventSender,
+  frame_requester: FrameRequester,
   last_render_width: Cell<u16>,
   stream_render_mode: StreamRenderMode,
   interrupts: InterruptManager,
@@ -77,7 +78,12 @@ impl ChatWidget {
   ) -> Self {
     Self {
       transcript: ActiveTranscriptState::new(animations_enabled),
-      bottom_pane: BottomPane::new(app_event_tx.clone(), frame_requester, animations_enabled),
+      bottom_pane: BottomPane::new(
+        app_event_tx.clone(),
+        frame_requester.clone(),
+        animations_enabled,
+      ),
+      frame_requester,
       session: SessionState::default(),
       app_event_tx,
       last_render_width: Cell::new(0),
@@ -135,6 +141,27 @@ impl ChatWidget {
     self.transcript.flush_active_exec_cell(&self.app_event_tx);
   }
 
+  /// Like `flush_active_exec_cell`, but skips the flush when the active cell
+  /// is an exploring cell that has been visible for less than
+  /// `MIN_EXPLORING_VISIBLE_MS`. This ensures users see at least a brief
+  /// "⠋ Exploring" animation before the cell is replaced by streamed text.
+  fn flush_active_exec_cell_if_visible_long_enough(&mut self) {
+    const MIN_EXPLORING_VISIBLE_MS: u128 = 300;
+    if let Some(cell) = self
+      .transcript
+      .active_exec_cell
+      .as_ref()
+      .and_then(|c| c.as_any().downcast_ref::<crate::exec_cell::ExecCell>())
+    {
+      if let Some(visible_since) = cell.exploring_visible_since {
+        if visible_since.elapsed().as_millis() < MIN_EXPLORING_VISIBLE_MS {
+          return;
+        }
+      }
+    }
+    self.flush_active_exec_cell();
+  }
+
   pub(crate) fn add_to_history(&mut self, cell: impl HistoryCell + 'static) {
     self.add_boxed_history(Box::new(cell));
   }
@@ -186,9 +213,7 @@ impl ChatWidget {
       && let Some(cell) = controller.finalize()
     {
       match self.stream_render_mode {
-        StreamRenderMode::AnimatedPreview => self
-          .app_event_tx
-          .insert_boxed_history_cell(cell),
+        StreamRenderMode::AnimatedPreview => self.app_event_tx.insert_boxed_history_cell(cell),
         StreamRenderMode::ScrollbackFirst => self.append_boxed_history(cell),
       }
     }
@@ -196,6 +221,8 @@ impl ChatWidget {
     if self.stream_render_mode == StreamRenderMode::ScrollbackFirst {
       self.clear_streaming_agent_preview();
     }
+
+    self.sync_status_indicator();
   }
 
   /// Defer an event if a stream is active, or handle it immediately.
@@ -275,6 +302,29 @@ impl ChatWidget {
 
   fn bump_active_cell_revision(&mut self) {
     self.transcript.bump_active_cell_revision();
+    self.frame_requester.schedule_frame();
+    // If there is a live exploring cell, schedule a follow-up frame after one
+    // spinner interval so the spinner keeps animating even when no new events
+    // arrive (e.g. between exec_end and the next exec_begin).
+    if self.has_live_exploring_cell() {
+      self
+        .frame_requester
+        .schedule_frame_in(std::time::Duration::from_millis(
+          crate::exec_cell::SPINNER_INTERVAL_MS as u64,
+        ));
+    }
+  }
+
+  /// Returns true when there is an active exploring group in the viewport
+  /// (i.e. `active_exec_cell` holds an `ExecCell` with `exploring_since`
+  /// set). Used to drive continuous spinner animation frames.
+  pub(crate) fn has_live_exploring_cell(&self) -> bool {
+    self
+      .transcript
+      .active_exec_cell
+      .as_ref()
+      .and_then(|cell| cell.as_any().downcast_ref::<crate::exec_cell::ExecCell>())
+      .is_some_and(|cell: &crate::exec_cell::ExecCell| cell.exploring_since.is_some())
   }
 
   fn refresh_streaming_agent_preview(&mut self) {
@@ -537,6 +587,10 @@ impl ChatWidget {
         ))]));
       }
       EventMsg::ExecCommandBegin(e) => {
+        // 1:1 Codex: flush the answer stream before deferring so the exec
+        // begin is handled immediately instead of being queued behind the
+        // active text stream.  This makes the Explored list grow in real-time.
+        self.flush_answer_stream();
         let e2 = e.clone();
         self.defer_or_handle(
           |q| q.push_exec_begin(e.clone()),
@@ -545,6 +599,9 @@ impl ChatWidget {
       }
       EventMsg::ExecCommandOutputDelta(e) => self.on_exec_command_output_delta(e),
       EventMsg::ExecCommandEnd(e) => {
+        // 1:1 Codex: flush the answer stream before deferring so the exec
+        // end is handled immediately.
+        self.flush_answer_stream();
         let e2 = e.clone();
         self.defer_or_handle(
           |q| q.push_exec_end(e.clone()),

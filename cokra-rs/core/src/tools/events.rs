@@ -5,10 +5,10 @@ use cokra_protocol::ExecCommandBeginEvent;
 use cokra_protocol::ExecCommandEndEvent;
 use tokio::sync::mpsc;
 
+use crate::exec::try_parse_model_structured_exec_output;
 use crate::session::Session;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolOutput;
-use crate::exec::try_parse_model_structured_exec_output;
 
 #[derive(Clone)]
 pub struct ToolEventCtx<'a> {
@@ -186,10 +186,7 @@ mod tests {
 
     emitter.begin(ctx.clone()).await;
     let _ = emitter
-      .finish(
-        ctx,
-        Ok(ToolOutput::success("ok").with_id("call-1")),
-      )
+      .finish(ctx, Ok(ToolOutput::success("ok").with_id("call-1")))
       .await;
 
     let first = rx.recv().await.expect("first event");

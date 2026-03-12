@@ -241,41 +241,41 @@ fn map_args_for_tool(
   // Map Codex-style aliases to Cokra tool schemas (additionalProperties=false).
   match tool_name {
     "spawn_agent" => {
-      if raw.get("task").is_none() {
-        if let Some(value) = raw.remove("initial_task") {
-          raw.insert("task".to_string(), value);
-        }
+      if raw.get("task").is_none()
+        && let Some(value) = raw.remove("initial_task")
+      {
+        raw.insert("task".to_string(), value);
       }
-      if raw.get("nickname").is_none() {
-        if let Some(value) = raw.remove("name") {
-          raw.insert("nickname".to_string(), value);
-        }
+      if raw.get("nickname").is_none()
+        && let Some(value) = raw.remove("name")
+      {
+        raw.insert("nickname".to_string(), value);
       }
     }
     "send_input" => {
-      if raw.get("agent_id").is_none() {
-        if let Some(value) = raw.remove("agent") {
-          raw.insert("agent_id".to_string(), value);
-        }
+      if raw.get("agent_id").is_none()
+        && let Some(value) = raw.remove("agent")
+      {
+        raw.insert("agent_id".to_string(), value);
       }
-      if raw.get("message").is_none() {
-        if let Some(value) = raw.remove("input") {
-          raw.insert("message".to_string(), value);
-        }
+      if raw.get("message").is_none()
+        && let Some(value) = raw.remove("input")
+      {
+        raw.insert("message".to_string(), value);
       }
     }
     "close_agent" => {
-      if raw.get("agent_id").is_none() {
-        if let Some(value) = raw.remove("agent") {
-          raw.insert("agent_id".to_string(), value);
-        }
+      if raw.get("agent_id").is_none()
+        && let Some(value) = raw.remove("agent")
+      {
+        raw.insert("agent_id".to_string(), value);
       }
     }
     "wait" => {
-      if raw.get("agent_ids").is_none() {
-        if let Some(value) = raw.remove("agents") {
-          raw.insert("agent_ids".to_string(), value);
-        }
+      if raw.get("agent_ids").is_none()
+        && let Some(value) = raw.remove("agents")
+      {
+        raw.insert("agent_ids".to_string(), value);
       }
     }
     _ => {}

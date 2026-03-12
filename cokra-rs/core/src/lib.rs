@@ -7,6 +7,7 @@ pub mod exec;
 pub mod exec_policy;
 pub mod mcp;
 pub mod model;
+pub mod prompts;
 pub mod sandbox_manager;
 pub mod session;
 pub mod shell;

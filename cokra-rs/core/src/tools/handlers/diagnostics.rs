@@ -209,8 +209,7 @@ async fn resolve_lsp_binary(config: &LspConfig) -> Option<std::path::PathBuf> {
       if !ok {
         return None;
       }
-      let bin_name = config.program.to_string()
-        + if cfg!(windows) { ".exe" } else { "" };
+      let bin_name = config.program.to_string() + if cfg!(windows) { ".exe" } else { "" };
       let installed = gobin.join(bin_name);
       installed.exists().then_some(installed)
     }
@@ -277,7 +276,9 @@ impl ToolHandler for DiagnosticsHandler {
     let args: DiagnosticsArgs = invocation.parse_arguments()?;
 
     let file_path = invocation.resolve_path(Some(&args.path));
-    let file_path = tokio::fs::canonicalize(&file_path).await.unwrap_or(file_path);
+    let file_path = tokio::fs::canonicalize(&file_path)
+      .await
+      .unwrap_or(file_path);
 
     if !file_path.exists() {
       return Err(FunctionCallError::RespondToModel(format!(
@@ -293,9 +294,7 @@ impl ToolHandler for DiagnosticsHandler {
       .to_lowercase();
 
     let lsp_config = lsp_for_extension(&ext).ok_or_else(|| {
-      FunctionCallError::RespondToModel(format!(
-        "no LSP server known for .{ext} files"
-      ))
+      FunctionCallError::RespondToModel(format!("no LSP server known for .{ext} files"))
     })?;
 
     let lsp_binary = resolve_lsp_binary(&lsp_config).await.ok_or_else(|| {
@@ -309,9 +308,9 @@ impl ToolHandler for DiagnosticsHandler {
     let root_uri = workspace_uri(&file_path);
     let file_uri = path_to_uri(&file_path);
 
-    let file_content = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
-      FunctionCallError::Execution(format!("failed to read file: {e}"))
-    })?;
+    let file_content = tokio::fs::read_to_string(&file_path)
+      .await
+      .map_err(|e| FunctionCallError::Execution(format!("failed to read file: {e}")))?;
 
     let diagnostics = timeout(
       Duration::from_secs(DIAGNOSTICS_TIMEOUT_SECS),
@@ -325,17 +324,12 @@ impl ToolHandler for DiagnosticsHandler {
     })??;
 
     if diagnostics.is_empty() {
-      return Ok(ToolOutput::success(format!(
-        "No diagnostics for {}",
-        file_path.display()
-      ))
-      .with_id(id));
+      return Ok(
+        ToolOutput::success(format!("No diagnostics for {}", file_path.display())).with_id(id),
+      );
     }
 
-    let limited: Vec<_> = diagnostics
-      .into_iter()
-      .take(args.max_diagnostics)
-      .collect();
+    let limited: Vec<_> = diagnostics.into_iter().take(args.max_diagnostics).collect();
 
     let output = format_diagnostics(&file_path, &limited);
     Ok(ToolOutput::success(output).with_id(id))
@@ -370,9 +364,7 @@ async fn run_lsp_session(
       .stderr(std::process::Stdio::null())
       .kill_on_drop(true)
       .spawn()
-      .map_err(|e| {
-        FunctionCallError::Execution(format!("failed to spawn npx {pkg}: {e}"))
-      })?
+      .map_err(|e| FunctionCallError::Execution(format!("failed to spawn npx {pkg}: {e}")))?
   } else {
     Command::new(&binary)
       .args(config.args)
@@ -382,20 +374,19 @@ async fn run_lsp_session(
       .kill_on_drop(true)
       .spawn()
       .map_err(|e| {
-        FunctionCallError::Execution(format!(
-          "failed to spawn {}: {e}",
-          binary.display()
-        ))
+        FunctionCallError::Execution(format!("failed to spawn {}: {e}", binary.display()))
       })?
   };
 
-  let mut stdin = child.stdin.take().ok_or_else(|| {
-    FunctionCallError::Execution("failed to get LSP stdin".to_string())
-  })?;
+  let mut stdin = child
+    .stdin
+    .take()
+    .ok_or_else(|| FunctionCallError::Execution("failed to get LSP stdin".to_string()))?;
 
-  let stdout = child.stdout.take().ok_or_else(|| {
-    FunctionCallError::Execution("failed to get LSP stdout".to_string())
-  })?;
+  let stdout = child
+    .stdout
+    .take()
+    .ok_or_else(|| FunctionCallError::Execution("failed to get LSP stdout".to_string()))?;
 
   // Send initialize request
   let init_id = 1u32;
@@ -453,13 +444,7 @@ async fn run_lsp_session(
   id_counter += 1;
 
   // Shutdown gracefully (best-effort, ignore errors)
-  let _ = send_request(
-    &mut stdin,
-    id_counter,
-    "shutdown",
-    serde_json::json!(null),
-  )
-  .await;
+  let _ = send_request(&mut stdin, id_counter, "shutdown", serde_json::json!(null)).await;
   let _ = send_notification(&mut stdin, "exit", serde_json::json!(null)).await;
   let _ = child.kill().await;
 
@@ -480,9 +465,7 @@ async fn collect_diagnostics(
         Ok(msg) => {
           if msg.method.as_deref() == Some("textDocument/publishDiagnostics") {
             if let Some(params) = msg.params {
-              if let Ok(diag_params) =
-                serde_json::from_value::<PublishDiagnosticsParams>(params)
-              {
+              if let Ok(diag_params) = serde_json::from_value::<PublishDiagnosticsParams>(params) {
                 if diag_params.uri == file_uri {
                   result = diag_params.diagnostics;
                 }
@@ -517,9 +500,10 @@ async fn send_request(
   let body = serde_json::to_string(&req)
     .map_err(|e| FunctionCallError::Execution(format!("LSP serialise error: {e}")))?;
   let msg = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-  stdin.write_all(msg.as_bytes()).await.map_err(|e| {
-    FunctionCallError::Execution(format!("LSP write error: {e}"))
-  })
+  stdin
+    .write_all(msg.as_bytes())
+    .await
+    .map_err(|e| FunctionCallError::Execution(format!("LSP write error: {e}")))
 }
 
 async fn send_notification(
@@ -535,9 +519,10 @@ async fn send_notification(
   let body = serde_json::to_string(&notif)
     .map_err(|e| FunctionCallError::Execution(format!("LSP serialise error: {e}")))?;
   let msg = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-  stdin.write_all(msg.as_bytes()).await.map_err(|e| {
-    FunctionCallError::Execution(format!("LSP write error: {e}"))
-  })
+  stdin
+    .write_all(msg.as_bytes())
+    .await
+    .map_err(|e| FunctionCallError::Execution(format!("LSP write error: {e}")))
 }
 
 async fn read_lsp_message(
@@ -547,9 +532,10 @@ async fn read_lsp_message(
   let mut content_length: Option<usize> = None;
   loop {
     let mut line = String::new();
-    let n = reader.read_line(&mut line).await.map_err(|e| {
-      FunctionCallError::Execution(format!("LSP read header error: {e}"))
-    })?;
+    let n = reader
+      .read_line(&mut line)
+      .await
+      .map_err(|e| FunctionCallError::Execution(format!("LSP read header error: {e}")))?;
     if n == 0 {
       return Err(FunctionCallError::Execution("LSP EOF".to_string()));
     }
@@ -567,13 +553,12 @@ async fn read_lsp_message(
   })?;
 
   let mut buf = vec![0u8; len];
-  tokio::io::AsyncReadExt::read_exact(reader, &mut buf).await.map_err(|e| {
-    FunctionCallError::Execution(format!("LSP read body error: {e}"))
-  })?;
+  tokio::io::AsyncReadExt::read_exact(reader, &mut buf)
+    .await
+    .map_err(|e| FunctionCallError::Execution(format!("LSP read body error: {e}")))?;
 
-  serde_json::from_slice::<LspMessage>(&buf).map_err(|e| {
-    FunctionCallError::Execution(format!("LSP parse error: {e}"))
-  })
+  serde_json::from_slice::<LspMessage>(&buf)
+    .map_err(|e| FunctionCallError::Execution(format!("LSP parse error: {e}")))
 }
 
 async fn wait_for_response(
@@ -646,9 +631,17 @@ fn workspace_uri(file_path: &Path) -> String {
 fn language_id_for_uri(uri: &str) -> &'static str {
   if uri.ends_with(".rs") {
     "rust"
-  } else if uri.ends_with(".ts") || uri.ends_with(".tsx") || uri.ends_with(".mts") || uri.ends_with(".cts") {
+  } else if uri.ends_with(".ts")
+    || uri.ends_with(".tsx")
+    || uri.ends_with(".mts")
+    || uri.ends_with(".cts")
+  {
     "typescript"
-  } else if uri.ends_with(".js") || uri.ends_with(".jsx") || uri.ends_with(".mjs") || uri.ends_with(".cjs") {
+  } else if uri.ends_with(".js")
+    || uri.ends_with(".jsx")
+    || uri.ends_with(".mjs")
+    || uri.ends_with(".cjs")
+  {
     "javascript"
   } else if uri.ends_with(".py") {
     "python"
@@ -658,7 +651,11 @@ fn language_id_for_uri(uri: &str) -> &'static str {
     "lua"
   } else if uri.ends_with(".c") || uri.ends_with(".h") {
     "c"
-  } else if uri.ends_with(".cpp") || uri.ends_with(".cc") || uri.ends_with(".cxx") || uri.ends_with(".hpp") {
+  } else if uri.ends_with(".cpp")
+    || uri.ends_with(".cc")
+    || uri.ends_with(".cxx")
+    || uri.ends_with(".hpp")
+  {
     "cpp"
   } else {
     "plaintext"
@@ -777,8 +774,14 @@ mod tests {
       LspDiagnostic {
         message: "unused variable".to_string(),
         range: LspRange {
-          start: LspPosition { line: 4, character: 7 },
-          end: LspPosition { line: 4, character: 12 },
+          start: LspPosition {
+            line: 4,
+            character: 7,
+          },
+          end: LspPosition {
+            line: 4,
+            character: 12,
+          },
         },
         severity: Some(2),
         code: None,
@@ -787,8 +790,14 @@ mod tests {
       LspDiagnostic {
         message: "type mismatch".to_string(),
         range: LspRange {
-          start: LspPosition { line: 9, character: 0 },
-          end: LspPosition { line: 9, character: 5 },
+          start: LspPosition {
+            line: 9,
+            character: 0,
+          },
+          end: LspPosition {
+            line: 9,
+            character: 5,
+          },
         },
         severity: Some(1),
         code: None,
@@ -802,8 +811,7 @@ mod tests {
 
   #[test]
   fn default_max_diagnostics_is_50() {
-    let args: DiagnosticsArgs =
-      serde_json::from_str(r#"{"path":"/foo/bar.rs"}"#).unwrap();
+    let args: DiagnosticsArgs = serde_json::from_str(r#"{"path":"/foo/bar.rs"}"#).unwrap();
     assert_eq!(args.max_diagnostics, 50);
   }
 

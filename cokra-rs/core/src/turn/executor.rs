@@ -376,9 +376,9 @@ mod tests {
   use async_trait::async_trait;
   use futures::Stream;
   use reqwest::Client;
+  use tempfile::tempdir;
   use tokio::sync::Mutex;
   use tokio::sync::mpsc;
-  use tempfile::tempdir;
 
   use cokra_protocol::ContentDeltaEvent;
   use cokra_protocol::EventMsg;

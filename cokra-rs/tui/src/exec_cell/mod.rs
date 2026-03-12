@@ -14,7 +14,7 @@ pub(crate) use render::new_active_exec_command;
 const BRAILLE_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Interval between braille frames (80ms, matching opencode).
-const SPINNER_INTERVAL_MS: u128 = 80;
+pub(crate) const SPINNER_INTERVAL_MS: u128 = 80;
 
 pub(crate) fn spinner(start_time: Option<Instant>, animations_enabled: bool) -> Span<'static> {
   if !animations_enabled {

@@ -224,8 +224,7 @@ impl BottomPane {
   }
 
   pub(crate) fn has_interactive_overlay(&self) -> bool {
-    !self.view_stack.is_empty()
-      || self.composer.has_command_popup()
+    !self.view_stack.is_empty() || self.composer.has_command_popup()
   }
 
   pub(crate) fn can_focus_status_line_selector(&self) -> bool {
@@ -288,14 +287,9 @@ impl BottomPane {
   }
 
   /// When a popped view is an ApprovalOverlay, extract the decision.
-  fn check_approval_decision(
-    popped: &mut Option<Box<dyn BottomPaneView>>,
-  ) -> BottomPaneAction {
+  fn check_approval_decision(popped: &mut Option<Box<dyn BottomPaneView>>) -> BottomPaneAction {
     if let Some(view) = popped {
-      if let Some(overlay) = view
-        .as_any_mut()
-        .downcast_mut::<ApprovalOverlay>()
-      {
+      if let Some(overlay) = view.as_any_mut().downcast_mut::<ApprovalOverlay>() {
         if let Some(choice) = overlay.take_choice() {
           return BottomPaneAction::ApprovalDecision(choice);
         }

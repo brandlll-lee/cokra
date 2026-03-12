@@ -56,7 +56,7 @@ impl ToolHandler for ApproveTeamPlanHandler {
         }))
         .await;
     }
-    let mut out = ToolOutput::success(serde_json::to_string(&plan).map_err(|err| {
+    let out = ToolOutput::success(serde_json::to_string(&plan).map_err(|err| {
       FunctionCallError::Fatal(format!("failed to serialize plan decision: {err}"))
     })?);
     Ok(out.with_id(invocation.id))

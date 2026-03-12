@@ -2,9 +2,9 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 
 use crate::exec::PermissionProfile;
@@ -64,9 +64,11 @@ impl ToolInvocation {
 
   pub fn raw_arguments(&self) -> Result<&str, FunctionCallError> {
     match &self.payload {
-      ToolPayload::Function { arguments } | ToolPayload::Mcp { raw_arguments: arguments, .. } => {
-        Ok(arguments)
-      }
+      ToolPayload::Function { arguments }
+      | ToolPayload::Mcp {
+        raw_arguments: arguments,
+        ..
+      } => Ok(arguments),
       ToolPayload::Custom { .. } => Err(FunctionCallError::RespondToModel(format!(
         "{} is a custom tool and does not accept JSON arguments",
         self.name
@@ -134,9 +136,7 @@ pub enum ToolPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolOutputBody {
-  Text {
-    text: String,
-  },
+  Text { text: String },
 }
 
 impl ToolOutputBody {

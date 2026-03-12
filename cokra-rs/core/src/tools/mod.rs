@@ -1,6 +1,8 @@
 pub mod context;
+pub mod diff_tracker;
 pub mod events;
 pub mod handlers;
+pub mod hooks;
 pub mod network_approval;
 pub mod orchestrator;
 pub mod parallel;
@@ -19,6 +21,7 @@ use crate::mcp::McpConnectionManager;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
 use crate::tools::spec::build_specs;
+use crate::tools::spec::skill_tool_with_description;
 use crate::tools::validation::ToolValidator;
 
 /// Returns true when the configured model prefers the freeform `apply_patch`
@@ -29,9 +32,7 @@ use crate::tools::validation::ToolValidator;
 /// (Claude, Gemini, open-source) prefer `edit_file` + `write_file`.
 fn model_prefers_apply_patch(config: &Config) -> bool {
   let model = config.models.model.to_lowercase();
-  model.contains("gpt-")
-    && !model.contains("-oss")
-    && !model.contains("gpt-4")
+  model.contains("gpt-") && !model.contains("-oss") && !model.contains("gpt-4")
 }
 
 /// Build a default tool registry and router from configuration.
@@ -42,11 +43,29 @@ fn model_prefers_apply_patch(config: &Config) -> bool {
 pub async fn build_default_tools(
   config: &Config,
 ) -> anyhow::Result<(Arc<ToolRegistry>, Arc<ToolRouter>)> {
+  build_default_tools_with_cwd(config, &std::env::current_dir().unwrap_or_default()).await
+}
+
+/// 内部实现，接收显式 cwd 供测试使用。
+pub async fn build_default_tools_with_cwd(
+  config: &Config,
+  cwd: &std::path::Path,
+) -> anyhow::Result<(Arc<ToolRegistry>, Arc<ToolRouter>)> {
   let mut registry = ToolRegistry::new();
   let mcp_manager = Arc::new(McpConnectionManager::new(&config.mcp).await?);
 
+  // 1:1 opencode SkillTool: 动态扫描 skills 并将可用列表注入工具描述。
+  // 必须在注册 build_specs() 之前完成，因为 build_specs() 包含静态 skill_tool()，
+  // 我们用动态版本覆盖它。
+  let skill_description = handlers::skill::build_skill_description(cwd).await;
+
   for spec in build_specs() {
-    registry.register_spec(spec);
+    if spec.name == "skill" {
+      // 用动态描述版本替换静态 spec
+      registry.register_spec(skill_tool_with_description(&skill_description));
+    } else {
+      registry.register_spec(spec);
+    }
   }
   for spec in mcp_manager.tool_specs() {
     registry.register_spec(spec);
@@ -84,7 +103,9 @@ mod tests {
 
   #[test]
   fn gpt_codex_prefers_apply_patch() {
-    assert!(model_prefers_apply_patch(&config_with_model("gpt-5.2-codex")));
+    assert!(model_prefers_apply_patch(&config_with_model(
+      "gpt-5.2-codex"
+    )));
   }
 
   #[test]
@@ -104,22 +125,30 @@ mod tests {
 
   #[test]
   fn claude_prefers_edit() {
-    assert!(!model_prefers_apply_patch(&config_with_model("claude-sonnet-4-20250514")));
+    assert!(!model_prefers_apply_patch(&config_with_model(
+      "claude-sonnet-4-20250514"
+    )));
   }
 
   #[test]
   fn gemini_prefers_edit() {
-    assert!(!model_prefers_apply_patch(&config_with_model("gemini-2.5-pro")));
+    assert!(!model_prefers_apply_patch(&config_with_model(
+      "gemini-2.5-pro"
+    )));
   }
 
   #[test]
   fn deepseek_prefers_edit() {
-    assert!(!model_prefers_apply_patch(&config_with_model("deepseek-r1")));
+    assert!(!model_prefers_apply_patch(&config_with_model(
+      "deepseek-r1"
+    )));
   }
 
   #[test]
   fn case_insensitive_model_match() {
-    assert!(model_prefers_apply_patch(&config_with_model("GPT-5.2-Codex")));
+    assert!(model_prefers_apply_patch(&config_with_model(
+      "GPT-5.2-Codex"
+    )));
     assert!(!model_prefers_apply_patch(&config_with_model("GPT-4o")));
   }
 }

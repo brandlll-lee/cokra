@@ -1,8 +1,8 @@
 use crate::color::perceptual_distance;
 use ratatui::style::Color;
+use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::sync::RwLock;
 
 static DEFAULT_PALETTE_VERSION: AtomicU64 = AtomicU64::new(0);
 static DEFAULT_COLORS_CACHE: RwLock<Option<DefaultColors>> = RwLock::new(None);
@@ -156,8 +156,12 @@ fn query_default_colors_from_env() -> Option<DefaultColors> {
     .and_then(parse_colorfgbg)
     .unwrap_or((7, 0)); // Reasonable fallback for dark terminals.
 
-  let fg = fg_override.or_else(|| xterm_rgb(fg_idx)).unwrap_or((255, 255, 255));
-  let bg = bg_override.or_else(|| xterm_rgb(bg_idx)).unwrap_or((0, 0, 0));
+  let fg = fg_override
+    .or_else(|| xterm_rgb(fg_idx))
+    .unwrap_or((255, 255, 255));
+  let bg = bg_override
+    .or_else(|| xterm_rgb(bg_idx))
+    .unwrap_or((0, 0, 0));
 
   Some(DefaultColors { fg, bg })
 }

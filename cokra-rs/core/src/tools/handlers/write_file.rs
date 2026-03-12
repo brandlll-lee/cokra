@@ -61,9 +61,7 @@ impl ToolHandler for WriteFileHandler {
     })?;
 
     let diag_suffix = collect_file_diagnostics(&path).await;
-    Ok(
-      ToolOutput::success(format!("wrote {}{}", path.display(), diag_suffix)).with_id(id),
-    )
+    Ok(ToolOutput::success(format!("wrote {}{}", path.display(), diag_suffix)).with_id(id))
   }
 }
 
@@ -93,7 +91,10 @@ mod tests {
       runtime: None,
     };
 
-    let out = WriteFileHandler.handle_async(inv).await.expect("write file");
+    let out = WriteFileHandler
+      .handle_async(inv)
+      .await
+      .expect("write file");
     assert!(!out.is_error());
     let written = fs::read_to_string(&path).expect("read written file");
     assert_eq!(written, "hello".to_string());

@@ -74,10 +74,7 @@ impl ApprovalOverlay {
     ];
 
     let header = Box::new(ColumnRenderable::with([
-      Line::from(
-        "Would you like to allow the following tool call?".bold(),
-      )
-      .into(),
+      Line::from("Would you like to allow the following tool call?".bold()).into(),
       Line::from("").into(),
       header,
     ]));
@@ -194,10 +191,7 @@ impl Renderable for ApprovalOverlay {
 
 fn build_header(request: &ApprovalRequest) -> Box<dyn Renderable> {
   let lines = vec![
-    Line::from(vec![
-      "Tool: ".into(),
-      request.tool_name.clone().bold(),
-    ]),
+    Line::from(vec!["Tool: ".into(), request.tool_name.clone().bold()]),
     Line::from(""),
     Line::from(request.command.clone()),
   ];

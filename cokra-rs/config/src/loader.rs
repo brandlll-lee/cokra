@@ -245,8 +245,14 @@ fn load_required_toml_layer(
   create: impl FnOnce(TomlValue) -> ConfigLayerEntry,
 ) -> Result<ConfigLayerEntry> {
   let cfg = match std::fs::read_to_string(file) {
-    Ok(contents) => toml::from_str::<TomlValue>(&contents)
-      .map_err(|e| anyhow::anyhow!("Error parsing config file {}: {e}", file.display()))?,
+    Ok(contents) => {
+      if contents.trim().is_empty() {
+        TomlValue::Table(toml::map::Map::new())
+      } else {
+        toml::from_str::<TomlValue>(&contents)
+          .map_err(|e| anyhow::anyhow!("Error parsing config file {}: {e}", file.display()))?
+      }
+    }
     Err(e) => {
       if e.kind() == std::io::ErrorKind::NotFound {
         TomlValue::Table(toml::map::Map::new())

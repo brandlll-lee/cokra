@@ -30,6 +30,7 @@ impl ChatWidget {
     let wrap_width = self.streaming_wrap_width();
     if is_new {
       self.flush_active_exec_cell();
+      self.sync_status_indicator();
     }
     let controller = self
       .transcript

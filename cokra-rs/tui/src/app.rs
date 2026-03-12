@@ -23,11 +23,12 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use cokra_core::Cokra;
-use cokra_core::model::PluginRegistry;
 use cokra_core::model::ProviderAuth;
+use cokra_core::model::auth_orchestrator::uses_local_callback;
 use cokra_core::model::oauth_connect::OAuthConnectStart;
 use cokra_core::model::oauth_connect::PendingOAuthConnect;
 use cokra_core::model::provider::ProviderConnectMethod;
+use cokra_core::model::provider_catalog::find_provider_catalog_entry;
 use cokra_protocol::Event;
 use cokra_protocol::EventMsg;
 use cokra_protocol::ExecApprovalRequestEvent;
@@ -325,6 +326,22 @@ impl App {
                     EventMsg::ExecCommandBegin(_) | EventMsg::ExecCommandEnd(_)
                   );
               self.handle_cokra_event(event).await?;
+              // 1:1 codex streaming flush: after handling a core event in Inline mode,
+              // immediately drain any InsertHistoryCell events that were produced by the
+              // handler (e.g. from on_agent_message_delta → append_boxed_history) and
+              // write them directly into scrollback. This eliminates the two-round-trip
+              // delay (app_event_rx → TuiEvent::Draw) that makes streaming appear sluggish
+              // when LLM tokens arrive faster than the tokio::select! scheduling rate.
+              if self.ui_mode == UiMode::Inline {
+                self.flush_inline_history_cells(tui);
+                // If history lines were staged, immediately flush them to the terminal
+                // rather than waiting for the next TuiEvent::Draw. This removes the
+                // second round-trip delay and makes each committed line appear on screen
+                // in the same scheduling cycle it was produced.
+                if tui.has_pending_history_lines() {
+                  self.draw(tui)?;
+                }
+              }
               if redraw_inline_now {
                 self.draw(tui)?;
               }
@@ -511,7 +528,7 @@ impl App {
   }
 
   async fn open_connected_provider_models_popup(&mut self, provider_id: &str) -> Result<()> {
-    let Some(entry) = PluginRegistry::find(provider_id) else {
+    let Some(entry) = find_provider_catalog_entry(provider_id) else {
       self.open_available_models_popup().await?;
       return Ok(());
     };
@@ -574,7 +591,7 @@ impl App {
       }
     }
 
-    if let Some(entry) = PluginRegistry::find(provider_id) {
+    if let Some(entry) = find_provider_catalog_entry(provider_id) {
       if !runtime_registered {
         self
           .chat_widget
@@ -633,7 +650,7 @@ impl App {
       ]));
     }
 
-    if cokra_core::model::oauth_connect::uses_local_callback(kind) {
+    if uses_local_callback(kind) {
       let tx = self.app_event_tx.clone();
       let flow = self.pending_oauth_flows.get(provider_id).cloned();
       tokio::spawn(async move {
@@ -857,18 +874,18 @@ impl App {
       } => {
         self.chat_widget.bottom_pane.dismiss_active_view();
 
-        if let Err(err) = self
-          .finalize_connected_provider(&provider_id, stored)
-          .await
-        {
+        if let Err(err) = self.finalize_connected_provider(&provider_id, stored).await {
           if let Some(flow) = self.pending_oauth_flows.remove(&provider_id) {
             flow.cancel.cancel();
           }
           self
             .chat_widget
             .add_to_history(PlainHistoryCell::new(vec![Line::from(
-              format!("● OAuth connect succeeded but provider registration failed for {provider_id}: {err}").red(),
-            )]));
+            format!(
+              "● OAuth connect succeeded but provider registration failed for {provider_id}: {err}"
+            )
+            .red(),
+          )]));
         }
       }
       AppEvent::OAuthFailed {
@@ -962,6 +979,31 @@ impl App {
       }
     }
     Ok(())
+  }
+
+  /// Inline-mode streaming flush: drain any `InsertHistoryCell` events queued in
+  /// `app_event_rx` and write them directly into scrollback without waiting for the
+  /// next `tokio::select!` round-trip. Called immediately after `handle_cokra_event`
+  /// so that delta lines produced by `on_agent_message_delta → append_boxed_history`
+  /// appear on screen in the same scheduling cycle they were emitted.
+  fn flush_inline_history_cells(&mut self, tui: &mut Tui) {
+    loop {
+      match self.app_event_rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => {
+          let _ = self.insert_history_cell(cell, tui);
+        }
+        Ok(other) => {
+          // Non-history event encountered. Re-enqueue it so the regular
+          // select loop picks it up, then stop draining. Events produced
+          // during streaming (CommitTick, StopCommitAnimation) are order-
+          // insensitive so a one-cycle delay is harmless.
+          self.app_event_tx.send(other);
+          break;
+        }
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+      }
+    }
   }
 
   fn insert_history_cell(&mut self, cell: Box<dyn HistoryCell>, tui: &mut Tui) -> Result<()> {
@@ -1111,6 +1153,17 @@ impl App {
         self.draw(tui)?;
         if let Some(delay) = self.chat_widget.bottom_pane.next_footer_transition_in() {
           tui.frame_requester().schedule_frame_in(delay);
+        }
+        // Keep the exploring-cell spinner alive: if there is a live exploring
+        // group in the viewport, schedule the next animation frame immediately
+        // after each draw so the spinner advances without waiting for a new
+        // core event to arrive.
+        if self.chat_widget.has_live_exploring_cell() {
+          tui
+            .frame_requester()
+            .schedule_frame_in(std::time::Duration::from_millis(
+              crate::exec_cell::SPINNER_INTERVAL_MS as u64,
+            ));
         }
       }
     }
@@ -2140,7 +2193,7 @@ impl App {
     if let Ok(auth) = AuthManager::new() {
       let _ = auth.remove(provider_id).await;
     }
-    if let Some(entry) = PluginRegistry::find(provider_id) {
+    if let Some(entry) = find_provider_catalog_entry(provider_id) {
       if let Some(runtime_provider_id) = entry.primary_model_provider_id() {
         let _ = self
           .cokra

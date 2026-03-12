@@ -88,7 +88,7 @@ impl ToolHandler for SendInputHandler {
         .await;
     }
 
-    let mut out = ToolOutput::success(
+    let out = ToolOutput::success(
       serde_json::to_string(&SendInputResult {
         agent_id,
         status: "sent".to_string(),

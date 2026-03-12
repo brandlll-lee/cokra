@@ -159,7 +159,7 @@ impl ToolHandler for SpawnAgentHandler {
       .await
       .map_err(|err| FunctionCallError::Execution(err.to_string()))?;
 
-    let mut out = ToolOutput::success(
+    let out = ToolOutput::success(
       serde_json::to_string(&SpawnAgentResult {
         thread_id: thread_id.to_string(),
         agent_id: thread_id.to_string(),

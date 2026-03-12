@@ -86,7 +86,7 @@ impl ToolHandler for SendTeamMessageHandler {
         .await;
     }
 
-    let mut out = ToolOutput::success(serde_json::to_string(&message).map_err(|err| {
+    let out = ToolOutput::success(serde_json::to_string(&message).map_err(|err| {
       FunctionCallError::Fatal(format!("failed to serialize team message: {err}"))
     })?);
     Ok(out.with_id(invocation.id))

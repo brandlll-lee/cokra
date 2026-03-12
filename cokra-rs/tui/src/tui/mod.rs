@@ -28,8 +28,8 @@ use crossterm::terminal::LeaveAlternateScreen;
 use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
 use crossterm::terminal::supports_keyboard_enhancement;
-use ratatui::backend::CrosstermBackend;
 use ratatui::backend::Backend;
+use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Offset;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -88,7 +88,9 @@ fn inline_viewport_height(
   // Tradeoff: even when no history has been inserted yet, the inline viewport is capped to
   // `screen_height - 1` on screens that are at least 2 rows tall.
   let reserved_history_rows = if screen_height > 1 {
-    visible_history_rows.max(1).min(screen_height.saturating_sub(1))
+    visible_history_rows
+      .max(1)
+      .min(screen_height.saturating_sub(1))
   } else {
     0
   };
@@ -441,6 +443,10 @@ impl Tui {
 
   pub fn clear_pending_history_lines(&mut self) {
     self.pending_history_lines.clear();
+  }
+
+  pub fn has_pending_history_lines(&self) -> bool {
+    !self.pending_history_lines.is_empty()
   }
 
   pub fn draw(

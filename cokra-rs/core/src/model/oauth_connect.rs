@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -28,21 +30,13 @@ use super::auth::AuthError;
 use super::auth::Credentials;
 use super::auth::OAuthConfig;
 use super::auth::StoredCredentials;
-use super::auth::find_auth_provider_by_oauth_kind;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OAuthProviderKind {
-  Anthropic,
-  GitHubCopilot,
-  GoogleGeminiCli,
-  GoogleAntigravity,
-  OpenAICodex,
-}
+use super::plugin_registry::PluginRegistry;
+use super::plugin_registry::ProviderPluginKind;
 
 #[derive(Debug, Clone)]
 pub struct PendingOAuthConnect {
   pub provider_id: String,
-  pub kind: OAuthProviderKind,
+  pub kind: ProviderPluginKind,
   pub verifier: Option<String>,
   pub state: Option<String>,
   pub device_code: Option<String>,
@@ -172,18 +166,18 @@ pub fn normalize_github_domain(input: &str) -> Option<String> {
     return None;
   }
   // Try parsing as a full URL first
-  if trimmed.contains("://") {
-    if let Ok(url) = Url::parse(trimmed) {
-      return Some(url.host_str()?.to_string());
-    }
+  if trimmed.contains("://")
+    && let Ok(url) = Url::parse(trimmed)
+  {
+    return Some(url.host_str()?.to_string());
   }
   // Try parsing as a hostname with https prefix
-  if let Ok(url) = Url::parse(&format!("https://{}", trimmed)) {
-    if let Some(host) = url.host_str() {
-      // Validate it looks like a domain
-      if host.contains('.') && !host.contains(' ') {
-        return Some(host.to_string());
-      }
+  if let Ok(url) = Url::parse(&format!("https://{}", trimmed))
+    && let Some(host) = url.host_str()
+  {
+    // Validate it looks like a domain
+    if host.contains('.') && !host.contains(' ') {
+      return Some(host.to_string());
     }
   }
   // Fallback: check if it looks like a valid domain
@@ -201,7 +195,6 @@ fn get_github_urls(domain: &str) -> GitHubUrls {
     device_code_url: format!("https://{}/login/device/code", domain),
     access_token_url: format!("https://{}/login/oauth/access_token", domain),
     copilot_token_url: format!("https://api.{}/copilot_internal/v2/token", domain),
-    models_base_url: format!("https://api.{}", domain),
   }
 }
 
@@ -209,7 +202,6 @@ struct GitHubUrls {
   device_code_url: String,
   access_token_url: String,
   copilot_token_url: String,
-  models_base_url: String,
 }
 
 /// Extract base URL from GitHub Copilot token's proxy-ep field.
@@ -218,13 +210,13 @@ struct GitHubUrls {
 pub fn get_github_base_url_from_token(token: &str) -> Option<String> {
   // Find proxy-ep in the token
   for part in token.split(';') {
-    if let Some((key, value)) = part.split_once('=') {
-      if key.trim() == "proxy-ep" {
-        let proxy_host = value.trim();
-        // Convert proxy.xxx to api.xxx
-        let api_host = proxy_host.replacen("proxy.", "api.", 1);
-        return Some(format!("https://{}", api_host));
-      }
+    if let Some((key, value)) = part.split_once('=')
+      && key.trim() == "proxy-ep"
+    {
+      let proxy_host = value.trim();
+      // Convert proxy.xxx to api.xxx
+      let api_host = proxy_host.replacen("proxy.", "api.", 1);
+      return Some(format!("https://{}", api_host));
     }
   }
   None
@@ -233,10 +225,10 @@ pub fn get_github_base_url_from_token(token: &str) -> Option<String> {
 /// Get the base URL for GitHub Copilot API, preferring token extraction.
 pub fn get_github_copilot_base_url(token: Option<&str>, enterprise_domain: Option<&str>) -> String {
   // If we have a token, try to extract the base URL from proxy-ep
-  if let Some(t) = token {
-    if let Some(url) = get_github_base_url_from_token(t) {
-      return url;
-    }
+  if let Some(t) = token
+    && let Some(url) = get_github_base_url_from_token(t)
+  {
+    return url;
   }
   // Fallback for enterprise or default
   if let Some(domain) = enterprise_domain {
@@ -325,14 +317,10 @@ pub async fn enable_all_github_copilot_models(
   }
   results
 }
-#[cfg(test)]
-const ENV_GOOGLE_GEMINI_CLIENT_ID: &str = "COKRA_GOOGLE_GEMINI_CLIENT_ID";
-#[cfg(test)]
-const ENV_GOOGLE_GEMINI_CLIENT_SECRET: &str = "COKRA_GOOGLE_GEMINI_CLIENT_SECRET";
-const GOOGLE_GEMINI_REDIRECT_URI: &str = "http://localhost:8085/oauth2callback";
-const GOOGLE_GEMINI_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-const GOOGLE_GEMINI_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-const GOOGLE_GEMINI_SCOPES: &[&str] = &[
+pub(super) const GOOGLE_GEMINI_REDIRECT_URI: &str = "http://localhost:8085/oauth2callback";
+pub(super) const GOOGLE_GEMINI_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+pub(super) const GOOGLE_GEMINI_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+pub(super) const GOOGLE_GEMINI_SCOPES: &[&str] = &[
   "https://www.googleapis.com/auth/cloud-platform",
   "https://www.googleapis.com/auth/userinfo.email",
   "https://www.googleapis.com/auth/userinfo.profile",
@@ -342,10 +330,10 @@ const GOOGLE_GEMINI_SCOPES: &[&str] = &[
 const ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID: &str = "COKRA_GOOGLE_ANTIGRAVITY_CLIENT_ID";
 #[cfg(test)]
 const ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET: &str = "COKRA_GOOGLE_ANTIGRAVITY_CLIENT_SECRET";
-const GOOGLE_ANTIGRAVITY_REDIRECT_URI: &str = "http://localhost:51121/oauth-callback";
-const GOOGLE_ANTIGRAVITY_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-const GOOGLE_ANTIGRAVITY_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-const GOOGLE_ANTIGRAVITY_SCOPES: &[&str] = &[
+pub(super) const GOOGLE_ANTIGRAVITY_REDIRECT_URI: &str = "http://localhost:51121/oauth-callback";
+pub(super) const GOOGLE_ANTIGRAVITY_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+pub(super) const GOOGLE_ANTIGRAVITY_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+pub(super) const GOOGLE_ANTIGRAVITY_SCOPES: &[&str] = &[
   "https://www.googleapis.com/auth/cloud-platform",
   "https://www.googleapis.com/auth/userinfo.email",
   "https://www.googleapis.com/auth/userinfo.profile",
@@ -388,15 +376,14 @@ fn parse_oauth_client_entry(
     .map(|v| v.trim().to_string())
     .filter(|v| !v.is_empty());
 
-  if client_id.is_none() {
-    if let Some(b64) = entry
+  if client_id.is_none()
+    && let Some(b64) = entry
       .client_id_b64
       .as_deref()
       .map(str::trim)
       .filter(|v| !v.is_empty())
-    {
-      client_id = Some(decode_b64(b64)?);
-    }
+  {
+    client_id = Some(decode_b64(b64)?);
   }
 
   let mut client_secret = entry
@@ -405,15 +392,14 @@ fn parse_oauth_client_entry(
     .map(|v| v.trim().to_string())
     .filter(|v| !v.is_empty());
 
-  if client_secret.is_none() {
-    if let Some(b64) = entry
+  if client_secret.is_none()
+    && let Some(b64) = entry
       .client_secret_b64
       .as_deref()
       .map(str::trim)
       .filter(|v| !v.is_empty())
-    {
-      client_secret = Some(decode_b64(b64)?);
-    }
+  {
+    client_secret = Some(decode_b64(b64)?);
   }
 
   let Some(client_id) = client_id else {
@@ -465,11 +451,13 @@ fn oauth_client_from_metadata(metadata: &Value) -> Option<(String, Option<String
 }
 
 fn google_oauth_provider_descriptor(
-  kind: OAuthProviderKind,
-) -> Result<&'static super::auth::AuthProviderDescriptor, AuthError> {
-  let descriptor = find_auth_provider_by_oauth_kind(kind).ok_or_else(|| {
-    AuthError::OAuthError(format!("missing auth provider descriptor for {:?}", kind))
-  })?;
+  kind: ProviderPluginKind,
+) -> Result<super::provider_catalog::ProviderCatalogEntry, AuthError> {
+  let descriptor = PluginRegistry::find_by_kind(kind)
+    .ok_or_else(|| {
+      AuthError::OAuthError(format!("missing auth provider descriptor for {:?}", kind))
+    })?
+    .catalog;
 
   if descriptor.id != "google-gemini-cli" && descriptor.id != "google-antigravity" {
     return Err(AuthError::OAuthError(
@@ -481,7 +469,7 @@ fn google_oauth_provider_descriptor(
 }
 
 fn google_oauth_client_optional(
-  kind: OAuthProviderKind,
+  kind: ProviderPluginKind,
   stored: Option<&StoredCredentials>,
 ) -> Result<Option<(String, Option<String>)>, AuthError> {
   let descriptor = google_oauth_provider_descriptor(kind)?;
@@ -503,24 +491,24 @@ fn google_oauth_client_optional(
   // 2) Local oauth_clients.json (~/.cokra/oauth_clients.json). This matches pi-mono's
   // "works out of the box" behavior without committing secrets into the repository.
   let map = load_oauth_clients_from_file()?;
-  if let Some(entry) = map.get(provider_id) {
-    if let Some(pair) = parse_oauth_client_entry(entry)? {
-      return Ok(Some(pair));
-    }
+  if let Some(entry) = map.get(provider_id)
+    && let Some(pair) = parse_oauth_client_entry(entry)?
+  {
+    return Ok(Some(pair));
   }
 
   // 3) Stored metadata fallback (post-connect refresh parity without requiring env vars).
-  if let Some(stored) = stored {
-    if let Some(pair) = oauth_client_from_metadata(&stored.metadata) {
-      return Ok(Some(pair));
-    }
+  if let Some(stored) = stored
+    && let Some(pair) = oauth_client_from_metadata(&stored.metadata)
+  {
+    return Ok(Some(pair));
   }
 
   Ok(None)
 }
 
-fn google_oauth_client(
-  kind: OAuthProviderKind,
+pub(super) fn google_oauth_client(
+  kind: ProviderPluginKind,
   stored: Option<&StoredCredentials>,
 ) -> Result<(String, Option<String>), AuthError> {
   let descriptor = google_oauth_provider_descriptor(kind)?;
@@ -887,7 +875,7 @@ fn reqwest_error_message(prefix: &str, err: &reqwest::Error) -> String {
 
 /// Start GitHub Copilot OAuth with optional enterprise domain.
 /// For GitHub Enterprise, users should call this function with their enterprise domain.
-pub async fn start_github_copilot_connect_with_domain(
+pub(super) async fn start_github_copilot_connect_with_domain(
   provider_id: &str,
   provider_name: &str,
   enterprise_domain: Option<&str>,
@@ -895,98 +883,7 @@ pub async fn start_github_copilot_connect_with_domain(
   start_github_copilot_connect(provider_id, provider_name, enterprise_domain).await
 }
 
-pub async fn start_oauth_connect(
-  provider_id: &str,
-  provider_name: &str,
-  kind: OAuthProviderKind,
-) -> Result<OAuthConnectStart, AuthError> {
-  match kind {
-    OAuthProviderKind::GitHubCopilot => {
-      start_github_copilot_connect(provider_id, provider_name, None).await
-    }
-    OAuthProviderKind::Anthropic => start_anthropic_connect(provider_id, provider_name),
-    OAuthProviderKind::OpenAICodex => start_openai_codex_connect(provider_id, provider_name),
-    OAuthProviderKind::GoogleGeminiCli => {
-      let (client_id, _secret) = google_oauth_client(OAuthProviderKind::GoogleGeminiCli, None)?;
-      start_google_connect(
-        provider_id,
-        provider_name,
-        kind,
-        client_id,
-        GOOGLE_GEMINI_AUTH_URL,
-        GOOGLE_GEMINI_REDIRECT_URI,
-        GOOGLE_GEMINI_SCOPES,
-      )
-    }
-    OAuthProviderKind::GoogleAntigravity => {
-      let (client_id, _secret) = google_oauth_client(OAuthProviderKind::GoogleAntigravity, None)?;
-      start_google_connect(
-        provider_id,
-        provider_name,
-        kind,
-        client_id,
-        GOOGLE_ANTIGRAVITY_AUTH_URL,
-        GOOGLE_ANTIGRAVITY_REDIRECT_URI,
-        GOOGLE_ANTIGRAVITY_SCOPES,
-      )
-    }
-  }
-}
-
-pub async fn complete_oauth_connect(
-  pending: &PendingOAuthConnect,
-  input: Option<&str>,
-) -> Result<StoredCredentials, AuthError> {
-  match pending.kind {
-    OAuthProviderKind::GitHubCopilot => complete_github_copilot_connect(pending).await,
-    OAuthProviderKind::Anthropic => {
-      complete_anthropic_connect(pending, input.unwrap_or_default()).await
-    }
-    OAuthProviderKind::OpenAICodex => {
-      complete_openai_codex_connect(pending, input.unwrap_or_default()).await
-    }
-    OAuthProviderKind::GoogleGeminiCli => {
-      let (client_id, client_secret) =
-        google_oauth_client(OAuthProviderKind::GoogleGeminiCli, None)?;
-      complete_google_connect(
-        pending,
-        input.unwrap_or_default(),
-        client_id,
-        client_secret,
-        GOOGLE_GEMINI_TOKEN_URL,
-        GOOGLE_GEMINI_REDIRECT_URI,
-        false,
-      )
-      .await
-    }
-    OAuthProviderKind::GoogleAntigravity => {
-      let (client_id, client_secret) =
-        google_oauth_client(OAuthProviderKind::GoogleAntigravity, None)?;
-      complete_google_connect(
-        pending,
-        input.unwrap_or_default(),
-        client_id,
-        client_secret,
-        GOOGLE_ANTIGRAVITY_TOKEN_URL,
-        GOOGLE_ANTIGRAVITY_REDIRECT_URI,
-        true,
-      )
-      .await
-    }
-  }
-}
-
-pub fn uses_local_callback(kind: OAuthProviderKind) -> bool {
-  callback_binding(kind).is_some()
-}
-
-pub fn oauth_refresh_config_for_provider(
-  provider_id: &str,
-) -> Result<Option<OAuthConfig>, AuthError> {
-  oauth_refresh_config_for_provider_with_stored(provider_id, None)
-}
-
-pub fn oauth_refresh_config_for_provider_with_stored(
+pub(super) fn oauth_refresh_config_for_provider_with_stored(
   provider_id: &str,
   stored: Option<&StoredCredentials>,
 ) -> Result<Option<OAuthConfig>, AuthError> {
@@ -1016,8 +913,8 @@ pub fn oauth_refresh_config_for_provider_with_stored(
       redirect_uri: OPENAI_REDIRECT_URI.to_string(),
     }),
     "google-gemini-cli" => {
-      match google_oauth_client_optional(OAuthProviderKind::GoogleGeminiCli, stored)? {
-        Some((client_id, client_secret)) => Some(OAuthConfig {
+      google_oauth_client_optional(ProviderPluginKind::GoogleGeminiCli, stored)?.map(
+        |(client_id, client_secret)| OAuthConfig {
           provider_id: provider_id.to_string(),
           client_id,
           client_secret,
@@ -1028,13 +925,12 @@ pub fn oauth_refresh_config_for_provider_with_stored(
             .map(|scope| (*scope).to_string())
             .collect(),
           redirect_uri: GOOGLE_GEMINI_REDIRECT_URI.to_string(),
-        }),
-        None => None,
-      }
+        },
+      )
     }
     "google-antigravity" => {
-      match google_oauth_client_optional(OAuthProviderKind::GoogleAntigravity, stored)? {
-        Some((client_id, client_secret)) => Some(OAuthConfig {
+      google_oauth_client_optional(ProviderPluginKind::GoogleAntigravity, stored)?.map(
+        |(client_id, client_secret)| OAuthConfig {
           provider_id: provider_id.to_string(),
           client_id,
           client_secret,
@@ -1045,9 +941,8 @@ pub fn oauth_refresh_config_for_provider_with_stored(
             .map(|scope| (*scope).to_string())
             .collect(),
           redirect_uri: GOOGLE_ANTIGRAVITY_REDIRECT_URI.to_string(),
-        }),
-        None => None,
-      }
+        },
+      )
     }
     _ => None,
   };
@@ -1069,7 +964,7 @@ pub async fn wait_for_local_callback(
   server.wait_for_callback(cancel).await
 }
 
-fn start_anthropic_connect(
+pub(super) fn start_anthropic_connect(
   provider_id: &str,
   provider_name: &str,
 ) -> Result<OAuthConnectStart, AuthError> {
@@ -1095,7 +990,7 @@ fn start_anthropic_connect(
     prompt: Some("Paste the authorization code or redirect URL:".to_string()),
     pending: PendingOAuthConnect {
       provider_id: provider_id.to_string(),
-      kind: OAuthProviderKind::Anthropic,
+      kind: ProviderPluginKind::AnthropicOAuth,
       verifier: Some(verifier.clone()),
       state: Some(verifier),
       device_code: None,
@@ -1108,7 +1003,7 @@ fn start_anthropic_connect(
   })
 }
 
-fn start_openai_codex_connect(
+pub(super) fn start_openai_codex_connect(
   provider_id: &str,
   provider_name: &str,
 ) -> Result<OAuthConnectStart, AuthError> {
@@ -1137,7 +1032,7 @@ fn start_openai_codex_connect(
     prompt: Some("Paste the authorization code or redirect URL:".to_string()),
     pending: PendingOAuthConnect {
       provider_id: provider_id.to_string(),
-      kind: OAuthProviderKind::OpenAICodex,
+      kind: ProviderPluginKind::OpenAICodex,
       verifier: Some(verifier),
       state: Some(state),
       device_code: None,
@@ -1150,10 +1045,10 @@ fn start_openai_codex_connect(
   })
 }
 
-fn start_google_connect(
+pub(super) fn start_google_connect(
   provider_id: &str,
   provider_name: &str,
-  kind: OAuthProviderKind,
+  kind: ProviderPluginKind,
   client_id: String,
   auth_url: &str,
   redirect_uri: &str,
@@ -1245,7 +1140,7 @@ async fn start_github_copilot_connect(
     prompt: None,
     pending: PendingOAuthConnect {
       provider_id: provider_id.to_string(),
-      kind: OAuthProviderKind::GitHubCopilot,
+      kind: ProviderPluginKind::GitHubCopilot,
       verifier: None,
       state: None,
       device_code: Some(device.device_code),
@@ -1258,7 +1153,7 @@ async fn start_github_copilot_connect(
   })
 }
 
-async fn complete_anthropic_connect(
+pub(super) async fn complete_anthropic_connect(
   pending: &PendingOAuthConnect,
   input: &str,
 ) -> Result<StoredCredentials, AuthError> {
@@ -1315,7 +1210,7 @@ async fn complete_anthropic_connect(
   ))
 }
 
-async fn complete_openai_codex_connect(
+pub(super) async fn complete_openai_codex_connect(
   pending: &PendingOAuthConnect,
   input: &str,
 ) -> Result<StoredCredentials, AuthError> {
@@ -1404,7 +1299,7 @@ async fn complete_openai_codex_connect(
   Ok(stored)
 }
 
-async fn complete_google_connect(
+pub(super) async fn complete_google_connect(
   pending: &PendingOAuthConnect,
   input: &str,
   client_id: String,
@@ -1488,7 +1383,7 @@ async fn complete_google_connect(
   ))
 }
 
-async fn complete_github_copilot_connect(
+pub(super) async fn complete_github_copilot_connect(
   pending: &PendingOAuthConnect,
 ) -> Result<StoredCredentials, AuthError> {
   let device_code = pending
@@ -1905,18 +1800,17 @@ struct TierInfo {
 
 /// Check if the error indicates VPC-SC (security policy) restrictions
 fn is_vpc_sc_affected_user(payload: &Value) -> bool {
-  if let Some(error) = payload.get("error") {
-    if let Some(details) = error.get("details") {
-      if let Some(details_arr) = details.as_array() {
-        return details_arr.iter().any(|detail| {
-          detail
-            .get("reason")
-            .and_then(Value::as_str)
-            .map(|r| r == "SECURITY_POLICY_VIOLATED")
-            .unwrap_or(false)
-        });
-      }
-    }
+  if let Some(error) = payload.get("error")
+    && let Some(details) = error.get("details")
+    && let Some(details_arr) = details.as_array()
+  {
+    return details_arr.iter().any(|detail| {
+      detail
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(|r| r == "SECURITY_POLICY_VIOLATED")
+        .unwrap_or(false)
+    });
   }
   false
 }
@@ -1959,17 +1853,16 @@ async fn poll_google_operation(
 
     let payload = response.json::<LongRunningOperationResponse>().await.ok();
 
-    if let Some(data) = payload {
-      if data.done {
-        if let Some(response) = data.response {
-          if let Some(project) = response.cloudaicompanion_project {
-            if let Some(id) = project.id {
-              return Ok(Some(id));
-            }
-          }
-        }
-        return Ok(None);
+    if let Some(data) = payload
+      && data.done
+    {
+      if let Some(response) = data.response
+        && let Some(project) = response.cloudaicompanion_project
+        && let Some(id) = project.id
+      {
+        return Ok(Some(id));
       }
+      return Ok(None);
     }
 
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -2085,28 +1978,24 @@ async fn discover_google_project(client: &reqwest::Client, access_token: &str) -
         .send()
         .await;
 
-      if let Ok(onboard_response) = onboard_response {
-        if onboard_response.status().is_success() {
-          if let Ok(lro_data) = onboard_response
-            .json::<LongRunningOperationResponse>()
-            .await
+      if let Ok(onboard_response) = onboard_response
+        && onboard_response.status().is_success()
+        && let Ok(lro_data) = onboard_response
+          .json::<LongRunningOperationResponse>()
+          .await
+      {
+        // If operation is not done, poll for completion
+        if !lro_data.done {
+          if let Some(op_name) = &lro_data.name
+            && let Ok(Some(project_id)) = poll_google_operation(client, op_name, &headers).await
           {
-            // If operation is not done, poll for completion
-            if !lro_data.done {
-              if let Some(op_name) = &lro_data.name {
-                if let Ok(Some(project_id)) = poll_google_operation(client, op_name, &headers).await
-                {
-                  return project_id;
-                }
-              }
-            } else if let Some(response) = &lro_data.response {
-              if let Some(project) = &response.cloudaicompanion_project {
-                if let Some(id) = &project.id {
-                  return id.clone();
-                }
-              }
-            }
+            return project_id;
           }
+        } else if let Some(response) = &lro_data.response
+          && let Some(project) = &response.cloudaicompanion_project
+          && let Some(id) = &project.id
+        {
+          return id.clone();
         }
       }
     }
@@ -2200,21 +2089,21 @@ fn google_project_headers(access_token: &str, antigravity: bool) -> reqwest::hea
   headers
 }
 
-fn callback_binding(kind: OAuthProviderKind) -> Option<CallbackBinding> {
+fn callback_binding(kind: ProviderPluginKind) -> Option<CallbackBinding> {
   match kind {
-    OAuthProviderKind::OpenAICodex => Some(CallbackBinding {
+    ProviderPluginKind::OpenAICodex => Some(CallbackBinding {
       port: 1455,
       path: "/auth/callback",
     }),
-    OAuthProviderKind::GoogleGeminiCli => Some(CallbackBinding {
+    ProviderPluginKind::GoogleGeminiCli => Some(CallbackBinding {
       port: 8085,
       path: "/oauth2callback",
     }),
-    OAuthProviderKind::GoogleAntigravity => Some(CallbackBinding {
+    ProviderPluginKind::GoogleAntigravity => Some(CallbackBinding {
       port: 51121,
       path: "/oauth-callback",
     }),
-    OAuthProviderKind::Anthropic | OAuthProviderKind::GitHubCopilot => None,
+    ProviderPluginKind::AnthropicOAuth | ProviderPluginKind::GitHubCopilot => None,
   }
 }
 
@@ -2463,10 +2352,10 @@ mod tests {
 
   #[test]
   fn callback_bindings_match_expected_routes() {
-    let openai = callback_binding(OAuthProviderKind::OpenAICodex).expect("openai binding");
-    let gemini = callback_binding(OAuthProviderKind::GoogleGeminiCli).expect("gemini binding");
+    let openai = callback_binding(ProviderPluginKind::OpenAICodex).expect("openai binding");
+    let gemini = callback_binding(ProviderPluginKind::GoogleGeminiCli).expect("gemini binding");
     let antigravity =
-      callback_binding(OAuthProviderKind::GoogleAntigravity).expect("antigravity binding");
+      callback_binding(ProviderPluginKind::GoogleAntigravity).expect("antigravity binding");
 
     assert_eq!(openai.port, 1455);
     assert_eq!(openai.path, "/auth/callback");
@@ -2474,7 +2363,7 @@ mod tests {
     assert_eq!(gemini.path, "/oauth2callback");
     assert_eq!(antigravity.port, 51121);
     assert_eq!(antigravity.path, "/oauth-callback");
-    assert!(callback_binding(OAuthProviderKind::Anthropic).is_none());
+    assert!(callback_binding(ProviderPluginKind::AnthropicOAuth).is_none());
   }
 
   #[test]
@@ -2707,11 +2596,14 @@ mod tests {
     let prev_client_secret = std::env::var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET).ok();
     unsafe {
       std::env::set_var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_ID, "client-id-from-env");
-      std::env::set_var(ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET, "client-secret-from-env");
+      std::env::set_var(
+        ENV_GOOGLE_ANTIGRAVITY_CLIENT_SECRET,
+        "client-secret-from-env",
+      );
     }
 
     let (client_id, client_secret) =
-      google_oauth_client(OAuthProviderKind::GoogleAntigravity, None).expect("oauth client");
+      google_oauth_client(ProviderPluginKind::GoogleAntigravity, None).expect("oauth client");
     assert_eq!(client_id, "client-id-from-env");
     assert_eq!(client_secret.as_deref(), Some("client-secret-from-env"));
 
@@ -2728,4 +2620,7 @@ mod tests {
       }
     }
   }
+}
+pub(super) fn uses_local_callback(kind: ProviderPluginKind) -> bool {
+  callback_binding(kind).is_some()
 }

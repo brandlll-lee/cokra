@@ -77,7 +77,7 @@ impl ToolHandler for CloseAgentHandler {
         .await;
     }
 
-    let mut out = ToolOutput::success(
+    let out = ToolOutput::success(
       serde_json::to_string(&CloseAgentResult { agent_id, status }).map_err(|err| {
         FunctionCallError::Fatal(format!("failed to serialize close_agent result: {err}"))
       })?,

@@ -1,28 +1,26 @@
-//! Authentication module for model providers
+//! Authentication module for model providers.
 //!
 //! Handles different authentication methods including API keys, OAuth, and bearer tokens.
 
 pub mod manager;
 pub mod oauth;
-pub mod provider_registry;
 pub mod resolver;
-pub mod storage;
 
 pub use manager::AuthManager;
 pub use oauth::DeviceCodeResponse;
 pub use oauth::OAuthConfig;
 pub use oauth::OAuthManager;
 pub use oauth::OAuthToken;
-pub use provider_registry::AuthProviderDescriptor;
-pub use provider_registry::OAuthClientEnv;
-pub use provider_registry::RuntimeRegistrationKind;
-pub use provider_registry::auth_provider_descriptors;
-pub use provider_registry::find_auth_provider;
-pub use provider_registry::find_auth_provider_by_oauth_kind;
 pub use resolver::AuthResolver;
 pub use resolver::EnvAuthResolver;
-pub use storage::CredentialStorage;
-pub use storage::FileCredentialStorage;
+
+pub use crate::model::auth_store::CredentialStorage;
+pub use crate::model::auth_store::Credentials;
+pub use crate::model::auth_store::FileCredentialStorage;
+pub use crate::model::auth_store::MemoryCredentialStorage;
+pub use crate::model::auth_store::StoredCredentials;
+pub use crate::model::provider_catalog::OAuthClientEnv;
+pub use crate::model::provider_catalog::RuntimeRegistrationKind;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -66,135 +64,6 @@ pub enum AuthError {
 
 /// Authentication result
 pub type Result<T> = std::result::Result<T, AuthError>;
-
-/// Credentials for authenticating with a provider
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum Credentials {
-  /// API Key authentication
-  #[serde(rename = "api_key")]
-  ApiKey { key: String },
-
-  /// OAuth authentication
-  #[serde(rename = "oauth")]
-  OAuth {
-    /// Access token
-    access_token: String,
-
-    /// Refresh token
-    refresh_token: String,
-
-    /// Expiration timestamp (Unix seconds)
-    expires_at: u64,
-
-    /// Optional account ID
-    #[serde(default)]
-    account_id: Option<String>,
-
-    /// Optional enterprise URL
-    #[serde(default)]
-    enterprise_url: Option<String>,
-  },
-
-  /// Bearer token authentication
-  #[serde(rename = "bearer")]
-  Bearer { token: String },
-
-  /// Device code for OAuth flow
-  #[serde(rename = "device_code")]
-  DeviceCode {
-    /// Device code
-    device_code: String,
-
-    /// User code
-    user_code: String,
-
-    /// Verification URL
-    verification_url: String,
-
-    /// Expiration time
-    expires_in: u64,
-
-    /// Polling interval
-    interval: u64,
-  },
-}
-
-impl Credentials {
-  /// Get the actual credential value for HTTP requests
-  pub fn get_value(&self) -> String {
-    match self {
-      Credentials::ApiKey { key } => key.clone(),
-      Credentials::OAuth { access_token, .. } => access_token.clone(),
-      Credentials::Bearer { token } => token.clone(),
-      Credentials::DeviceCode { device_code, .. } => device_code.clone(),
-    }
-  }
-
-  /// Check if credentials are expired (for OAuth)
-  pub fn is_expired(&self) -> bool {
-    match self {
-      Credentials::OAuth { expires_at, .. } => *expires_at < chrono::Utc::now().timestamp() as u64,
-      _ => false,
-    }
-  }
-
-  /// Get the Authorization header value
-  pub fn get_auth_header(&self) -> String {
-    match self {
-      Credentials::ApiKey { key } => format!("Bearer {}", key),
-      Credentials::OAuth { access_token, .. } => format!("Bearer {}", access_token),
-      Credentials::Bearer { token } => format!("Bearer {}", token),
-      Credentials::DeviceCode { device_code, .. } => format!("Bearer {}", device_code),
-    }
-  }
-}
-
-/// Stored credentials with metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredCredentials {
-  /// Provider ID
-  pub provider_id: String,
-
-  /// Actual credentials
-  pub credentials: Credentials,
-
-  /// When these credentials were stored
-  pub stored_at: u64,
-
-  /// Display name for the account
-  #[serde(default)]
-  pub account_name: Option<String>,
-
-  /// Optional metadata
-  #[serde(default)]
-  pub metadata: serde_json::Value,
-}
-
-impl StoredCredentials {
-  /// Create new stored credentials
-  pub fn new(provider_id: impl Into<String>, credentials: Credentials) -> Self {
-    Self {
-      provider_id: provider_id.into(),
-      credentials,
-      stored_at: chrono::Utc::now().timestamp() as u64,
-      account_name: None,
-      metadata: serde_json::json!({}),
-    }
-  }
-
-  /// Set account name
-  pub fn with_account_name(mut self, name: impl Into<String>) -> Self {
-    self.account_name = Some(name.into());
-    self
-  }
-
-  /// Set metadata
-  pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
-    self.metadata = metadata;
-    self
-  }
-}
 
 /// Authentication request
 #[derive(Debug, Clone)]

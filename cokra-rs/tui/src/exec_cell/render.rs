@@ -152,6 +152,10 @@ fn format_duration_human(duration: Duration) -> String {
 }
 
 impl HistoryCell for ExecCell {
+  fn is_stream_continuation(&self) -> bool {
+    self.is_continuation
+  }
+
   fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
     if self.is_exploring_cell() {
       return self.exploring_display_lines(width);
@@ -282,14 +286,20 @@ impl HistoryCell for ExecCell {
 impl ExecCell {
   fn exploring_display_lines(&self, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    // Use exploring_since to drive a *continuous* spinner for the entire group.
+    // exploring_since is Some while the cell lives in active_exec_cell (turn in
+    // progress), and None for scrollback snapshots. This means:
+    //   - active group (any point during turn): ⠋ Exploring  (spinner always on)
+    //   - scrollback snapshot / after flush:    ● Explored   (no spinner)
+    let is_live = self.exploring_since.is_some();
     lines.push(Line::from(vec![
-      if self.is_active() {
-        spinner(self.active_start_time(), self.animations_enabled())
+      if is_live {
+        spinner(self.exploring_since, self.animations_enabled())
       } else {
         "●".dim()
       },
       " ".into(),
-      if self.is_active() {
+      if is_live {
         Span::from("Exploring").style(Style::new().fg(light_blue()).add_modifier(Modifier::BOLD))
       } else {
         Span::from("Explored").style(Style::new().fg(light_blue()).add_modifier(Modifier::BOLD))
@@ -317,6 +327,8 @@ impl ExecCell {
       let title = match call.tool_name.as_str() {
         "list_dir" => "List",
         "grep_files" | "search_tool" | "code_search" => "Search",
+        "glob" => "Glob",
+        "read_many_files" => "Read",
         _ => "Run",
       };
       summary_items.push(wrap_exploring_line(width, title, call.command.clone()));
@@ -446,14 +458,17 @@ mod tests {
 
   #[test]
   fn snapshot_read_file_tool_completed() {
-    let cell = ExecCell::new(completed_read_file_call(), false);
+    // Use scrollback_snapshot() to render the post-flush "Explored" state
+    // (exploring_since = None). A live cell always shows "Exploring".
+    let cell = ExecCell::new(completed_read_file_call(), false).scrollback_snapshot();
     let rendered = render_exec_cell(&cell, 60, 10);
     insta::assert_snapshot!(rendered);
   }
 
   #[test]
   fn snapshot_list_dir_tool_completed() {
-    let cell = ExecCell::new(completed_list_dir_call(), false);
+    // Same: test the scrollback "Explored" rendering.
+    let cell = ExecCell::new(completed_list_dir_call(), false).scrollback_snapshot();
     let rendered = render_exec_cell(&cell, 60, 10);
     insta::assert_snapshot!(rendered);
   }
@@ -584,9 +599,21 @@ mod tests {
       .map(Line::to_string)
       .collect::<Vec<_>>();
 
-    assert!(rendered.iter().any(|line| line.contains("Search spawn_agent")));
-    assert!(rendered.iter().any(|line| line.contains("Search team_status")));
-    assert!(rendered.iter().any(|line| line.contains("Search cleanup_team")));
+    assert!(
+      rendered
+        .iter()
+        .any(|line| line.contains("Search spawn_agent"))
+    );
+    assert!(
+      rendered
+        .iter()
+        .any(|line| line.contains("Search team_status"))
+    );
+    assert!(
+      rendered
+        .iter()
+        .any(|line| line.contains("Search cleanup_team"))
+    );
     assert!(rendered.iter().any(|line| line.contains("… +1 more")));
     assert!(
       !rendered.iter().any(|line| line.contains("agentteams")),

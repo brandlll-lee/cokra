@@ -47,11 +47,7 @@ impl ToolHandler for GlobHandler {
     let search_dir = match &args.path {
       Some(p) => {
         let pb = PathBuf::from(p);
-        if pb.is_absolute() {
-          pb
-        } else {
-          cwd.join(p)
-        }
+        if pb.is_absolute() { pb } else { cwd.join(p) }
       }
       None => cwd,
     };
@@ -145,7 +141,11 @@ fn glob_via_std(
   }
 
   let truncated = entries.len() > MAX_RESULTS;
-  let limited: Vec<&str> = entries.iter().take(MAX_RESULTS).map(|s| s.as_str()).collect();
+  let limited: Vec<&str> = entries
+    .iter()
+    .take(MAX_RESULTS)
+    .map(|s| s.as_str())
+    .collect();
 
   let mut output = limited.join("\n");
   if truncated {
@@ -180,11 +180,7 @@ mod tests {
     fs::write(dir.path().join("bar.rs"), "fn test() {}").unwrap();
     fs::write(dir.path().join("baz.txt"), "text").unwrap();
 
-    let inv = make_inv(
-      "1",
-      serde_json::json!({ "pattern": "*.rs" }),
-      dir.path(),
-    );
+    let inv = make_inv("1", serde_json::json!({ "pattern": "*.rs" }), dir.path());
     let out = GlobHandler.handle_async(inv).await.unwrap();
     let text = out.text_content();
     assert!(text.contains("foo.rs"));
@@ -266,11 +262,7 @@ mod tests {
     fs::write(dir.path().join("skip.rs"), "fn x() {}").unwrap();
     fs::write(dir.path().join("skip.py"), "pass").unwrap();
 
-    let inv = make_inv(
-      "6",
-      serde_json::json!({ "pattern": "*.ts" }),
-      dir.path(),
-    );
+    let inv = make_inv("6", serde_json::json!({ "pattern": "*.ts" }), dir.path());
     let out = GlobHandler.handle_async(inv).await.unwrap();
     let text = out.text_content();
     assert!(text.contains("keep.ts"));
@@ -302,11 +294,7 @@ mod tests {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("cwd_file.md"), "# hello").unwrap();
 
-    let inv = make_inv(
-      "8",
-      serde_json::json!({ "pattern": "*.md" }),
-      dir.path(),
-    );
+    let inv = make_inv("8", serde_json::json!({ "pattern": "*.md" }), dir.path());
     let out = GlobHandler.handle_async(inv).await.unwrap();
     assert!(out.text_content().contains("cwd_file.md"));
   }

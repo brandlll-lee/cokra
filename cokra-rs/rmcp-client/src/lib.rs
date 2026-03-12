@@ -18,9 +18,9 @@ use rmcp::model::InitializeResult;
 use rmcp::model::ListToolsResult;
 use rmcp::model::PaginatedRequestParams;
 use rmcp::model::ServerResult;
+use rmcp::service;
 use rmcp::service::RoleClient;
 use rmcp::service::RunningService;
-use rmcp::service;
 use rmcp::transport::child_process::TokioChildProcess;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::streamable_http_client::StreamableHttpClientWorker;
@@ -33,12 +33,8 @@ use tokio::time;
 type StreamableHttpTransport = WorkerTransport<StreamableHttpClientWorker<reqwest::Client>>;
 
 enum PendingTransport {
-  ChildProcess {
-    transport: TokioChildProcess,
-  },
-  StreamableHttp {
-    transport: StreamableHttpTransport,
-  },
+  ChildProcess { transport: TokioChildProcess },
+  StreamableHttp { transport: StreamableHttpTransport },
 }
 
 enum ClientState {
@@ -161,22 +157,22 @@ impl RmcpClient {
     };
 
     let service = match transport {
-      PendingTransport::ChildProcess { transport } => {
-        match timeout {
-          Some(duration) => time::timeout(duration, service::serve_client(handler.clone(), transport))
+      PendingTransport::ChildProcess { transport } => match timeout {
+        Some(duration) => {
+          time::timeout(duration, service::serve_client(handler.clone(), transport))
             .await
-            .map_err(|_| anyhow!("timed out handshaking with MCP server after {duration:?}"))??,
-          None => service::serve_client(handler.clone(), transport).await?,
+            .map_err(|_| anyhow!("timed out handshaking with MCP server after {duration:?}"))??
         }
-      }
-      PendingTransport::StreamableHttp { transport } => {
-        match timeout {
-          Some(duration) => time::timeout(duration, service::serve_client(handler.clone(), transport))
+        None => service::serve_client(handler.clone(), transport).await?,
+      },
+      PendingTransport::StreamableHttp { transport } => match timeout {
+        Some(duration) => {
+          time::timeout(duration, service::serve_client(handler.clone(), transport))
             .await
-            .map_err(|_| anyhow!("timed out handshaking with MCP server after {duration:?}"))??,
-          None => service::serve_client(handler.clone(), transport).await?,
+            .map_err(|_| anyhow!("timed out handshaking with MCP server after {duration:?}"))??
         }
-      }
+        None => service::serve_client(handler.clone(), transport).await?,
+      },
     };
 
     let initialize_result = service

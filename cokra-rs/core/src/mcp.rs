@@ -49,7 +49,8 @@ impl McpConnectionManager {
     let mut tools = HashMap::new();
 
     for (server_name, server_config) in config.servers.iter().filter(|(_, cfg)| cfg.enabled) {
-      let connect_result = connect_server(server_name, server_config).await
+      let connect_result = connect_server(server_name, server_config)
+        .await
         .and_then(|client| {
           let tool_timeout = server_config.tool_timeout_sec.map(Duration::from_secs);
           // Wrap in a future-friendly way — we call list_tools below once client is ready
@@ -60,9 +61,13 @@ impl McpConnectionManager {
         Ok(v) => v,
         Err(err) => {
           if server_config.required {
-            return Err(err.context(format!("required MCP server `{server_name}` failed to connect")));
+            return Err(err.context(format!(
+              "required MCP server `{server_name}` failed to connect"
+            )));
           }
-          tracing::warn!("MCP server `{server_name}` failed to connect (non-required, skipping): {err:#}");
+          tracing::warn!(
+            "MCP server `{server_name}` failed to connect (non-required, skipping): {err:#}"
+          );
           continue;
         }
       };
@@ -71,9 +76,13 @@ impl McpConnectionManager {
         Ok(t) => t,
         Err(err) => {
           if server_config.required {
-            return Err(err.context(format!("required MCP server `{server_name}` failed to list tools")));
+            return Err(err.context(format!(
+              "required MCP server `{server_name}` failed to list tools"
+            )));
           }
-          tracing::warn!("MCP server `{server_name}` failed to list tools (non-required, skipping): {err:#}");
+          tracing::warn!(
+            "MCP server `{server_name}` failed to list tools (non-required, skipping): {err:#}"
+          );
           continue;
         }
       };
@@ -147,18 +156,16 @@ impl McpConnectionManager {
       .ok_or_else(|| anyhow!("unknown MCP server `{}`", managed_tool.server))?;
     let result = server
       .client
-      .call_tool(
-        managed_tool.tool.clone(),
-        arguments,
-        server.tool_timeout,
-      )
+      .call_tool(managed_tool.tool.clone(), arguments, server.tool_timeout)
       .await?;
 
     Ok(McpToolCallResult {
       content: result
         .content
         .into_iter()
-        .map(|item| serde_json::to_value(item).unwrap_or_else(|_| Value::String("<content>".to_string())))
+        .map(|item| {
+          serde_json::to_value(item).unwrap_or_else(|_| Value::String("<content>".to_string()))
+        })
         .collect(),
       structured_content: result.structured_content,
       is_error: result.is_error.unwrap_or(false),
@@ -384,11 +391,16 @@ fn json_schema_from_value(value: &Value) -> JsonSchema {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
         });
-      let additional_properties = object.get("additionalProperties").and_then(|value| match value {
-        Value::Bool(flag) => Some(AdditionalProperties::Boolean(*flag)),
-        Value::Object(_) => Some(AdditionalProperties::Schema(Box::new(json_schema_from_value(value)))),
-        _ => None,
-      });
+      let additional_properties =
+        object
+          .get("additionalProperties")
+          .and_then(|value| match value {
+            Value::Bool(flag) => Some(AdditionalProperties::Boolean(*flag)),
+            Value::Object(_) => Some(AdditionalProperties::Schema(Box::new(
+              json_schema_from_value(value),
+            ))),
+            _ => None,
+          });
       JsonSchema::Object {
         properties,
         required,
@@ -480,7 +492,14 @@ mod tests {
     // Built-in tool names never start with "mcp__" so they
     // cannot clash with any MCP-qualified name.
     let tools = empty_tools();
-    for builtin in ["shell", "edit_file", "write_file", "web_search", "diagnostics", "save_memory"] {
+    for builtin in [
+      "shell",
+      "edit_file",
+      "write_file",
+      "web_search",
+      "diagnostics",
+      "save_memory",
+    ] {
       let qualified = qualify_tool_name("server", builtin, &tools);
       assert!(
         qualified.starts_with("mcp__server__"),
