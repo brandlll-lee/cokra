@@ -130,6 +130,7 @@ pub fn build_specs() -> Vec<ToolSpec> {
     glob_tool(),
     code_search_tool(),
     search_tool(),
+    inspect_tool(),
     spawn_agent_tool(),
     send_input_tool(),
     wait_tool(),
@@ -575,10 +576,30 @@ fn code_search_tool() -> ToolSpec {
 fn search_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
   props.insert("query".to_string(), str_field("Search query"));
+  props.insert(
+    "limit".to_string(),
+    int_field("Maximum number of tools to return (default 8, max 20)."),
+  );
   ToolSpec::new(
     "search_tool",
-    "Search available tools",
+    "Search the active tool catalog by name, alias, description, and input schema keys. Returns ranked structured matches for the current session.",
     obj(props, &["query"]),
+    None,
+    ToolHandlerType::Function,
+    default_permissions(),
+  )
+}
+
+fn inspect_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "name".to_string(),
+    str_field("Tool name or alias to inspect."),
+  );
+  ToolSpec::new(
+    "inspect_tool",
+    "Inspect a tool definition, including canonical name, aliases, permissions, input keys, and MCP source metadata.",
+    obj(props, &["name"]),
     None,
     ToolHandlerType::Function,
     default_permissions(),

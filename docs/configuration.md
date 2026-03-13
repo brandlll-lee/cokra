@@ -98,6 +98,26 @@ js_repl = false
 cloud_tasks = false
 ```
 
+### Tool Execution Surface
+
+Control which exec tool is exposed to the model, and which backend powers shell-family execution internally.
+
+```toml
+[tools.exec]
+# Which exec tool the model sees: "auto", "shell", or "unified_exec"
+public_surface = "auto"
+
+# Which backend is used internally: "auto", "shell_command", or "unified_exec"
+backend = "auto"
+```
+
+Defaults:
+
+- `public_surface = "auto"` currently resolves to exposing `shell`
+- `backend = "auto"` resolves to `shell_command` when `shell` is public, and `unified_exec` when `unified_exec` is public
+
+This lets us keep a clean public tool surface while still evolving the internal execution backend independently.
+
 ### Model Configuration
 
 Configure which AI model to use.

@@ -551,6 +551,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -585,6 +586,7 @@ dependencies = [
  "ratatui",
  "reqwest",
  "rmcp",
+ "schemars",
  "serde",
  "serde_json",
  "sha2",

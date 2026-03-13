@@ -14,6 +14,7 @@ pub mod edit_file;
 pub mod glob;
 pub mod grep_files;
 pub mod handoff_team_task;
+pub mod inspect_tool;
 pub mod list_dir;
 pub mod mcp;
 pub mod plan;
@@ -55,7 +56,6 @@ pub fn register_builtin_handlers(
   registry.register_handler("list_dir", Arc::new(list_dir::ListDirHandler));
   registry.register_handler("grep_files", Arc::new(grep_files::GrepFilesHandler));
   registry.register_handler("code_search", Arc::new(code_search::CodeSearchHandler));
-  registry.register_handler("search_tool", Arc::new(dynamic::DynamicToolHandler));
   for tool_name in mcp_manager.tool_names() {
     registry.register_handler(
       tool_name,

@@ -5,6 +5,9 @@ use cokra_config::SandboxConfig;
 
 use crate::exec::PermissionProfile;
 use crate::exec::SandboxPermissions;
+use crate::tools::SHELL_TOOL_NAME;
+use crate::tools::UNIFIED_EXEC_TOOL_NAME;
+use crate::tools::canonical_exec_tool_name;
 use crate::tools::context::FunctionCallError;
 
 #[derive(Debug, Clone)]
@@ -50,31 +53,30 @@ impl ToolValidator {
       return Err(ValidationError::PathTraversal);
     }
 
-    if call.tool_name == "shell" {
-      let cmd = call
-        .args
-        .get("command")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ValidationError::InvalidArguments("missing command".to_string()))?;
-      self.validate_shell_command(cmd)?;
-      validate_exec_request(&call.args, false, &self.approval_policy)?;
-    }
-
-    if matches!(
-      call.tool_name.as_str(),
-      "unified_exec" | "local_shell" | "container.exec"
-    ) {
-      let command = call
-        .args
-        .get("command")
-        .and_then(Value::as_array)
-        .ok_or_else(|| ValidationError::InvalidArguments("missing command".to_string()))?;
-      if command.is_empty() || command.iter().any(|item| item.as_str().is_none()) {
-        return Err(ValidationError::InvalidArguments(
-          "command must be a non-empty string array".to_string(),
-        ));
+    if let Some(exec_tool_name) = canonical_exec_tool_name(&call.tool_name) {
+      if exec_tool_name == SHELL_TOOL_NAME {
+        let cmd = call
+          .args
+          .get("command")
+          .and_then(Value::as_str)
+          .ok_or_else(|| ValidationError::InvalidArguments("missing command".to_string()))?;
+        self.validate_shell_command(cmd)?;
+        validate_exec_request(&call.args, false, &self.approval_policy)?;
       }
-      validate_exec_request(&call.args, true, &self.approval_policy)?;
+
+      if exec_tool_name == UNIFIED_EXEC_TOOL_NAME {
+        let command = call
+          .args
+          .get("command")
+          .and_then(Value::as_array)
+          .ok_or_else(|| ValidationError::InvalidArguments("missing command".to_string()))?;
+        if command.is_empty() || command.iter().any(|item| item.as_str().is_none()) {
+          return Err(ValidationError::InvalidArguments(
+            "command must be a non-empty string array".to_string(),
+          ));
+        }
+        validate_exec_request(&call.args, true, &self.approval_policy)?;
+      }
     }
 
     Ok(ValidationResult {

@@ -76,11 +76,6 @@ struct TokenResponse {
   id_token: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct OpenAITokenExchangeResponse {
-  access_token: String,
-}
-
 #[derive(Debug, Default, PartialEq, Eq)]
 struct OpenAIIdTokenInfo {
   email: Option<String>,
@@ -136,6 +131,9 @@ const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const OPENAI_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 const OPENAI_SCOPE: &str = "openid profile email offline_access";
 const OPENAI_JWT_CLAIM_PATH: &str = "https://api.openai.com/auth";
+const OPENAI_ORIGINATOR: &str = "opencode";
+const OPENAI_PKCE_CHARSET: &[u8] =
+  b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
 
 const ANTHROPIC_CLIENT_ID_B64: &str = "OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl";
 const ANTHROPIC_AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
@@ -1007,9 +1005,22 @@ pub(super) fn start_openai_codex_connect(
   provider_id: &str,
   provider_name: &str,
 ) -> Result<OAuthConnectStart, AuthError> {
-  let verifier = generate_verifier();
+  let verifier = uuid::Uuid::new_v4()
+    .into_bytes()
+    .into_iter()
+    .chain(uuid::Uuid::new_v4().into_bytes())
+    .chain(uuid::Uuid::new_v4().into_bytes())
+    .take(43)
+    .map(|byte| OPENAI_PKCE_CHARSET[(byte as usize) % OPENAI_PKCE_CHARSET.len()] as char)
+    .collect::<String>();
   let challenge = pkce_challenge(&verifier);
-  let state = uuid::Uuid::new_v4().simple().to_string();
+  let state = URL_SAFE_NO_PAD.encode(
+    uuid::Uuid::new_v4()
+      .into_bytes()
+      .into_iter()
+      .chain(uuid::Uuid::new_v4().into_bytes())
+      .collect::<Vec<_>>(),
+  );
   let mut url = Url::parse(OPENAI_AUTHORIZE_URL)
     .map_err(|e| AuthError::OAuthError(format!("invalid openai authorize url: {e}")))?;
   url
@@ -1023,7 +1034,7 @@ pub(super) fn start_openai_codex_connect(
     .append_pair("state", &state)
     .append_pair("id_token_add_organizations", "true")
     .append_pair("codex_cli_simplified_flow", "true")
-    .append_pair("originator", "cokra");
+    .append_pair("originator", OPENAI_ORIGINATOR);
 
   Ok(OAuthConnectStart {
     provider_name: provider_name.to_string(),
@@ -1275,24 +1286,15 @@ pub(super) async fn complete_openai_codex_connect(
     .clone()
     .or_else(|| account_id.clone());
   let account_name = id_info.email.clone();
-  let api_key = exchange_openai_api_key(&client, &token.id_token, organization_id.as_deref()).await;
-  let mut metadata = serde_json::json!({
+  let metadata = serde_json::json!({
     "email": id_info.email,
     "plan_type": id_info.plan_type,
     "chatgpt_user_id": id_info.user_id,
     "chatgpt_account_id": account_id.clone(),
     "organization_id": organization_id,
     "id_token": token.id_token,
-    "oauth_mode": "chatgpt_access_token",
+    "oauth_mode": "opencode_codex_oauth",
   });
-  match api_key {
-    Ok(api_key) => {
-      metadata["api_key"] = Value::String(api_key);
-    }
-    Err(err) => {
-      metadata["api_key_exchange_error"] = Value::String(err.to_string());
-    }
-  }
   let mut stored =
     oauth_stored_credentials(&pending.provider_id, token, account_id, None, metadata);
   stored.account_name = account_name;
@@ -1652,57 +1654,6 @@ fn parse_openai_id_token_info(id_token: &str) -> Result<OpenAIIdTokenInfo, AuthE
     account_id,
     organization_id,
   })
-}
-
-async fn exchange_openai_api_key(
-  client: &reqwest::Client,
-  id_token: &str,
-  organization_id: Option<&str>,
-) -> Result<String, AuthError> {
-  let mut form = vec![
-    (
-      "grant_type",
-      "urn:ietf:params:oauth:grant-type:token-exchange",
-    ),
-    ("client_id", OPENAI_CLIENT_ID),
-    ("requested_token", "openai-api-key"),
-    ("subject_token", id_token),
-    (
-      "subject_token_type",
-      "urn:ietf:params:oauth:token-type:id_token",
-    ),
-  ];
-  if let Some(org_id) = organization_id.filter(|value| !value.is_empty()) {
-    form.push(("organization_id", org_id));
-  }
-
-  let response = client
-    .post(OPENAI_TOKEN_URL)
-    .header("Content-Type", "application/x-www-form-urlencoded")
-    .form(&form)
-    .send()
-    .await
-    .map_err(|e| {
-      AuthError::OAuthError(reqwest_error_message("OpenAI API key exchange failed", &e))
-    })?;
-
-  if !response.status().is_success() {
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    return Err(AuthError::OAuthError(format!(
-      "OpenAI API key exchange failed (HTTP {status}): {body}"
-    )));
-  }
-
-  response
-    .json::<OpenAITokenExchangeResponse>()
-    .await
-    .map(|token| token.access_token)
-    .map_err(|e| {
-      AuthError::OAuthError(format!(
-        "failed to parse OpenAI API key exchange response: {e}"
-      ))
-    })
 }
 
 fn extract_openai_claim(payload: &Value, key: &str) -> Option<String> {
@@ -2510,6 +2461,45 @@ mod tests {
 
     assert_eq!(info.account_id.as_deref(), Some("org_fallback"));
     assert_eq!(info.organization_id.as_deref(), Some("org_fallback"));
+  }
+
+  #[test]
+  fn start_openai_codex_connect_matches_opencode_authorize_fields() {
+    let start = start_openai_codex_connect("openai-codex", "ChatGPT Plus/Pro")
+      .expect("openai codex connect start");
+    let url = Url::parse(&start.auth_url).expect("authorize url");
+    let query = url.query_pairs().into_owned().collect::<HashMap<_, _>>();
+
+    assert_eq!(url.host_str(), Some("auth.openai.com"));
+    assert_eq!(url.path(), "/oauth/authorize");
+    assert_eq!(query.get("response_type").map(String::as_str), Some("code"));
+    assert_eq!(
+      query.get("client_id").map(String::as_str),
+      Some(OPENAI_CLIENT_ID)
+    );
+    assert_eq!(
+      query.get("redirect_uri").map(String::as_str),
+      Some(OPENAI_REDIRECT_URI)
+    );
+    assert_eq!(query.get("scope").map(String::as_str), Some(OPENAI_SCOPE));
+    assert_eq!(
+      query.get("code_challenge_method").map(String::as_str),
+      Some("S256")
+    );
+    assert_eq!(
+      query.get("id_token_add_organizations").map(String::as_str),
+      Some("true")
+    );
+    assert_eq!(
+      query.get("codex_cli_simplified_flow").map(String::as_str),
+      Some("true")
+    );
+    assert_eq!(
+      query.get("originator").map(String::as_str),
+      Some(OPENAI_ORIGINATOR)
+    );
+    assert_eq!(start.pending.verifier.as_ref().map(String::len), Some(43));
+    assert!(!query.get("state").unwrap_or(&String::new()).is_empty());
   }
 
   #[test]

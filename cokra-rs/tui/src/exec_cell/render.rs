@@ -23,6 +23,7 @@ use crate::wrapping::word_wrap_lines;
 pub(crate) const TOOL_CALL_MAX_LINES: usize = 5;
 const SHELL_TOOL_CALL_MAX_LINES: usize = 2;
 const EXPLORING_SUMMARY_MAX_ITEMS: usize = 3;
+const EXPLORING_LIVE_MAX_HEIGHT: u16 = 6;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OutputLinesParams {
@@ -284,28 +285,7 @@ impl HistoryCell for ExecCell {
 }
 
 impl ExecCell {
-  fn exploring_display_lines(&self, width: u16) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    // Use exploring_since to drive a *continuous* spinner for the entire group.
-    // exploring_since is Some while the cell lives in active_exec_cell (turn in
-    // progress), and None for scrollback snapshots. This means:
-    //   - active group (any point during turn): ⠋ Exploring  (spinner always on)
-    //   - scrollback snapshot / after flush:    ● Explored   (no spinner)
-    let is_live = self.exploring_since.is_some();
-    lines.push(Line::from(vec![
-      if is_live {
-        spinner(self.exploring_since, self.animations_enabled())
-      } else {
-        "●".dim()
-      },
-      " ".into(),
-      if is_live {
-        Span::from("Exploring").style(Style::new().fg(light_blue()).add_modifier(Modifier::BOLD))
-      } else {
-        Span::from("Explored").style(Style::new().fg(light_blue()).add_modifier(Modifier::BOLD))
-      },
-    ]));
-
+  fn exploring_summary_item_blocks(&self, width: u16) -> Vec<Vec<Line<'static>>> {
     let mut summary_items = Vec::new();
     let mut idx = 0usize;
     while idx < self.calls.len() {
@@ -334,21 +314,124 @@ impl ExecCell {
       summary_items.push(wrap_exploring_line(width, title, call.command.clone()));
       idx += 1;
     }
+    summary_items
+  }
 
-    let total = summary_items.len();
-    let omitted = total.saturating_sub(EXPLORING_SUMMARY_MAX_ITEMS);
-    let visible_items = summary_items
+  fn exploring_summary_lines(&self, width: u16, max_lines: Option<usize>) -> Vec<Line<'static>> {
+    let all_items = self.exploring_summary_item_blocks(width);
+    let total = all_items.len();
+    let omitted_by_default = total.saturating_sub(EXPLORING_SUMMARY_MAX_ITEMS);
+    let visible_items = all_items
       .into_iter()
-      .skip(omitted)
-      .flatten()
+      .skip(omitted_by_default)
       .collect::<Vec<_>>();
+
+    let kept_items = if let Some(limit) = max_lines {
+      if limit == 0 {
+        Vec::new()
+      } else {
+        let mut available_for_items = limit;
+        let mut kept_rev = Vec::new();
+        loop {
+          kept_rev.clear();
+          let mut remaining = available_for_items;
+          for block in visible_items.iter().rev() {
+            if remaining == 0 {
+              break;
+            }
+            if block.len() <= remaining {
+              kept_rev.push(block.clone());
+              remaining -= block.len();
+            } else if kept_rev.is_empty() {
+              kept_rev.push(block.iter().take(remaining).cloned().collect());
+              remaining = 0;
+            } else {
+              break;
+            }
+          }
+
+          let kept_len = kept_rev.len();
+          let omitted = total.saturating_sub(kept_len);
+          if omitted == 0 || available_for_items == 0 || limit == 1 {
+            break kept_rev.into_iter().rev().collect::<Vec<_>>();
+          }
+
+          let reserved_for_omitted = limit.saturating_sub(1);
+          if available_for_items == reserved_for_omitted {
+            break kept_rev.into_iter().rev().collect::<Vec<_>>();
+          }
+          available_for_items = reserved_for_omitted;
+        }
+      }
+    } else {
+      visible_items
+    };
+
+    let omitted = total.saturating_sub(kept_items.len());
     let mut summary_lines = Vec::new();
     if omitted > 0 {
       summary_lines.push(Line::from(Span::from(format!("… +{omitted} more")).dim()));
     }
-    summary_lines.extend(visible_items);
+    summary_lines.extend(kept_items.into_iter().flatten());
+    prefix_lines(summary_lines, "  └ ".dim(), "    ".into())
+  }
 
-    lines.extend(prefix_lines(summary_lines, "  └ ".dim(), "    ".into()));
+  pub(crate) fn live_transcript_lines(&self, width: u16, max_height: u16) -> Vec<Line<'static>> {
+    if !self.is_exploring_cell() {
+      return self.transcript_lines(width);
+    }
+
+    let mut lines = Vec::new();
+    let is_live = self.is_active();
+    lines.push(Line::from(vec![
+      if is_live {
+        spinner(self.exploring_since, self.animations_enabled())
+      } else {
+        "●".dim()
+      },
+      " ".into(),
+      if is_live {
+        Span::from("Exploring").style(Style::new().fg(light_blue()).add_modifier(Modifier::BOLD))
+      } else {
+        Span::from("Explored").style(Style::new().fg(light_blue()).add_modifier(Modifier::BOLD))
+      },
+    ]));
+
+    let remaining_lines = max_height.saturating_sub(1) as usize;
+    lines.extend(self.exploring_summary_lines(width, Some(remaining_lines)));
+    lines
+  }
+
+  pub(crate) fn live_desired_height(&self, width: u16) -> u16 {
+    self
+      .live_transcript_lines(width, EXPLORING_LIVE_MAX_HEIGHT)
+      .len()
+      .try_into()
+      .unwrap_or(EXPLORING_LIVE_MAX_HEIGHT)
+  }
+
+  fn exploring_display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    // Explore groups should only show a spinner while at least one call in the
+    // group is still active. Once the last call completes, the cell remains
+    // grouped but immediately flips to "Explored" until a later explore call
+    // reactivates the same group.
+    let is_live = self.is_active();
+    lines.push(Line::from(vec![
+      if is_live {
+        spinner(self.exploring_since, self.animations_enabled())
+      } else {
+        "●".dim()
+      },
+      " ".into(),
+      if is_live {
+        Span::from("Exploring").style(Style::new().fg(light_blue()).add_modifier(Modifier::BOLD))
+      } else {
+        Span::from("Explored").style(Style::new().fg(light_blue()).add_modifier(Modifier::BOLD))
+      },
+    ]));
+
+    lines.extend(self.exploring_summary_lines(width, None));
     lines
   }
 }
@@ -459,7 +542,7 @@ mod tests {
   #[test]
   fn snapshot_read_file_tool_completed() {
     // Use scrollback_snapshot() to render the post-flush "Explored" state
-    // (exploring_since = None). A live cell always shows "Exploring".
+    // (exploring_since = None). Live cells only show "Exploring" while active.
     let cell = ExecCell::new(completed_read_file_call(), false).scrollback_snapshot();
     let rendered = render_exec_cell(&cell, 60, 10);
     insta::assert_snapshot!(rendered);

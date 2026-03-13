@@ -64,6 +64,16 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
 
 impl Renderable for Box<dyn HistoryCell> {
   fn render(&self, area: Rect, buf: &mut Buffer) {
+    if let Some(exec_cell) = self.as_ref().as_any().downcast_ref::<ExecCell>()
+      && exec_cell.is_exploring_cell()
+    {
+      Paragraph::new(Text::from(
+        exec_cell.live_transcript_lines(area.width, area.height),
+      ))
+      .render(area, buf);
+      return;
+    }
+
     let lines = self.display_lines(area.width);
     let y = if area.height == 0 {
       0
@@ -77,6 +87,11 @@ impl Renderable for Box<dyn HistoryCell> {
   }
 
   fn desired_height(&self, width: u16) -> u16 {
+    if let Some(exec_cell) = self.as_ref().as_any().downcast_ref::<ExecCell>()
+      && exec_cell.is_exploring_cell()
+    {
+      return exec_cell.live_desired_height(width);
+    }
     HistoryCell::desired_height(self.as_ref(), width)
   }
 }
@@ -1098,6 +1113,8 @@ impl HistoryCell for TodoUpdateCell {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use ratatui::Terminal;
+  use ratatui::backend::TestBackend;
 
   fn lines_to_string(lines: &[Line<'static>]) -> String {
     lines
@@ -1111,6 +1128,14 @@ mod tests {
       })
       .collect::<Vec<_>>()
       .join("\n")
+  }
+
+  fn render_boxed_history_cell(cell: Box<dyn HistoryCell>, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    terminal
+      .draw(|f| cell.render(f.area(), f.buffer_mut()))
+      .expect("draw");
+    format!("{}", terminal.backend())
   }
 
   #[test]
@@ -1294,6 +1319,27 @@ mod tests {
     let rendered = lines_to_string(&lines);
     assert!(rendered.starts_with(" > "));
     assert!(rendered.contains("hello world"));
+  }
+
+  #[test]
+  fn exploring_exec_cell_keeps_header_visible_when_inline_height_is_tight() {
+    let cell: Box<dyn HistoryCell> = Box::new(new_active_exec_command(
+      "call-1".to_string(),
+      "search_tool".to_string(),
+      "handle_mcp_command list_tools new_streamable_http_client new_stdio_client McpServerTransportConfig required enabled tool_timeout include_tools exclude_tools".to_string(),
+      std::path::PathBuf::from("/tmp/project"),
+      false,
+    ));
+
+    let rendered = render_boxed_history_cell(cell, 80, 2);
+    assert!(
+      rendered.contains("Exploring"),
+      "expected header to remain visible: {rendered}"
+    );
+    assert!(
+      rendered.contains("Search handle_mcp_command"),
+      "expected first search line to remain visible: {rendered}"
+    );
   }
 
   fn make_todo(

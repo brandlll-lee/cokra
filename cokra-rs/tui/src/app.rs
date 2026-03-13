@@ -75,6 +75,7 @@ pub struct App {
   /// Controls the animation thread that sends CommitTick events.
   commit_anim_running: Arc<AtomicBool>,
   task_running: bool,
+  inline_stable_height: u16,
   pending_approval: Option<PendingApproval>,
   ui_mode: UiMode,
   transcript_cells: Vec<Box<dyn HistoryCell>>,
@@ -258,6 +259,7 @@ impl App {
       app_event_tx: app_event_sender,
       commit_anim_running: Arc::new(AtomicBool::new(false)),
       task_running: false,
+      inline_stable_height: 0,
       pending_approval: None,
       ui_mode,
       transcript_cells: Vec::new(),
@@ -328,9 +330,9 @@ impl App {
               self.handle_cokra_event(event).await?;
               // 1:1 codex streaming flush: after handling a core event in Inline mode,
               // immediately drain any InsertHistoryCell events that were produced by the
-              // handler (e.g. from on_agent_message_delta → append_boxed_history) and
+              // handler (e.g. from on_agent_message_delta 鈫?append_boxed_history) and
               // write them directly into scrollback. This eliminates the two-round-trip
-              // delay (app_event_rx → TuiEvent::Draw) that makes streaming appear sluggish
+              // delay (app_event_rx 鈫?TuiEvent::Draw) that makes streaming appear sluggish
               // when LLM tokens arrive faster than the tokio::select! scheduling rate.
               if self.ui_mode == UiMode::Inline {
                 self.flush_inline_history_cells(tui);
@@ -370,7 +372,18 @@ impl App {
     if self.ui_mode == UiMode::AltScreen && self.transcript_cache_width != width {
       self.rebuild_transcript_cache(width);
     }
-    let height = self.chat_widget.desired_height(width);
+    let requested_height = self.chat_widget.desired_height(width);
+    let height = if self.ui_mode == UiMode::Inline {
+      if self.task_running {
+        self.inline_stable_height = self.inline_stable_height.max(requested_height);
+        self.inline_stable_height
+      } else {
+        self.inline_stable_height = 0;
+        requested_height
+      }
+    } else {
+      requested_height
+    };
     let sizing = if self.ui_mode == UiMode::Inline {
       self.chat_widget.inline_viewport_sizing()
     } else {
@@ -433,7 +446,7 @@ impl App {
         self
           .chat_widget
           .add_to_history(PlainHistoryCell::new(vec![Line::from(
-            format!("● Failed to wire provider runtime for {provider_id}: {err}").red(),
+            format!("鈼?Failed to wire provider runtime for {provider_id}: {err}").red(),
           )]));
         // Tradeoff: don't early-return here; if wiring fails we still want to fall back
         // to the provider's connect flow so users can re-auth / reconfigure in-TUI.
@@ -452,7 +465,7 @@ impl App {
             self
               .chat_widget
               .add_to_history(PlainHistoryCell::new(vec![Line::from(
-                format!("● OAuth connect failed for {connect_id}: {err}").red(),
+                format!("鈼?OAuth connect failed for {connect_id}: {err}").red(),
               )]));
           }
           return Ok(());
@@ -497,7 +510,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("● Connected, but failed to save credentials locally: {err}").red(),
+          format!("鈼?Connected, but failed to save credentials locally: {err}").red(),
         )]));
     }
     Ok(())
@@ -510,12 +523,14 @@ impl App {
       .prompt
       .clone()
       .unwrap_or_else(|| "Paste the authorization response:".to_string());
+    let auto_callback_enabled = uses_local_callback(start.pending.kind);
     let view = OAuthConnectView::new(
       start.pending.provider_id.clone(),
       start.provider_name,
       start.auth_url,
       start.instructions,
       prompt,
+      auto_callback_enabled,
       self.app_event_tx.clone(),
     );
     self.chat_widget.bottom_pane.push_view(Box::new(view));
@@ -528,28 +543,39 @@ impl App {
   }
 
   async fn open_connected_provider_models_popup(&mut self, provider_id: &str) -> Result<()> {
-    let Some(entry) = find_provider_catalog_entry(provider_id) else {
-      self.open_available_models_popup().await?;
-      return Ok(());
-    };
-    let Some(runtime_provider_id) = entry.primary_model_provider_id() else {
-      self.open_available_models_popup().await?;
-      return Ok(());
-    };
-
-    let providers = self
+    let probe = self
       .cokra
       .model_client()
       .registry()
-      .list_connected_models_catalog()
-      .await
-      .into_iter()
-      .filter(|provider| provider.id == runtime_provider_id)
-      .collect::<Vec<_>>();
-    if providers.is_empty() {
+      .post_connect_probe(provider_id)
+      .await;
+
+    if let Some(warning) = probe.warning.clone() {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          format!("鈼?Post-connect probe: {warning}").dim(),
+        )]));
+    }
+
+    if !probe.runtime_ready || probe.models.is_empty() {
       self.open_available_models_popup().await?;
       return Ok(());
     }
+
+    let mut provider = cokra_core::model::ProviderInfo::new(
+      probe.runtime_provider_id.clone(),
+      probe.connect_provider_name,
+    )
+    .models(probe.models)
+    .authenticated(true)
+    .visible(true)
+    .live(probe.used_live_models);
+    provider.options = serde_json::json!({
+      "runtime_ready": probe.runtime_ready,
+      "post_connect_probe": true,
+    });
+    let providers = vec![provider];
 
     self.open_all_models_popup(providers).await?;
     Ok(())
@@ -573,7 +599,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("● Connected, but failed to save credentials locally: {err}").red(),
+          format!("鈼?Connected, but failed to save credentials locally: {err}").red(),
         )]));
     }
 
@@ -597,7 +623,7 @@ impl App {
           .chat_widget
           .add_to_history(PlainHistoryCell::new(vec![Line::from(
             format!(
-              "● Connected auth for {}, but no runtime token was produced.",
+              "鈼?Connected auth for {}, but no runtime token was produced.",
               entry.name
             )
             .red(),
@@ -607,7 +633,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("● Connected provider: {}", entry.name).dim(),
+          format!("鈼?Connected provider: {}", entry.name).dim(),
         )]));
     }
 
@@ -638,7 +664,7 @@ impl App {
     if !opens_connect_view {
       self.chat_widget.add_to_history(PlainHistoryCell::new(vec![
         Line::from(format!(
-          "● Starting OAuth connect for {}",
+          "鈼?Starting OAuth connect for {}",
           start.provider_name
         ))
         .dim(),
@@ -673,7 +699,7 @@ impl App {
           Err(err) => {
             if !flow.cancel.is_cancelled() {
               tx.insert_history_cell(PlainHistoryCell::new(vec![Line::from(
-                format!("● Automatic localhost callback did not complete: {err}. You can still paste the redirect URL manually.").dim(),
+                format!("鈼?Automatic localhost callback did not complete: {err}. You can still paste the redirect URL manually.").dim(),
               )]));
             }
           }
@@ -689,7 +715,7 @@ impl App {
     self
       .chat_widget
       .add_to_history(PlainHistoryCell::new(vec![Line::from(
-        "● Waiting for OAuth approval…".dim(),
+        "Waiting for OAuth approval...".dim(),
       )]));
 
     let tx = self.app_event_tx.clone();
@@ -719,7 +745,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("● OAuth session expired for {provider_id}; start Connect again.").dim(),
+          format!("鈼?OAuth session expired for {provider_id}; start Connect again.").dim(),
         )]));
       return Ok(());
     };
@@ -731,8 +757,15 @@ impl App {
         self
           .chat_widget
           .add_to_history(PlainHistoryCell::new(vec![Line::from(
-            format!("● OAuth connect failed for {provider_id}: {err}").red(),
+            format!("鈼?OAuth connect failed for {provider_id}: {err}").red(),
           )]));
+        if provider_id == "openai-codex" && err.to_string().contains("unknown_error") {
+          self
+            .chat_widget
+            .add_to_history(PlainHistoryCell::new(vec![Line::from(
+              "鈼?OpenAI browser auth returned unknown_error. Recovery: Connect OpenAI with API key from Connect menu.".dim(),
+            )]));
+        }
         return Ok(());
       }
     };
@@ -779,8 +812,19 @@ impl App {
           self
             .chat_widget
             .add_to_history(PlainHistoryCell::new(vec![Line::from(
-              format!("● OAuth connect failed for {provider_id}: {err}").red(),
+              format!("鈼?OAuth connect failed for {provider_id}: {err}").red(),
             )]));
+          if let Some(provider) = self
+            .cokra
+            .model_client()
+            .registry()
+            .list_connect_catalog()
+            .await
+            .into_iter()
+            .find(|provider| provider.id == provider_id)
+          {
+            self.open_connect_provider_detail(provider);
+          }
         }
       }
       AppEvent::CancelOAuthConnect { provider_id } => {
@@ -797,7 +841,7 @@ impl App {
           self
             .chat_widget
             .add_to_history(PlainHistoryCell::new(vec![Line::from(
-              format!("● Failed to disconnect provider {provider_id}: {err}").red(),
+              format!("鈼?Failed to disconnect provider {provider_id}: {err}").red(),
             )]));
         }
       }
@@ -818,7 +862,7 @@ impl App {
           self
             .chat_widget
             .add_to_history(PlainHistoryCell::new(vec![Line::from(
-              format!("● Failed to apply model selection {model_id}: {err}").red(),
+              format!("鈼?Failed to apply model selection {model_id}: {err}").red(),
             )]));
         }
       }
@@ -846,7 +890,7 @@ impl App {
               self
                 .chat_widget
                 .add_to_history(PlainHistoryCell::new(vec![Line::from(
-                  format!("● Failed to apply model selection {model_id}: {err}").red(),
+                  format!("鈼?Failed to apply model selection {model_id}: {err}").red(),
                 )]));
             }
           }
@@ -854,7 +898,7 @@ impl App {
             self
               .chat_widget
               .add_to_history(PlainHistoryCell::new(vec![Line::from(
-                format!("● Failed to register API key for {provider_id}: {err}").red(),
+                format!("鈼?Failed to register API key for {provider_id}: {err}").red(),
               )]));
           }
         }
@@ -864,7 +908,7 @@ impl App {
           self
             .chat_widget
             .add_to_history(PlainHistoryCell::new(vec![Line::from(
-              format!("● OAuth code submission failed for {provider_id}: {err}").red(),
+              format!("鈼?OAuth code submission failed for {provider_id}: {err}").red(),
             )]));
         }
       }
@@ -882,7 +926,7 @@ impl App {
             .chat_widget
             .add_to_history(PlainHistoryCell::new(vec![Line::from(
             format!(
-              "● OAuth connect succeeded but provider registration failed for {provider_id}: {err}"
+              "鈼?OAuth connect succeeded but provider registration failed for {provider_id}: {err}"
             )
             .red(),
           )]));
@@ -898,8 +942,26 @@ impl App {
         self
           .chat_widget
           .add_to_history(PlainHistoryCell::new(vec![Line::from(
-            format!("● OAuth connect failed for {provider_id}: {message}").red(),
+            format!("鈼?OAuth connect failed for {provider_id}: {message}").red(),
           )]));
+        if provider_id == "openai-codex" && message.contains("unknown_error") {
+          self
+            .chat_widget
+            .add_to_history(PlainHistoryCell::new(vec![Line::from(
+              "鈼?This browser auth flow is unstable. Recovery: Connect OpenAI with API key, or retry this flow later.".dim(),
+            )]));
+        }
+        if let Some(provider) = self
+          .cokra
+          .model_client()
+          .registry()
+          .list_connect_catalog()
+          .await
+          .into_iter()
+          .find(|provider| provider.id == provider_id)
+        {
+          self.open_connect_provider_detail(provider);
+        }
       }
       AppEvent::InsertHistoryCell(cell) => {
         self.insert_history_cell(cell, tui)?;
@@ -950,14 +1012,14 @@ impl App {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from("● New session".dim()),
+            Line::from("鈼?New session".dim()),
           ]));
       }
       AppEvent::ForkCurrentSession => {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from("● Fork current session (not implemented)".dim()),
+            Line::from("鈼?Fork current session (not implemented)".dim()),
           ]));
       }
       AppEvent::SetStatusLineMode(mode) => {
@@ -970,7 +1032,7 @@ impl App {
           self
             .chat_widget
             .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-              Line::from(format!("● Status line: {label}")).dim(),
+              Line::from(format!("鈼?Status line: {label}")).dim(),
             ]));
         }
         self.status_line_mode = mode;
@@ -984,7 +1046,7 @@ impl App {
   /// Inline-mode streaming flush: drain any `InsertHistoryCell` events queued in
   /// `app_event_rx` and write them directly into scrollback without waiting for the
   /// next `tokio::select!` round-trip. Called immediately after `handle_cokra_event`
-  /// so that delta lines produced by `on_agent_message_delta → append_boxed_history`
+  /// so that delta lines produced by `on_agent_message_delta 鈫?append_boxed_history`
   /// appear on screen in the same scheduling cycle they were emitted.
   fn flush_inline_history_cells(&mut self, tui: &mut Tui) {
     loop {
@@ -1140,7 +1202,7 @@ impl App {
         // If still in a burst (first char held for flicker suppression), schedule a
         // follow-up tick so the held char is eventually released even without a keypress.
         if self.chat_widget.bottom_pane.flush_paste_burst_if_due() {
-          // Something flushed — schedule an immediate redraw and skip this frame.
+          // Something flushed 鈥?schedule an immediate redraw and skip this frame.
           tui.frame_requester().schedule_frame();
           return Ok(());
         }
@@ -1360,7 +1422,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "● 当前正在查看成员工作区。请先切回 @main，再向团队负责人发送新指令。".dim(),
+          "You are currently viewing a member workspace. Switch back to @main before sending team-level instructions.".dim(),
         )]));
       return Ok(());
     }
@@ -1679,7 +1741,8 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("● 无法切换到线程 {thread_id}，因为还没有可回放的事件。").dim(),
+          format!("Cannot switch to thread {thread_id}: no replayable events are available yet.")
+            .dim(),
         )]));
       return Ok(());
     };
@@ -1711,6 +1774,7 @@ impl App {
     self.clear_transcript_view();
     self.insert_startup_welcome(tui)?;
     self.task_running = false;
+    self.inline_stable_height = 0;
     self.chat_widget.set_agent_turn_running(false);
     self.pending_approval = None;
     self.replay_thread_snapshot(snapshot, tui.terminal.last_known_screen_size.width.max(1));
@@ -1873,7 +1937,7 @@ impl App {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from("● Context compacted".dim()),
+            Line::from("鈼?Context compacted".dim()),
           ]));
       }
       SlashCommand::Quit | SlashCommand::Exit => {
@@ -1888,13 +1952,13 @@ impl App {
           .cloned()
           .unwrap_or_else(|| self.cokra.cwd());
         let lines = vec![
-          Line::from(format!("● Model: {model}")),
-          Line::from(format!("● Cwd: {}", cwd.display())),
+          Line::from(format!("鈼?Model: {model}")),
+          Line::from(format!("鈼?Cwd: {}", cwd.display())),
           Line::from(format!(
-            "● Tokens: {} input, {} output, {} total",
+            "鈼?Tokens: {} input, {} output, {} total",
             usage.input_tokens, usage.output_tokens, usage.total_tokens
           )),
-          Line::from(format!("● Task running: {}", self.task_running)),
+          Line::from(format!("鈼?Task running: {}", self.task_running)),
         ];
         self
           .chat_widget
@@ -1905,13 +1969,13 @@ impl App {
           self
             .chat_widget
             .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-              Line::from("● No config layer stack available.".dim()),
+              Line::from("鈼?No config layer stack available.".dim()),
             ]));
           return Ok(());
         };
 
         let mut lines = Vec::new();
-        lines.push(Line::from("● Config layers (high → low):".to_string()));
+        lines.push(Line::from("鈼?Config layers (high 鈫?low):".to_string()));
         for layer in stack.layers_high_to_low() {
           let mut header = String::new();
           match &layer.source {
@@ -1940,7 +2004,7 @@ impl App {
         }
 
         let origins = stack.origins();
-        lines.push(Line::from(format!("● Origins keys: {}", origins.len())));
+        lines.push(Line::from(format!("鈼?Origins keys: {}", origins.len())));
 
         self
           .chat_widget
@@ -1956,7 +2020,7 @@ impl App {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from("● /diff is not yet implemented.".dim()),
+            Line::from("鈼?/diff is not yet implemented.".dim()),
           ]));
       }
       SlashCommand::Agent => {
@@ -1973,7 +2037,7 @@ impl App {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from(format!("● /{}  — not yet implemented.", cmd.command()).dim()),
+            Line::from(format!("鈼?/{}  鈥?not yet implemented.", cmd.command()).dim()),
           ]));
       }
     }
@@ -2051,12 +2115,30 @@ impl App {
     use crate::bottom_pane::list_selection_view::SelectionItem;
     use crate::bottom_pane::list_selection_view::SelectionViewParams;
     use crate::bottom_pane::popup_consts::standard_popup_hint_line;
-    let defs = self
+
+    let mut defs = self
       .cokra
       .model_client()
       .registry()
       .list_connect_catalog()
       .await;
+
+    let rank = |provider_id: &str| -> usize {
+      match provider_id {
+        "openai" => 0,
+        "anthropic" => 1,
+        "google" => 2,
+        "github-copilot" => 3,
+        "openrouter" => 4,
+        _ => 100,
+      }
+    };
+    defs.sort_by(|a, b| {
+      rank(&a.id)
+        .cmp(&rank(&b.id))
+        .then_with(|| a.name.cmp(&b.name))
+    });
+
     let mut items = Vec::new();
     for def in defs {
       let method_label = match def.connect_method {
@@ -2064,19 +2146,24 @@ impl App {
         cokra_core::model::provider::ProviderConnectMethod::OAuth => "OAuth",
         cokra_core::model::provider::ProviderConnectMethod::None => "Manual",
       };
-      let desc = if def.authenticated {
-        format!("{method_label} • connected")
+      let mut desc = if def.authenticated {
+        format!("{method_label} | connected")
       } else {
         method_label.to_string()
       };
+      if rank(&def.id) < 5 {
+        desc = format!("Popular | {desc}");
+      }
+
       let provider_id = def.id.to_string();
       let provider = cokra_core::model::ProviderInfo::new(provider_id.clone(), def.name.clone())
-        .connect_method(def.connect_method.clone())
+        .connect_method(def.connect_method)
         .connectable(def.connectable)
         .env_vars(def.env_vars.clone())
         .models(def.models.clone())
         .authenticated(def.authenticated)
         .visible(def.visible);
+
       let actions: Vec<crate::bottom_pane::list_selection_view::SelectionAction> = vec![Box::new(
         move |tx: &crate::app_event_sender::AppEventSender| {
           tx.send(AppEvent::OpenConnectProviderDetail {
@@ -2084,6 +2171,7 @@ impl App {
           });
         },
       )];
+
       items.push(SelectionItem {
         name: def.name,
         description: Some(desc),
@@ -2099,7 +2187,7 @@ impl App {
       .bottom_pane
       .show_selection_view(SelectionViewParams {
         title: Some("Connect".to_string()),
-        subtitle: Some("Connect a provider using OAuth or API key.".to_string()),
+        subtitle: Some("Connect a provider. Popular choices are listed first.".to_string()),
         footer_hint: Some(standard_popup_hint_line()),
         items,
         is_searchable: true,
@@ -2169,7 +2257,7 @@ impl App {
       .show_selection_view(SelectionViewParams {
         title: Some(provider.name.clone()),
         subtitle: Some(format!(
-          "{} • {}",
+          "{} 鈥?{}",
           if provider.authenticated {
             "Connected"
           } else {
@@ -2213,7 +2301,7 @@ impl App {
     self
       .chat_widget
       .add_to_history(PlainHistoryCell::new(vec![Line::from(
-        format!("● Disconnected provider: {provider_id}").dim(),
+        format!("鈼?Disconnected provider: {provider_id}").dim(),
       )]));
     Ok(())
   }
@@ -2415,7 +2503,7 @@ impl App {
       .await?;
 
     // 2) Persist selection: update ModelClient default provider.
-    //    The model_id may be "provider/model" — extract provider portion.
+    //    The model_id may be "provider/model" 鈥?extract provider portion.
     if let Some(provider_id) = model_id.split('/').next() {
       let _ = self
         .cokra
@@ -2431,7 +2519,7 @@ impl App {
     self
       .chat_widget
       .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-        Line::from(format!("● Model changed to {model_id}")),
+        Line::from(format!("鈼?Model changed to {model_id}")),
       ]));
     Ok(())
   }
@@ -2521,11 +2609,11 @@ impl App {
           &self.active_thread_id,
           self.status_line_agent_selector_active,
         ));
-        spans.push(ratatui::text::Span::from("  •  ").dim());
+        spans.push(ratatui::text::Span::from("  鈥? ").dim());
         let hint = if self.status_line_agent_selector_active {
-          "←/→ switch  Esc done"
+          "鈫?鈫?switch  Esc done"
         } else {
-          "↓ team switch"
+          "鈫?team switch"
         };
         spans.push(ratatui::text::Span::from(hint).dim());
       } else {
@@ -2538,7 +2626,7 @@ impl App {
       StatusLineMode::Minimal => {
         let mut spans = Vec::new();
         push_agent_switcher(&mut spans);
-        spans.push(ratatui::text::Span::from("  •  ").dim());
+        spans.push(ratatui::text::Span::from("  鈥? ").dim());
         spans.push(ratatui::text::Span::from("cwd: ").dim());
         spans.push(ratatui::text::Span::from(cwd.display().to_string()));
         Line::from(spans)
@@ -2546,18 +2634,18 @@ impl App {
       StatusLineMode::Default => {
         let mut spans = Vec::new();
         push_agent_switcher(&mut spans);
-        spans.push(ratatui::text::Span::from("  •  ").dim());
+        spans.push(ratatui::text::Span::from("  鈥? ").dim());
         if !model.is_empty() {
           spans.push(ratatui::text::Span::from("model: ").dim());
           spans.push(ratatui::text::Span::from(model));
-          spans.push(ratatui::text::Span::from("  •  ").dim());
+          spans.push(ratatui::text::Span::from("  鈥? ").dim());
         }
         spans.push(ratatui::text::Span::from("tokens: ").dim());
         spans.push(ratatui::text::Span::from(format!(
           "{} in, {} out, {} total",
           usage.input_tokens, usage.output_tokens, usage.total_tokens
         )));
-        spans.push(ratatui::text::Span::from("  •  ").dim());
+        spans.push(ratatui::text::Span::from("  鈥? ").dim());
         if let Some(snapshot) = &team_snapshot {
           let unread_total: usize = snapshot.unread_counts.values().copied().sum();
           let pending_plans = snapshot
@@ -2572,7 +2660,7 @@ impl App {
             self.background_pending_count(),
             pending_plans
           )));
-          spans.push(ratatui::text::Span::from("  •  ").dim());
+          spans.push(ratatui::text::Span::from("  鈥? ").dim());
         }
         spans.push(ratatui::text::Span::from("cwd: ").dim());
         spans.push(ratatui::text::Span::from(cwd.display().to_string()));
@@ -2634,7 +2722,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "● No active team runtime".dim(),
+          "鈼?No active team runtime".dim(),
         )]));
       return;
     };
@@ -2642,7 +2730,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "● No active team runtime".dim(),
+          "鈼?No active team runtime".dim(),
         )]));
       return;
     };
@@ -2664,7 +2752,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "● 当前还没有可切换的团队成员。".dim(),
+          "No other team member threads are available to switch to yet.".dim(),
         )]));
       return;
     }
@@ -2716,9 +2804,9 @@ impl App {
         let description = if description_parts.is_empty() {
           Some(thread_id.clone())
         } else {
-          Some(format!("{} • {}", thread_id, description_parts.join(" • ")))
+          Some(format!("{} | {}", thread_id, description_parts.join(" | ")))
         };
-        let selected_description = task.map(|task| format!("任务：{task}"));
+        let selected_description = task.map(|task| format!("Task: {task}"));
         let thread_id_for_action = thread_id.clone();
         let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
           tx.send(AppEvent::SelectAgentThread {
@@ -2751,12 +2839,14 @@ impl App {
       .bottom_pane
       .show_selection_view(SelectionViewParams {
         title: Some("Agent Teams".to_string()),
-        subtitle: Some("选择一个成员工作区进行查看；@main 继续负责分派与汇总。".to_string()),
+        subtitle: Some(
+          "Choose a member workspace to inspect; @main remains the coordinator.".to_string(),
+        ),
         footer_hint: Some(standard_popup_hint_line()),
         items,
         initial_selected_idx,
         is_searchable: true,
-        search_placeholder: Some("筛选成员".to_string()),
+        search_placeholder: Some("Filter members".to_string()),
         ..Default::default()
       });
   }
@@ -2815,7 +2905,10 @@ impl App {
         })];
         items.push(SelectionItem {
           name: format!("approval {}", req.id),
-          description: Some(format!("thread={} • tool={}", req.thread_id, req.tool_name)),
+          description: Some(format!(
+            "thread={} 鈥?tool={}",
+            req.thread_id, req.tool_name
+          )),
           actions,
           dismiss_on_select: true,
           ..Default::default()
@@ -2831,7 +2924,7 @@ impl App {
         items.push(SelectionItem {
           name: format!("user input {}", req.turn_id),
           description: Some(format!(
-            "thread={} • questions={}",
+            "thread={} 鈥?questions={}",
             req.thread_id,
             req.questions.len()
           )),
@@ -2846,7 +2939,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "● No background approvals pending".dim(),
+          "鈼?No background approvals pending".dim(),
         )]));
       return;
     }

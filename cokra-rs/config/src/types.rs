@@ -1,6 +1,7 @@
 // Configuration Types
 // All configuration type definitions
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -17,7 +18,7 @@ fn default_true() -> bool {
 }
 
 /// Main configuration structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Config {
   /// Approval policy settings
   #[serde(default)]
@@ -55,6 +56,9 @@ pub struct Config {
   /// Agent configuration
   #[serde(default)]
   pub agents: AgentConfig,
+  /// Tool configuration
+  #[serde(default)]
+  pub tools: ToolsConfig,
 
   /// Projects trust map keyed by canonical path string.
   ///
@@ -69,10 +73,12 @@ pub struct Config {
 
   /// Session working directory (runtime override, not persisted in config.toml).
   #[serde(default = "default_cwd", skip_serializing)]
+  #[schemars(skip)]
   pub cwd: PathBuf,
 
   /// Debug-only metadata: resolved config layers for this session cwd.
   #[serde(skip)]
+  #[schemars(skip)]
   pub config_layer_stack: Option<ConfigLayerStack>,
 }
 
@@ -91,6 +97,7 @@ impl Default for Config {
       tui: TuiConfig::default(),
       shell_environment: ShellEnvironmentPolicy::default(),
       agents: AgentConfig::default(),
+      tools: ToolsConfig::default(),
       projects: HashMap::new(),
       project_root_markers: None,
       cwd: default_cwd(),
@@ -104,7 +111,7 @@ impl Default for Config {
 // ============================================================================
 
 /// Approval policy settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovalPolicy {
   /// Overall approval mode
   pub policy: ApprovalMode,
@@ -125,7 +132,7 @@ impl Default for ApprovalPolicy {
 }
 
 /// Approval modes
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ApprovalMode {
   Ask,
@@ -140,7 +147,7 @@ impl Default for ApprovalMode {
 }
 
 /// Shell approval modes
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ShellApproval {
   Always,
@@ -156,7 +163,7 @@ impl Default for ShellApproval {
 }
 
 /// Patch approval modes
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum PatchApproval {
   Auto,
@@ -175,7 +182,7 @@ impl Default for PatchApproval {
 // ============================================================================
 
 /// Sandbox configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SandboxConfig {
   /// Sandbox mode
   pub mode: SandboxMode,
@@ -193,7 +200,7 @@ impl Default for SandboxConfig {
 }
 
 /// Sandbox modes
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxMode {
   Strict,
@@ -212,7 +219,7 @@ impl Default for SandboxMode {
 // ============================================================================
 
 /// Personality configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PersonalityConfig {
   /// Personality name
   pub name: String,
@@ -234,7 +241,7 @@ impl Default for PersonalityConfig {
 // ============================================================================
 
 /// Feature flags configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FeaturesConfig {
   /// Enable MCP
   pub mcp: bool,
@@ -261,11 +268,63 @@ impl Default for FeaturesConfig {
 }
 
 // ============================================================================
+// TOOLS CONFIGURATION
+// ============================================================================
+
+/// Tool-level configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
+pub struct ToolsConfig {
+  /// Exec tool configuration.
+  #[serde(default)]
+  pub exec: ExecToolsConfig,
+}
+
+/// Exec tool surface and backend configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExecToolsConfig {
+  /// Which exec tool name to expose to the model.
+  #[serde(default)]
+  pub public_surface: ExecPublicSurface,
+  /// Which implementation path should back shell-family execution.
+  #[serde(default)]
+  pub backend: ExecBackend,
+}
+
+impl Default for ExecToolsConfig {
+  fn default() -> Self {
+    Self {
+      public_surface: ExecPublicSurface::default(),
+      backend: ExecBackend::default(),
+    }
+  }
+}
+
+/// Which exec tool should be shown to the model.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecPublicSurface {
+  #[default]
+  Auto,
+  Shell,
+  UnifiedExec,
+}
+
+/// Which backend style should execute shell-family tool calls internally.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecBackend {
+  #[default]
+  Auto,
+  ShellCommand,
+  UnifiedExec,
+}
+
+// ============================================================================
 // MCP CONFIGURATION
 // ============================================================================
 
 /// MCP configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct McpConfig {
   /// MCP server configurations
   #[serde(default)]
@@ -277,7 +336,7 @@ pub struct McpConfig {
 /// Discriminated by the presence of fields (codex-style flat schema):
 ///   - `command` present → Stdio transport
 ///   - `url` present     → StreamableHttp transport
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub enum McpServerTransportConfig {
   Stdio {
     command: String,
@@ -343,7 +402,7 @@ struct RawMcpServerConfig {
 /// url = "https://mcp.example.com/mcp/"
 /// bearer_token = "..."
 /// ```
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct McpServerConfig {
   /// Transport configuration (derived from flat fields).
   #[serde(flatten)]
@@ -401,7 +460,7 @@ impl<'de> serde::Deserialize<'de> for McpServerConfig {
 // ============================================================================
 
 /// Skills configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SkillsConfig {
   /// Whether skills system is enabled
   pub enabled: bool,
@@ -423,7 +482,7 @@ impl Default for SkillsConfig {
 // ============================================================================
 
 /// Memories configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MemoriesConfig {
   /// Max raw memories for global
   pub max_raw_memories_for_global: usize,
@@ -451,7 +510,7 @@ impl Default for MemoriesConfig {
 // ============================================================================
 
 /// Models configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ModelsConfig {
   /// Model provider
   pub provider: String,
@@ -479,7 +538,7 @@ impl Default for ModelsConfig {
 // ============================================================================
 
 /// History configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HistoryConfig {
   /// Persistence mode
   pub persistence: HistoryPersistence,
@@ -497,7 +556,7 @@ impl Default for HistoryConfig {
 }
 
 /// History persistence modes
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum HistoryPersistence {
   SaveAll,
@@ -515,7 +574,7 @@ impl Default for HistoryPersistence {
 // ============================================================================
 
 /// TUI configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TuiConfig {
   /// Notifications enabled
   pub notifications: bool,
@@ -543,7 +602,7 @@ impl Default for TuiConfig {
 // ============================================================================
 
 /// Shell environment policy
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ShellEnvironmentPolicy {
   /// Inheritance mode
   pub inherit: ShellEnvironmentPolicyInherit,
@@ -564,7 +623,7 @@ impl Default for ShellEnvironmentPolicy {
 }
 
 /// Shell environment inheritance modes
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ShellEnvironmentPolicyInherit {
   Core,
@@ -583,7 +642,7 @@ impl Default for ShellEnvironmentPolicyInherit {
 // ============================================================================
 
 /// Agent configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AgentConfig {
   /// Max concurrent threads
   pub max_threads: usize,
@@ -601,7 +660,7 @@ impl Default for AgentConfig {
 }
 
 /// Agent role configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AgentRoleConfig {
   /// Role description
   pub description: Option<String>,
@@ -614,7 +673,7 @@ pub struct AgentRoleConfig {
 // ============================================================================
 
 /// Project trust configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct ProjectConfig {
   pub trust_level: Option<TrustLevel>,
 }
@@ -629,7 +688,7 @@ impl ProjectConfig {
   }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TrustLevel {
   Trusted,

@@ -36,6 +36,7 @@ use super::create_client;
 const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
+const CODEX_ORIGINATOR: &str = "opencode";
 const TOKEN_REFRESH_SKEW_SECS: u64 = 30;
 
 pub const OPENAI_CODEX_MODELS: &[&str] = &[
@@ -187,7 +188,9 @@ impl OpenAICodexProvider {
 
   async fn authorized_request(&self, request: RequestBuilder) -> Result<RequestBuilder> {
     let state = self.ensure_access_token().await?;
-    let mut request = request.header("Authorization", format!("Bearer {}", state.access_token));
+    let mut request = request
+      .header("Authorization", format!("Bearer {}", state.access_token))
+      .header("originator", CODEX_ORIGINATOR);
 
     if let Some(account_id) = state.account_id {
       request = request.header("ChatGPT-Account-Id", account_id);
@@ -535,5 +538,42 @@ mod tests {
     assert_eq!(body.get("store").and_then(Value::as_bool), Some(false));
     assert!(body.get("temperature").is_none());
     assert!(body.get("max_output_tokens").is_none());
+  }
+
+  #[tokio::test]
+  async fn authorized_request_sets_opencode_originator_header() {
+    let stored = StoredCredentials::new(
+      "openai-codex",
+      Credentials::OAuth {
+        access_token: "access".to_string(),
+        refresh_token: "refresh".to_string(),
+        expires_at: u64::MAX,
+        account_id: Some("org_123".to_string()),
+        enterprise_url: None,
+      },
+    );
+    let provider = OpenAICodexProvider::new(&stored, ProviderConfig::default()).expect("provider");
+
+    let request = provider
+      .authorized_request(provider.client.get("https://example.com/test"))
+      .await
+      .expect("authorized request")
+      .build()
+      .expect("built request");
+
+    assert_eq!(
+      request
+        .headers()
+        .get("originator")
+        .and_then(|v| v.to_str().ok()),
+      Some(CODEX_ORIGINATOR)
+    );
+    assert_eq!(
+      request
+        .headers()
+        .get("ChatGPT-Account-Id")
+        .and_then(|v| v.to_str().ok()),
+      Some("org_123")
+    );
   }
 }

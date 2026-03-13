@@ -82,12 +82,22 @@ impl ExecCell {
     if self.is_exploring_cell() && Self::is_exploring_call(&call) {
       let mut calls = self.calls.clone();
       calls.push(call);
+      let resumed_from_idle = !self.is_active();
+      let now = Instant::now();
       Some(Self {
         calls,
         animations_enabled: self.animations_enabled,
         is_continuation: self.is_continuation,
-        exploring_since: self.exploring_since,
-        exploring_visible_since: self.exploring_visible_since,
+        exploring_since: if resumed_from_idle {
+          Some(now)
+        } else {
+          self.exploring_since
+        },
+        exploring_visible_since: if resumed_from_idle {
+          Some(now)
+        } else {
+          self.exploring_visible_since
+        },
       })
     } else {
       None
@@ -183,6 +193,9 @@ impl ExecCell {
   /// When `exploring_since` is set, the tick advances every `SPINNER_INTERVAL_MS`
   /// milliseconds so that callers can use it as a cache-key to schedule redraws.
   pub(crate) fn exploring_animation_tick(&self) -> Option<u64> {
+    if !self.is_active() {
+      return None;
+    }
     let since = self.exploring_since?;
     let elapsed_ms = since.elapsed().as_millis();
     Some((elapsed_ms / crate::exec_cell::SPINNER_INTERVAL_MS) as u64)

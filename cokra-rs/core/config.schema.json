@@ -1,0 +1,712 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "description": "Main configuration structure",
+  "type": "object",
+  "properties": {
+    "agents": {
+      "description": "Agent configuration",
+      "$ref": "#/$defs/AgentConfig",
+      "default": {
+        "max_threads": 10,
+        "roles": {}
+      }
+    },
+    "approval": {
+      "description": "Approval policy settings",
+      "$ref": "#/$defs/ApprovalPolicy",
+      "default": {
+        "patch": "onrequest",
+        "policy": "ask",
+        "shell": "onfailure"
+      }
+    },
+    "features": {
+      "description": "Feature flags",
+      "$ref": "#/$defs/FeaturesConfig",
+      "default": {
+        "cloud_tasks": false,
+        "js_repl": false,
+        "mcp": true,
+        "memories": false,
+        "web_search": false
+      }
+    },
+    "history": {
+      "description": "History settings",
+      "$ref": "#/$defs/HistoryConfig",
+      "default": {
+        "max_bytes": null,
+        "persistence": "saveall"
+      }
+    },
+    "mcp": {
+      "description": "MCP server configurations",
+      "$ref": "#/$defs/McpConfig",
+      "default": {
+        "servers": {}
+      }
+    },
+    "memories": {
+      "description": "Memory settings",
+      "$ref": "#/$defs/MemoriesConfig",
+      "default": {
+        "max_raw_memories_for_global": 100,
+        "max_rollout_age_days": 30,
+        "max_rollouts_per_startup": 10,
+        "min_rollout_idle_hours": 1
+      }
+    },
+    "models": {
+      "description": "Model configuration",
+      "$ref": "#/$defs/ModelsConfig",
+      "default": {
+        "api_key": null,
+        "base_url": null,
+        "model": "gpt-5.2-codex",
+        "provider": "openai"
+      }
+    },
+    "personality": {
+      "description": "Personality settings",
+      "$ref": "#/$defs/PersonalityConfig",
+      "default": {
+        "instructions": null,
+        "name": "default"
+      }
+    },
+    "project_root_markers": {
+      "description": "Markers used to detect the project root when searching parent directories\nfor `.cokra` folders. Defaults to [\".git\"] when unset.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "type": "string"
+      }
+    },
+    "projects": {
+      "description": "Projects trust map keyed by canonical path string.\n\nMirrors Codex: `[projects.\"...\"] trust_level = \"trusted\" | \"untrusted\"`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ProjectConfig"
+      },
+      "default": {}
+    },
+    "sandbox": {
+      "description": "Sandbox configuration",
+      "$ref": "#/$defs/SandboxConfig",
+      "default": {
+        "mode": "permissive",
+        "network_access": false
+      }
+    },
+    "shell_environment": {
+      "description": "Shell environment policy",
+      "$ref": "#/$defs/ShellEnvironmentPolicy",
+      "default": {
+        "exclude": [],
+        "inherit": "core",
+        "set": {}
+      }
+    },
+    "skills": {
+      "description": "Skills configuration",
+      "$ref": "#/$defs/SkillsConfig",
+      "default": {
+        "enabled": true,
+        "paths": []
+      }
+    },
+    "tools": {
+      "description": "Tool configuration",
+      "$ref": "#/$defs/ToolsConfig",
+      "default": {
+        "exec": {
+          "backend": "auto",
+          "public_surface": "auto"
+        }
+      }
+    },
+    "tui": {
+      "description": "TUI settings",
+      "$ref": "#/$defs/TuiConfig",
+      "default": {
+        "alternate_screen": true,
+        "animations": true,
+        "notifications": true,
+        "show_tooltips": true
+      }
+    }
+  },
+  "$defs": {
+    "AgentConfig": {
+      "description": "Agent configuration",
+      "type": "object",
+      "properties": {
+        "max_threads": {
+          "description": "Max concurrent threads",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "roles": {
+          "description": "Agent roles",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AgentRoleConfig"
+          }
+        }
+      },
+      "required": [
+        "max_threads",
+        "roles"
+      ]
+    },
+    "AgentRoleConfig": {
+      "description": "Agent role configuration",
+      "type": "object",
+      "properties": {
+        "config_file": {
+          "description": "Config file path",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "description": "Role description",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ApprovalMode": {
+      "description": "Approval modes",
+      "type": "string",
+      "enum": [
+        "ask",
+        "auto",
+        "never"
+      ]
+    },
+    "ApprovalPolicy": {
+      "description": "Approval policy settings",
+      "type": "object",
+      "properties": {
+        "patch": {
+          "description": "Patch approval",
+          "$ref": "#/$defs/PatchApproval"
+        },
+        "policy": {
+          "description": "Overall approval mode",
+          "$ref": "#/$defs/ApprovalMode"
+        },
+        "shell": {
+          "description": "Shell command approval",
+          "$ref": "#/$defs/ShellApproval"
+        }
+      },
+      "required": [
+        "policy",
+        "shell",
+        "patch"
+      ]
+    },
+    "ExecBackend": {
+      "description": "Which backend style should execute shell-family tool calls internally.",
+      "type": "string",
+      "enum": [
+        "auto",
+        "shell_command",
+        "unified_exec"
+      ]
+    },
+    "ExecPublicSurface": {
+      "description": "Which exec tool should be shown to the model.",
+      "type": "string",
+      "enum": [
+        "auto",
+        "shell",
+        "unified_exec"
+      ]
+    },
+    "ExecToolsConfig": {
+      "description": "Exec tool surface and backend configuration.",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "description": "Which implementation path should back shell-family execution.",
+          "$ref": "#/$defs/ExecBackend",
+          "default": "auto"
+        },
+        "public_surface": {
+          "description": "Which exec tool name to expose to the model.",
+          "$ref": "#/$defs/ExecPublicSurface",
+          "default": "auto"
+        }
+      }
+    },
+    "FeaturesConfig": {
+      "description": "Feature flags configuration",
+      "type": "object",
+      "properties": {
+        "cloud_tasks": {
+          "description": "Enable cloud tasks",
+          "type": "boolean"
+        },
+        "js_repl": {
+          "description": "Enable JS REPL",
+          "type": "boolean"
+        },
+        "mcp": {
+          "description": "Enable MCP",
+          "type": "boolean"
+        },
+        "memories": {
+          "description": "Enable memories",
+          "type": "boolean"
+        },
+        "web_search": {
+          "description": "Enable web search",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "mcp",
+        "memories",
+        "web_search",
+        "js_repl",
+        "cloud_tasks"
+      ]
+    },
+    "HistoryConfig": {
+      "description": "History configuration",
+      "type": "object",
+      "properties": {
+        "max_bytes": {
+          "description": "Max bytes to store",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "persistence": {
+          "description": "Persistence mode",
+          "$ref": "#/$defs/HistoryPersistence"
+        }
+      },
+      "required": [
+        "persistence"
+      ]
+    },
+    "HistoryPersistence": {
+      "description": "History persistence modes",
+      "type": "string",
+      "enum": [
+        "saveall",
+        "none"
+      ]
+    },
+    "McpConfig": {
+      "description": "MCP configuration",
+      "type": "object",
+      "properties": {
+        "servers": {
+          "description": "MCP server configurations",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/McpServerConfig"
+          },
+          "default": {}
+        }
+      }
+    },
+    "McpServerConfig": {
+      "description": "MCP server configuration.\n\n**TOML format** (flat, no nested `[transport]` sub-table):\n\n```toml\n# Stdio\n[mcp.servers.my-server]\ncommand = \"npx\"\nargs = [\"-y\", \"some-mcp-package\"]\nenv = { API_KEY = \"...\" }\n\n# HTTP\n[mcp.servers.my-http-server]\nurl = \"https://mcp.example.com/mcp/\"\nbearer_token = \"...\"\n```",
+      "type": "object",
+      "properties": {
+        "disabled_tools": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "enabled_tools": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "required": {
+          "type": "boolean",
+          "default": false
+        },
+        "startup_timeout_sec": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tool_timeout_sec": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "Stdio": {
+              "type": "object",
+              "properties": {
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "command": {
+                  "type": "string"
+                },
+                "cwd": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "env": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "command",
+                "args"
+              ]
+            }
+          },
+          "required": [
+            "Stdio"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Http": {
+              "type": "object",
+              "properties": {
+                "bearer_token": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "headers": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "url"
+              ]
+            }
+          },
+          "required": [
+            "Http"
+          ]
+        }
+      ]
+    },
+    "MemoriesConfig": {
+      "description": "Memories configuration",
+      "type": "object",
+      "properties": {
+        "max_raw_memories_for_global": {
+          "description": "Max raw memories for global",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_rollout_age_days": {
+          "description": "Max rollout age in days",
+          "type": "integer",
+          "format": "int64"
+        },
+        "max_rollouts_per_startup": {
+          "description": "Max rollouts per startup",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "min_rollout_idle_hours": {
+          "description": "Min rollout idle hours",
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "max_raw_memories_for_global",
+        "max_rollout_age_days",
+        "max_rollouts_per_startup",
+        "min_rollout_idle_hours"
+      ]
+    },
+    "ModelsConfig": {
+      "description": "Models configuration",
+      "type": "object",
+      "properties": {
+        "api_key": {
+          "description": "API key (optional — falls back to environment variable)",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_url": {
+          "description": "Base URL for API",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "Model name",
+          "type": "string"
+        },
+        "provider": {
+          "description": "Model provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ]
+    },
+    "PatchApproval": {
+      "description": "Patch approval modes",
+      "type": "string",
+      "enum": [
+        "auto",
+        "onrequest",
+        "never"
+      ]
+    },
+    "PersonalityConfig": {
+      "description": "Personality configuration",
+      "type": "object",
+      "properties": {
+        "instructions": {
+          "description": "Custom instructions",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Personality name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "ProjectConfig": {
+      "description": "Project trust configuration.",
+      "type": "object",
+      "properties": {
+        "trust_level": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrustLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "SandboxConfig": {
+      "description": "Sandbox configuration",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "description": "Sandbox mode",
+          "$ref": "#/$defs/SandboxMode"
+        },
+        "network_access": {
+          "description": "Network access",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "mode",
+        "network_access"
+      ]
+    },
+    "SandboxMode": {
+      "description": "Sandbox modes",
+      "type": "string",
+      "enum": [
+        "strict",
+        "permissive",
+        "dangerfullaccess"
+      ]
+    },
+    "ShellApproval": {
+      "description": "Shell approval modes",
+      "type": "string",
+      "enum": [
+        "always",
+        "onfailure",
+        "unlesstrusted",
+        "never"
+      ]
+    },
+    "ShellEnvironmentPolicy": {
+      "description": "Shell environment policy",
+      "type": "object",
+      "properties": {
+        "exclude": {
+          "description": "Exclude patterns",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "inherit": {
+          "description": "Inheritance mode",
+          "$ref": "#/$defs/ShellEnvironmentPolicyInherit"
+        },
+        "set": {
+          "description": "Set environment variables",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "inherit",
+        "exclude",
+        "set"
+      ]
+    },
+    "ShellEnvironmentPolicyInherit": {
+      "description": "Shell environment inheritance modes",
+      "type": "string",
+      "enum": [
+        "core",
+        "all",
+        "none"
+      ]
+    },
+    "SkillsConfig": {
+      "description": "Skills configuration",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether skills system is enabled",
+          "type": "boolean"
+        },
+        "paths": {
+          "description": "Local skill paths",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "enabled",
+        "paths"
+      ]
+    },
+    "ToolsConfig": {
+      "description": "Tool-level configuration.",
+      "type": "object",
+      "properties": {
+        "exec": {
+          "description": "Exec tool configuration.",
+          "$ref": "#/$defs/ExecToolsConfig",
+          "default": {
+            "backend": "auto",
+            "public_surface": "auto"
+          }
+        }
+      }
+    },
+    "TrustLevel": {
+      "type": "string",
+      "enum": [
+        "trusted",
+        "untrusted"
+      ]
+    },
+    "TuiConfig": {
+      "description": "TUI configuration",
+      "type": "object",
+      "properties": {
+        "alternate_screen": {
+          "description": "Alternate screen mode",
+          "type": "boolean"
+        },
+        "animations": {
+          "description": "Animation enabled",
+          "type": "boolean"
+        },
+        "notifications": {
+          "description": "Notifications enabled",
+          "type": "boolean"
+        },
+        "show_tooltips": {
+          "description": "Show tooltips",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "notifications",
+        "animations",
+        "show_tooltips",
+        "alternate_screen"
+      ]
+    }
+  }
+}

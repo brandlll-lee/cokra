@@ -1,3 +1,4 @@
+pub mod catalog;
 pub mod context;
 pub mod diff_tracker;
 pub mod events;
@@ -16,13 +17,76 @@ pub mod validation;
 use std::sync::Arc;
 
 use cokra_config::Config;
+use cokra_config::ExecBackend;
+use cokra_config::ExecPublicSurface;
 
 use crate::mcp::McpConnectionManager;
+use crate::tools::catalog::ToolCatalog;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
 use crate::tools::spec::build_specs;
 use crate::tools::spec::skill_tool_with_description;
 use crate::tools::validation::ToolValidator;
+
+pub const SHELL_TOOL_NAME: &str = "shell";
+pub const UNIFIED_EXEC_TOOL_NAME: &str = "unified_exec";
+pub const LOCAL_SHELL_TOOL_ALIAS: &str = "local_shell";
+pub const CONTAINER_EXEC_TOOL_ALIAS: &str = "container.exec";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedExecBackend {
+  ShellCommand,
+  UnifiedExec,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedExecToolConfig {
+  pub public_surface: &'static str,
+  pub backend: ResolvedExecBackend,
+}
+
+pub fn canonical_exec_tool_name(name: &str) -> Option<&'static str> {
+  match name {
+    SHELL_TOOL_NAME => Some(SHELL_TOOL_NAME),
+    UNIFIED_EXEC_TOOL_NAME | LOCAL_SHELL_TOOL_ALIAS | CONTAINER_EXEC_TOOL_ALIAS => {
+      Some(UNIFIED_EXEC_TOOL_NAME)
+    }
+    _ => None,
+  }
+}
+
+pub fn is_exec_tool_name(name: &str) -> bool {
+  canonical_exec_tool_name(name).is_some()
+}
+
+pub fn resolve_exec_tool_config(config: &Config) -> ResolvedExecToolConfig {
+  let public_surface = match config.tools.exec.public_surface {
+    ExecPublicSurface::Auto | ExecPublicSurface::Shell => SHELL_TOOL_NAME,
+    ExecPublicSurface::UnifiedExec => UNIFIED_EXEC_TOOL_NAME,
+  };
+
+  let backend = match config.tools.exec.backend {
+    ExecBackend::Auto => {
+      if public_surface == UNIFIED_EXEC_TOOL_NAME {
+        ResolvedExecBackend::UnifiedExec
+      } else {
+        ResolvedExecBackend::ShellCommand
+      }
+    }
+    ExecBackend::ShellCommand => ResolvedExecBackend::ShellCommand,
+    ExecBackend::UnifiedExec => ResolvedExecBackend::UnifiedExec,
+  };
+
+  ResolvedExecToolConfig {
+    public_surface,
+    backend,
+  }
+}
+
+fn register_default_aliases(registry: &mut ToolRegistry) {
+  registry.register_alias(LOCAL_SHELL_TOOL_ALIAS, UNIFIED_EXEC_TOOL_NAME);
+  registry.register_alias(CONTAINER_EXEC_TOOL_ALIAS, UNIFIED_EXEC_TOOL_NAME);
+}
 
 /// Returns true when the configured model prefers the freeform `apply_patch`
 /// tool over the structured `edit_file` tool.
@@ -53,6 +117,7 @@ pub async fn build_default_tools_with_cwd(
 ) -> anyhow::Result<(Arc<ToolRegistry>, Arc<ToolRouter>)> {
   let mut registry = ToolRegistry::new();
   let mcp_manager = Arc::new(McpConnectionManager::new(&config.mcp).await?);
+  let exec_config = resolve_exec_tool_config(config);
 
   // 1:1 opencode SkillTool: 动态扫描 skills 并将可用列表注入工具描述。
   // 必须在注册 build_specs() 之前完成，因为 build_specs() 包含静态 skill_tool()，
@@ -71,6 +136,8 @@ pub async fn build_default_tools_with_cwd(
     registry.register_spec(spec);
   }
 
+  register_default_aliases(&mut registry);
+
   handlers::register_builtin_handlers(&mut registry, mcp_manager);
 
   // Model-based tool selection: GPT-codex models prefer apply_patch,
@@ -81,12 +148,34 @@ pub async fn build_default_tools_with_cwd(
     registry.exclude_tool("apply_patch");
   }
 
+  if exec_config.public_surface == SHELL_TOOL_NAME {
+    registry.exclude_tool(UNIFIED_EXEC_TOOL_NAME);
+  } else {
+    registry.exclude_tool(SHELL_TOOL_NAME);
+  }
+
+  let catalog = Arc::new(ToolCatalog::from_registry(&registry, &config.mcp));
+  registry.register_handler(
+    "search_tool",
+    Arc::new(handlers::dynamic::DynamicToolHandler::new(Arc::clone(
+      &catalog,
+    ))),
+  );
+  registry.register_handler(
+    "inspect_tool",
+    Arc::new(handlers::inspect_tool::InspectToolHandler::new(catalog)),
+  );
+
   let registry = Arc::new(registry);
   let validator = Arc::new(ToolValidator::new(
     config.sandbox.clone(),
     config.approval.clone(),
   ));
-  let router = Arc::new(ToolRouter::new(registry.clone(), validator));
+  let router = Arc::new(ToolRouter::new_with_exec_config(
+    registry.clone(),
+    validator,
+    exec_config,
+  ));
 
   Ok((registry, router))
 }
@@ -150,5 +239,32 @@ mod tests {
       "GPT-5.2-Codex"
     )));
     assert!(!model_prefers_apply_patch(&config_with_model("GPT-4o")));
+  }
+
+  #[test]
+  fn default_exec_config_exposes_shell_surface() {
+    let resolved = resolve_exec_tool_config(&Config::default());
+    assert_eq!(resolved.public_surface, SHELL_TOOL_NAME);
+    assert_eq!(resolved.backend, ResolvedExecBackend::ShellCommand);
+  }
+
+  #[test]
+  fn unified_exec_surface_defaults_to_unified_backend() {
+    let mut config = Config::default();
+    config.tools.exec.public_surface = ExecPublicSurface::UnifiedExec;
+
+    let resolved = resolve_exec_tool_config(&config);
+    assert_eq!(resolved.public_surface, UNIFIED_EXEC_TOOL_NAME);
+    assert_eq!(resolved.backend, ResolvedExecBackend::UnifiedExec);
+  }
+
+  #[test]
+  fn explicit_exec_backend_override_is_respected() {
+    let mut config = Config::default();
+    config.tools.exec.backend = ExecBackend::UnifiedExec;
+
+    let resolved = resolve_exec_tool_config(&config);
+    assert_eq!(resolved.public_surface, SHELL_TOOL_NAME);
+    assert_eq!(resolved.backend, ResolvedExecBackend::UnifiedExec);
   }
 }

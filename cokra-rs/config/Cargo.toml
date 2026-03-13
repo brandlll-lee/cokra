@@ -17,6 +17,7 @@ toml_edit = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+schemars = "1.2"
 
 # Additional dependencies
 dirs = "5.0"

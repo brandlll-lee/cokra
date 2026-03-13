@@ -11,10 +11,9 @@ use super::ProviderConfig;
 use super::auth::AuthManager;
 use super::error::ModelError;
 use super::error::Result;
+use super::model_catalog;
 use super::models_dev::ModelsDevClient;
 use super::provider::ProviderInfo;
-use super::provider_catalog::connect_provider_catalog;
-use super::provider_catalog::find_provider_catalog_entry;
 
 /// Provider Registry
 ///
@@ -344,35 +343,7 @@ impl ProviderRegistry {
   }
 
   pub async fn list_connect_catalog(&self) -> Vec<ProviderInfo> {
-    let auth = self.auth.clone();
-    let mut providers = connect_provider_catalog()
-      .into_iter()
-      .map(|item| {
-        ProviderInfo::new(item.id, item.name)
-          .connect_method(item.connect_method)
-          .connectable(true)
-          .env_vars(item.env_vars())
-          .models(item.default_models())
-      })
-      .collect::<Vec<_>>();
-
-    for provider in &mut providers {
-      let env_connected = provider.env_vars.iter().any(|env| {
-        std::env::var(env)
-          .ok()
-          .filter(|value| !value.is_empty())
-          .is_some()
-      });
-      let stored_connected = if let Some(auth) = &auth {
-        auth.load(&provider.id).await.ok().flatten().is_some()
-      } else {
-        false
-      };
-      provider.authenticated = env_connected || stored_connected;
-    }
-
-    providers.sort_by(|a, b| a.name.cmp(&b.name));
-    providers
+    model_catalog::build_connect_catalog(self.auth.as_ref()).await
   }
 
   pub async fn list_connected_models_catalog(&self) -> Vec<ProviderInfo> {
@@ -390,47 +361,19 @@ impl ProviderRegistry {
       .filter(|provider| provider.authenticated)
       .collect::<Vec<_>>();
 
-    let mut results = Vec::new();
-    for provider in connected {
-      let Some(entry) = find_provider_catalog_entry(&provider.id) else {
-        continue;
-      };
-      let Some(model_provider_id) = entry.primary_model_provider_id() else {
-        continue;
-      };
+    model_catalog::build_connected_models_catalog(&models_dev_db, connected)
+  }
 
-      // Tradeoff: opening "Available Models" must not trigger network calls or OAuth refresh.
-      // We rely on models.dev cache first, then fall back to connect defaults.
-      let (models, is_live) = if entry.supports_model_runtime() {
-        let mdev = models_dev_db
-          .get(model_provider_id.as_str())
-          .or_else(|| models_dev_db.get(provider.id.as_str()));
-        if let Some(mdev) = mdev {
-          let mut models: Vec<String> = mdev.models.keys().cloned().collect();
-          models.sort();
-          if !models.is_empty() {
-            (models, false)
-          } else {
-            (provider.models, false)
-          }
-        } else {
-          (provider.models, false)
-        }
-      } else {
-        (provider.models, false)
-      };
-
-      let mut info = ProviderInfo::new(model_provider_id, provider.name)
-        .models(models)
-        .authenticated(true)
-        .visible(true)
-        .live(is_live);
-      info.options = serde_json::json!({
-        "runtime_ready": entry.supports_model_runtime(),
-      });
-      results.push(info);
-    }
-    results
+  pub async fn post_connect_probe(
+    &self,
+    connect_provider_id: &str,
+  ) -> model_catalog::PostConnectProbeResult {
+    let models_dev_db = self
+      .models_dev
+      .get_cached_or_refresh()
+      .await
+      .unwrap_or_default();
+    model_catalog::post_connect_probe(self, &models_dev_db, connect_provider_id).await
   }
 
   pub async fn is_connect_catalog_provider_connected(&self, provider_id: &str) -> bool {

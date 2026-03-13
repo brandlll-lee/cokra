@@ -90,6 +90,26 @@ impl ToolRegistry {
     }
   }
 
+  pub fn aliases_for(&self, target: &str) -> Vec<String> {
+    let mut aliases = self
+      .aliases
+      .iter()
+      .filter_map(|(alias, mapped)| (mapped == target).then_some(alias.clone()))
+      .collect::<Vec<_>>();
+    aliases.sort();
+    aliases
+  }
+
+  pub fn alias_pairs(&self) -> Vec<(String, String)> {
+    let mut pairs = self
+      .aliases
+      .iter()
+      .map(|(alias, target)| (alias.clone(), target.clone()))
+      .collect::<Vec<_>>();
+    pairs.sort_by(|left, right| left.0.cmp(&right.0));
+    pairs
+  }
+
   // ── Exclude management ────────────────────────────────────────────
 
   /// Exclude a tool by name. Excluded tools are not sent to the model

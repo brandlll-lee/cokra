@@ -41,6 +41,11 @@ use cokra_protocol::ReviewDecision;
 use cokra_protocol::SandboxPolicy;
 
 use crate::agent::team_runtime::runtime_for_thread;
+use crate::tools::ResolvedExecBackend;
+use crate::tools::ResolvedExecToolConfig;
+use crate::tools::SHELL_TOOL_NAME;
+use crate::tools::UNIFIED_EXEC_TOOL_NAME;
+use crate::tools::canonical_exec_tool_name;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ShellToolCallParams;
 use crate::tools::context::ToolInvocation;
@@ -109,14 +114,31 @@ pub struct ToolRouter {
   registry: Arc<ToolRegistry>,
   validator: Arc<ToolValidator>,
   orchestrator: Arc<ToolOrchestrator>,
+  exec_config: ResolvedExecToolConfig,
 }
 
 impl ToolRouter {
   pub fn new(registry: Arc<ToolRegistry>, validator: Arc<ToolValidator>) -> Self {
+    Self::new_with_exec_config(
+      registry,
+      validator,
+      ResolvedExecToolConfig {
+        public_surface: SHELL_TOOL_NAME,
+        backend: ResolvedExecBackend::ShellCommand,
+      },
+    )
+  }
+
+  pub fn new_with_exec_config(
+    registry: Arc<ToolRegistry>,
+    validator: Arc<ToolValidator>,
+    exec_config: ResolvedExecToolConfig,
+  ) -> Self {
     Self {
       registry,
       validator,
       orchestrator: Arc::new(ToolOrchestrator::new()),
+      exec_config,
     }
   }
 
@@ -146,6 +168,7 @@ impl ToolRouter {
       self.registry.get_spec(&call.tool_name).cloned(),
       run_ctx.approval_policy.clone(),
       run_ctx.sandbox_policy.clone(),
+      self.exec_config,
       Some(InvocationRuntimeState {
         session: Arc::clone(&run_ctx.session),
         tx_event: run_ctx.tx_event.clone(),
@@ -259,14 +282,10 @@ impl ToolRouter {
 }
 
 fn tool_emitter_for_call(call: &ToolCall, cwd: &Path) -> ToolEmitter {
-  if call.tool_name == "shell" {
-    let raw_cmd = call
-      .args
-      .get("command")
-      .and_then(|v| v.as_str())
-      .unwrap_or("shell")
-      .to_string();
-    return ToolEmitter::shell_with_command(raw_cmd);
+  if let Some(exec_tool_name) = canonical_exec_tool_name(&call.tool_name)
+    && let Some(display_command) = exec_display_command(call, exec_tool_name)
+  {
+    return ToolEmitter::shell_with_command(display_command);
   }
 
   let Some(display_command) = summarize_tool_display_command(call, cwd) else {
@@ -334,6 +353,11 @@ pub(crate) fn summarize_tool_display_command(call: &ToolCall, cwd: &Path) -> Opt
       .get("query")
       .and_then(Value::as_str)
       .map(ToString::to_string),
+    "inspect_tool" => call
+      .args
+      .get("name")
+      .and_then(Value::as_str)
+      .map(ToString::to_string),
     "code_search" => call
       .args
       .get("query")
@@ -363,6 +387,7 @@ struct RegistryToolRuntime {
   spec: Option<ToolSpec>,
   approval_policy: AskForApproval,
   sandbox_policy: SandboxPolicy,
+  exec_config: ResolvedExecToolConfig,
   runtime: Option<InvocationRuntimeState>,
 }
 
@@ -372,6 +397,7 @@ impl RegistryToolRuntime {
     spec: Option<ToolSpec>,
     approval_policy: AskForApproval,
     sandbox_policy: SandboxPolicy,
+    exec_config: ResolvedExecToolConfig,
     runtime: Option<InvocationRuntimeState>,
   ) -> Self {
     Self {
@@ -379,6 +405,7 @@ impl RegistryToolRuntime {
       spec,
       approval_policy,
       sandbox_policy,
+      exec_config,
       runtime,
     }
   }
@@ -407,17 +434,32 @@ impl Approvable<ToolCall> for RegistryToolRuntime {
 
     // 1:1 codex: for shell tool, parse the actual command and route through
     // eval_exec_approval() for command safety classification.
-    if req.tool_name == "shell"
-      && let Some(command_str) = req.args.get("command").and_then(|v| v.as_str())
-    {
-      let shell = default_user_shell();
-      let argv = shell.derive_exec_args(command_str, true);
-      return Some(eval_exec_approval(
-        &argv,
-        &self.sandbox_policy,
-        self.approval_policy.clone(),
-        SandboxPermissions::UseDefault,
-      ));
+    if let Some(exec_tool_name) = canonical_exec_tool_name(&req.tool_name) {
+      if exec_tool_name == SHELL_TOOL_NAME
+        && let Some(command_str) = req.args.get("command").and_then(|v| v.as_str())
+      {
+        let shell = default_user_shell();
+        let argv = shell.derive_exec_args(command_str, true);
+        return Some(eval_exec_approval(
+          &argv,
+          &self.sandbox_policy,
+          self.approval_policy.clone(),
+          SandboxPermissions::UseDefault,
+        ));
+      }
+
+      if exec_tool_name == UNIFIED_EXEC_TOOL_NAME
+        && let Ok(params) = serde_json::from_value::<ShellToolCallParams>(req.args.clone())
+      {
+        return Some(eval_exec_approval(
+          &params.command,
+          &self.sandbox_policy,
+          self.approval_policy.clone(),
+          params
+            .sandbox_permissions
+            .unwrap_or(SandboxPermissions::UseDefault),
+        ));
+      }
     }
 
     match self.approval_policy {
@@ -436,18 +478,9 @@ impl Approvable<ToolCall> for RegistryToolRuntime {
   }
 
   async fn start_approval_async(&mut self, req: &ToolCall, ctx: ApprovalCtx<'_>) -> ReviewDecision {
-    // 1:1 codex: for shell tool, pass the actual command string so
-    // approval prompt shows "$ pwd" instead of "$ shell".
-    let display_command = if req.tool_name == "shell" {
-      req
-        .args
-        .get("command")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&req.tool_name)
-        .to_string()
-    } else {
-      req.tool_name.clone()
-    };
+    let display_command = canonical_exec_tool_name(&req.tool_name)
+      .and_then(|exec_tool_name| exec_display_command(req, exec_tool_name))
+      .unwrap_or_else(|| req.tool_name.clone());
 
     // 1:1 codex: always block until the user responds (no auto-approve hack).
     ctx
@@ -497,11 +530,15 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
     attempt: &SandboxAttempt<'_>,
     ctx: &ToolCtx<'_>,
   ) -> Result<ToolOutput, ToolError> {
-    if matches!(
-      req.tool_name.as_str(),
-      "shell" | "container.exec" | "local_shell" | "unified_exec"
-    ) {
-      return run_shell_tool_call(req, self.approval_policy.clone(), attempt, ctx).await;
+    if canonical_exec_tool_name(&req.tool_name).is_some() {
+      return run_shell_tool_call(
+        req,
+        self.approval_policy.clone(),
+        attempt,
+        ctx,
+        self.exec_config,
+      )
+      .await;
     }
 
     // 1:1 codex: thread session-level cwd into ToolInvocation so handlers
@@ -576,6 +613,7 @@ async fn run_shell_tool_call(
   approval_policy: AskForApproval,
   attempt: &SandboxAttempt<'_>,
   ctx: &ToolCtx<'_>,
+  exec_config: ResolvedExecToolConfig,
 ) -> Result<ToolOutput, ToolError> {
   let shell = ctx.session.user_shell().await;
   let mut runtime = ShellRuntime::new(shell, approval_policy);
@@ -614,23 +652,47 @@ async fn run_shell_tool_call(
 
       let args = serde_json::from_value::<ShellArgs>(req.args.clone())
         .map_err(|err| ToolError::Execution(format!("invalid shell arguments: {err}")))?;
-      let shell_req = ShellCommandRequest {
-        command: args.command,
-        cwd: args
-          .workdir
-          .as_deref()
-          .map(PathBuf::from)
-          .unwrap_or_else(|| ctx.turn.cwd.clone()),
-        timeout_ms: args.timeout_ms,
-        env: Default::default(),
-        justification: args.justification,
-        prefix_rule: args.prefix_rule,
-        sandbox_permissions: args
-          .sandbox_permissions
-          .unwrap_or(SandboxPermissions::UseDefault),
-        additional_permissions: args.additional_permissions,
-      };
-      runtime.run(&shell_req, attempt, ctx).await?
+      let cwd = args
+        .workdir
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ctx.turn.cwd.clone());
+      let sandbox_permissions = args
+        .sandbox_permissions
+        .unwrap_or(SandboxPermissions::UseDefault);
+
+      if canonical_exec_tool_name(&req.tool_name) == Some(SHELL_TOOL_NAME)
+        && exec_config.backend == ResolvedExecBackend::UnifiedExec
+      {
+        let argv = ctx
+          .session
+          .user_shell()
+          .await
+          .derive_exec_args(&args.command, true);
+        let shell_req = ShellRequest {
+          command: argv,
+          cwd,
+          timeout_ms: args.timeout_ms,
+          env: Default::default(),
+          justification: args.justification,
+          prefix_rule: args.prefix_rule,
+          sandbox_permissions,
+          additional_permissions: args.additional_permissions,
+        };
+        runtime.run(&shell_req, attempt, ctx).await?
+      } else {
+        let shell_req = ShellCommandRequest {
+          command: args.command,
+          cwd,
+          timeout_ms: args.timeout_ms,
+          env: Default::default(),
+          justification: args.justification,
+          prefix_rule: args.prefix_rule,
+          sandbox_permissions,
+          additional_permissions: args.additional_permissions,
+        };
+        runtime.run(&shell_req, attempt, ctx).await?
+      }
     }
     ToolPayload::Mcp { .. } | ToolPayload::Custom { .. } => {
       return Err(ToolError::Execution(format!(
@@ -659,10 +721,8 @@ fn invocation_payload_for_call(call: &ToolCall) -> ToolPayload {
     };
   }
 
-  if matches!(
-    call.tool_name.as_str(),
-    "local_shell" | "unified_exec" | "container.exec"
-  ) && let Ok(params) = serde_json::from_value::<ShellToolCallParams>(call.args.clone())
+  if canonical_exec_tool_name(&call.tool_name) == Some(UNIFIED_EXEC_TOOL_NAME)
+    && let Ok(params) = serde_json::from_value::<ShellToolCallParams>(call.args.clone())
   {
     return ToolPayload::LocalShell { params };
   }
@@ -686,6 +746,29 @@ fn map_tool_error(err: ToolError) -> FunctionCallError {
     ToolError::Rejected(message) => FunctionCallError::PermissionDenied(message),
     ToolError::SandboxDenied { output, .. } => FunctionCallError::Execution(output),
     ToolError::Execution(message) => FunctionCallError::Execution(message),
+  }
+}
+
+fn exec_display_command(call: &ToolCall, exec_tool_name: &str) -> Option<String> {
+  match exec_tool_name {
+    SHELL_TOOL_NAME => call
+      .args
+      .get("command")
+      .and_then(Value::as_str)
+      .map(ToString::to_string),
+    UNIFIED_EXEC_TOOL_NAME => call
+      .args
+      .get("command")
+      .and_then(Value::as_array)
+      .map(|argv| {
+        argv
+          .iter()
+          .filter_map(Value::as_str)
+          .collect::<Vec<_>>()
+          .join(" ")
+      })
+      .filter(|command| !command.is_empty()),
+    _ => None,
   }
 }
 

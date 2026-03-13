@@ -316,15 +316,15 @@ impl ChatWidget {
   }
 
   /// Returns true when there is an active exploring group in the viewport
-  /// (i.e. `active_exec_cell` holds an `ExecCell` with `exploring_since`
-  /// set). Used to drive continuous spinner animation frames.
+  /// with at least one unfinished explore call. Used to drive continuous
+  /// spinner animation frames only while the group is actually exploring.
   pub(crate) fn has_live_exploring_cell(&self) -> bool {
     self
       .transcript
       .active_exec_cell
       .as_ref()
       .and_then(|cell| cell.as_any().downcast_ref::<crate::exec_cell::ExecCell>())
-      .is_some_and(|cell: &crate::exec_cell::ExecCell| cell.exploring_since.is_some())
+      .is_some_and(|cell| cell.is_exploring_cell() && cell.is_active())
   }
 
   fn refresh_streaming_agent_preview(&mut self) {
@@ -383,12 +383,20 @@ impl ChatWidget {
   }
 
   fn current_exec_status_snapshot(&self) -> Option<StatusSnapshot> {
-    let active_exec_call = self
+    let active_exec_cell = self
       .transcript
       .active_exec_cell
       .as_ref()
-      .and_then(|cell| cell.as_any().downcast_ref::<crate::exec_cell::ExecCell>())
-      .and_then(crate::exec_cell::ExecCell::active_call);
+      .and_then(|cell| cell.as_any().downcast_ref::<crate::exec_cell::ExecCell>());
+
+    // Exploring groups own their own transcript-local status. Keep the bottom
+    // pane on the global Working surface instead of swapping it to a per-tool
+    // "Running ..." label for read/list/search activity.
+    if active_exec_cell.is_some_and(crate::exec_cell::ExecCell::is_exploring_cell) {
+      return None;
+    }
+
+    let active_exec_call = active_exec_cell.and_then(crate::exec_cell::ExecCell::active_call);
 
     active_exec_call.map(|call| {
       StatusSnapshot::new(
@@ -649,25 +657,34 @@ impl ChatWidget {
   }
 
   fn as_renderable(&self) -> RenderableItem<'_> {
-    let mut flex = FlexRenderable::new();
+    let mut live_content = FlexRenderable::new();
+    let has_exploring_exec = self
+      .transcript
+      .active_exec_cell
+      .as_ref()
+      .and_then(|cell| cell.as_any().downcast_ref::<crate::exec_cell::ExecCell>())
+      .is_some_and(crate::exec_cell::ExecCell::is_exploring_cell);
     if let Some(cell) = &self.transcript.active_agent_preview {
-      flex.push(
-        0,
+      live_content.push(
+        if has_exploring_exec { 1 } else { 0 },
         RenderableItem::Borrowed(cell as &dyn Renderable).inset(Insets::tlbr(1, 0, 0, 0)),
       );
     }
     if let Some(cell) = &self.transcript.active_exec_cell {
-      flex.push(
-        1,
+      live_content.push(
+        if has_exploring_exec { 0 } else { 1 },
         RenderableItem::Borrowed(cell as &dyn Renderable).inset(Insets::tlbr(1, 0, 0, 0)),
       );
     }
-    flex.push(
+
+    let mut outer = FlexRenderable::new();
+    outer.push(1, RenderableItem::Owned(Box::new(live_content)));
+    outer.push(
       0,
       RenderableItem::Borrowed(&self.bottom_pane as &dyn Renderable)
         .inset(Insets::tlbr(1, 0, 0, 0)),
     );
-    RenderableItem::Owned(Box::new(flex))
+    RenderableItem::Owned(Box::new(outer))
   }
 
   pub(crate) fn render_alt_screen(
@@ -737,5 +754,69 @@ impl Renderable for ChatWidget {
 
   fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
     self.as_renderable().cursor_pos(area)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::app_event_sender::AppEventSender;
+  use crate::exec_cell::new_active_exec_command;
+  use crate::history_cell::AgentMessageCell;
+  use ratatui::Terminal;
+  use ratatui::backend::TestBackend;
+  use tokio::sync::mpsc::unbounded_channel;
+
+  fn render_chat_widget(widget: &ChatWidget, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    terminal
+      .draw(|f| widget.render(f.area(), f.buffer_mut()))
+      .expect("draw");
+    format!("{}", terminal.backend())
+  }
+
+  #[test]
+  fn inline_render_keeps_exploring_header_visible_with_agent_preview() {
+    let (tx, _rx) = unbounded_channel();
+    let sender = AppEventSender::new(tx);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::ScrollbackFirst,
+    );
+    widget.set_agent_turn_running(true);
+    widget.transcript.active_agent_preview = Some(Box::new(AgentMessageCell::new(
+      vec![
+        Line::from("我已经定位到核心实现都在 core/src/agent 和 core/src/tools/handlers。"),
+        Line::from("接着读这些关键文件，整理输出功能边界和典型工作流。"),
+      ],
+      true,
+    )));
+    widget.transcript.active_exec_cell = Some(Box::new(new_active_exec_command(
+      "call-1".to_string(),
+      "search_tool".to_string(),
+      "handle_mcp_command list_tools new_streamable_http_client new_stdio_client McpServerTransportConfig required enabled tool_timeout include_tools exclude_tools".to_string(),
+      std::path::PathBuf::from("/tmp/project"),
+      false,
+    )));
+
+    let rendered = render_chat_widget(&widget, 80, 10);
+    assert!(
+      rendered.contains("Exploring"),
+      "expected exploring header to remain visible: {rendered}"
+    );
+    assert!(
+      rendered.contains("Search handle_mcp_command"),
+      "expected latest explore summary to remain visible: {rendered}"
+    );
+    assert!(
+      rendered.contains("Working"),
+      "expected bottom working row to remain visible: {rendered}"
+    );
+    assert!(
+      rendered.contains("Type @ to mention files"),
+      "expected composer placeholder to remain visible: {rendered}"
+    );
   }
 }

@@ -271,8 +271,8 @@ mod tests {
       .bottom_pane
       .status_widget()
       .expect("status should remain visible while turn is active");
-    assert_eq!(status.header(), "Running list_dir");
-    assert_eq!(status.details(), Some("List_dir"));
+    assert_eq!(status.header(), "Working");
+    assert_eq!(status.details(), None);
   }
 
   #[test]
@@ -318,7 +318,7 @@ mod tests {
       .bottom_pane
       .status_widget()
       .expect("status should stay visible while exec runs");
-    assert_eq!(status.header(), "Running read_file");
+    assert_eq!(status.header(), "Investigating rendering code");
 
     widget.handle_exec_end_now(&end_event("call-1"));
 
@@ -328,6 +328,20 @@ mod tests {
       .expect("status should remain visible while turn is active");
     assert_eq!(status.header(), "Investigating rendering code");
     assert_eq!(status.details(), None);
+  }
+
+  #[test]
+  fn non_exploring_exec_still_uses_running_status() {
+    let mut widget = make_widget();
+
+    widget.handle_exec_begin_now(&begin_event("call-1", "shell", "ls -la"));
+
+    let status = widget
+      .bottom_pane
+      .status_widget()
+      .expect("status should stay visible while exec runs");
+    assert_eq!(status.header(), "Running shell");
+    assert_eq!(status.details(), Some("Ls -la"));
   }
 
   #[test]
@@ -357,13 +371,11 @@ mod tests {
       .map(Line::to_string)
       .collect::<Vec<_>>()
       .join("\n");
-    // While the cell lives in active_exec_cell (turn still in progress) it
-    // always shows "Exploring" with a spinner, regardless of whether
-    // individual calls are finished. It becomes "Explored" only after
-    // flush_active_cell() at turn end.
+    // Once the final explore call completes, the grouped cell should flip to
+    // "Explored" immediately even if it still lives in active_exec_cell.
     assert!(
-      rendered.contains("Exploring"),
-      "expected Exploring while cell is live: {rendered}"
+      rendered.contains("Explored"),
+      "expected Explored after the last explore call completes: {rendered}"
     );
     assert!(rendered.contains("List cokra-rs"));
     assert!(rendered.contains("Read PROJECT_STRUCTURE.md"));
@@ -395,10 +407,10 @@ mod tests {
       .map(Line::to_string)
       .collect::<Vec<_>>()
       .join("\n");
-    // Same as above: live cell always shows "Exploring" until flushed.
+    // Same here: idle grouped code-search cells should render as "Explored".
     assert!(
-      rendered.contains("Exploring"),
-      "expected Exploring while cell is live: {rendered}"
+      rendered.contains("Explored"),
+      "expected Explored after the last code_search call completes: {rendered}"
     );
     assert!(rendered.contains("Search agentteams"));
     assert!(rendered.contains("Search spawn_agent"));
