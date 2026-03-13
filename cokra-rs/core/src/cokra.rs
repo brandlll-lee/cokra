@@ -465,6 +465,14 @@ impl Cokra {
   }
 }
 
+impl Drop for Cokra {
+  fn drop(&mut self) {
+    if let Some(thread_id) = self.thread_id() {
+      clear_team_runtime(thread_id);
+    }
+  }
+}
+
 async fn resolve_or_persist_root_thread_id(config: &Arc<Config>) -> anyhow::Result<ThreadId> {
   let state_db = StateDb::new(StateDb::default_path_for(&config.cwd)).await?;
   let store_key = config.cwd.display().to_string();
@@ -1005,6 +1013,7 @@ mod tests {
   use super::Cokra;
   use super::map_sandbox_policy;
   use super::resolve_model_id;
+  use crate::agent::team_runtime::runtime_for_thread;
   use crate::model::ChatRequest;
   use crate::model::ChatResponse;
   use crate::model::Choice;
@@ -2526,6 +2535,31 @@ mod tests {
     assert!(snapshot.tasks.is_empty());
     let unread_total: usize = snapshot.unread_counts.values().copied().sum();
     assert_eq!(unread_total, 0);
+  }
+
+  #[tokio::test]
+  async fn test_drop_clears_team_runtime_registration() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "mock".to_string();
+    config.models.model = "mock/default".to_string();
+    config.approval.policy = ApprovalMode::Auto;
+    config.cwd = tmpdir.path().to_path_buf();
+
+    let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
+      .await
+      .expect("create cokra");
+    let thread_id = cokra
+      .thread_id()
+      .cloned()
+      .expect("root thread id should exist");
+    assert!(runtime_for_thread(&thread_id.to_string()).is_some());
+
+    drop(cokra);
+
+    assert!(runtime_for_thread(&thread_id.to_string()).is_none());
   }
 
   #[tokio::test]

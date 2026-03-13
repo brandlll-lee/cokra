@@ -21,6 +21,7 @@ use cokra_config::ExecBackend;
 use cokra_config::ExecPublicSurface;
 
 use crate::mcp::McpConnectionManager;
+use crate::skills::loader::build_skill_tool_description;
 use crate::tools::catalog::ToolCatalog;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
@@ -43,6 +44,13 @@ pub enum ResolvedExecBackend {
 pub struct ResolvedExecToolConfig {
   pub public_surface: &'static str,
   pub backend: ResolvedExecBackend,
+}
+
+pub struct DefaultToolingBundle {
+  pub registry: Arc<ToolRegistry>,
+  pub router: Arc<ToolRouter>,
+  pub tool_catalog: Arc<ToolCatalog>,
+  pub mcp_manager: Arc<McpConnectionManager>,
 }
 
 pub fn canonical_exec_tool_name(name: &str) -> Option<&'static str> {
@@ -107,26 +115,36 @@ fn model_prefers_apply_patch(config: &Config) -> bool {
 pub async fn build_default_tools(
   config: &Config,
 ) -> anyhow::Result<(Arc<ToolRegistry>, Arc<ToolRouter>)> {
-  build_default_tools_with_cwd(config, &std::env::current_dir().unwrap_or_default()).await
+  let bundle =
+    build_default_tooling_with_cwd(config, &std::env::current_dir().unwrap_or_default()).await?;
+  Ok((bundle.registry, bundle.router))
 }
 
-/// 内部实现，接收显式 cwd 供测试使用。
+/// Internal variant that accepts an explicit cwd for tests and generators.
 pub async fn build_default_tools_with_cwd(
   config: &Config,
   cwd: &std::path::Path,
 ) -> anyhow::Result<(Arc<ToolRegistry>, Arc<ToolRouter>)> {
+  let bundle = build_default_tooling_with_cwd(config, cwd).await?;
+  Ok((bundle.registry, bundle.router))
+}
+
+pub async fn build_default_tooling_with_cwd(
+  config: &Config,
+  cwd: &std::path::Path,
+) -> anyhow::Result<DefaultToolingBundle> {
   let mut registry = ToolRegistry::new();
   let mcp_manager = Arc::new(McpConnectionManager::new(&config.mcp).await?);
   let exec_config = resolve_exec_tool_config(config);
 
-  // 1:1 opencode SkillTool: 动态扫描 skills 并将可用列表注入工具描述。
-  // 必须在注册 build_specs() 之前完成，因为 build_specs() 包含静态 skill_tool()，
-  // 我们用动态版本覆盖它。
-  let skill_description = handlers::skill::build_skill_description(cwd).await;
+  // Mirrors OpenCode's skill-tool pattern: compute the cwd-aware skill
+  // description before registering specs so the synthetic `skill` entry reflects
+  // the prompt assets actually available in this workspace.
+  let skill_description = build_skill_tool_description(cwd).await;
 
   for spec in build_specs() {
     if spec.name == "skill" {
-      // 用动态描述版本替换静态 spec
+      // Override the static skill spec with the dynamically generated description.
       registry.register_spec(skill_tool_with_description(&skill_description));
     } else {
       registry.register_spec(spec);
@@ -138,7 +156,7 @@ pub async fn build_default_tools_with_cwd(
 
   register_default_aliases(&mut registry);
 
-  handlers::register_builtin_handlers(&mut registry, mcp_manager);
+  handlers::register_builtin_handlers(&mut registry, Arc::clone(&mcp_manager));
 
   // Model-based tool selection: GPT-codex models prefer apply_patch,
   // all other models prefer edit_file + write_file.
@@ -154,16 +172,14 @@ pub async fn build_default_tools_with_cwd(
     registry.exclude_tool(SHELL_TOOL_NAME);
   }
 
-  let catalog = Arc::new(ToolCatalog::from_registry(&registry, &config.mcp));
+  let tool_catalog = Arc::new(ToolCatalog::from_registry(&registry, &config.mcp));
   registry.register_handler(
     "search_tool",
-    Arc::new(handlers::dynamic::DynamicToolHandler::new(Arc::clone(
-      &catalog,
-    ))),
+    Arc::new(handlers::dynamic::DynamicToolHandler::new(Arc::clone(&tool_catalog))),
   );
   registry.register_handler(
     "inspect_tool",
-    Arc::new(handlers::inspect_tool::InspectToolHandler::new(catalog)),
+    Arc::new(handlers::inspect_tool::InspectToolHandler::new(Arc::clone(&tool_catalog))),
   );
 
   let registry = Arc::new(registry);
@@ -177,7 +193,12 @@ pub async fn build_default_tools_with_cwd(
     exec_config,
   ));
 
-  Ok((registry, router))
+  Ok(DefaultToolingBundle {
+    registry,
+    router,
+    tool_catalog,
+    mcp_manager,
+  })
 }
 
 #[cfg(test)]

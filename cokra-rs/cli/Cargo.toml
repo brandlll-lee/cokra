@@ -35,3 +35,6 @@ crossterm = { workspace = true, optional = true }
 [features]
 default = []
 tui = ["ratatui", "crossterm", "cokra-core/tui"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

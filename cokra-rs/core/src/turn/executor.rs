@@ -14,6 +14,8 @@ use uuid::Uuid;
 use crate::model::Message as ModelMessage;
 use crate::model::ModelClient;
 use crate::session::Session;
+use crate::skills::injection::build_explicit_prompt_injections;
+use crate::skills::injection::render_explicit_prompt_injections;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
 use crate::truncate::DEFAULT_TOOL_OUTPUT_TOKENS;
@@ -32,6 +34,12 @@ use super::response_items::ResponseItem;
 use super::sse_executor::SseTurnExecutor;
 
 type Event = cokra_protocol::EventMsg;
+
+#[derive(Debug, Clone)]
+struct PromptAssembly {
+  prefix_messages: Vec<ModelMessage>,
+  messages: Vec<ModelMessage>,
+}
 
 /// Turn executor errors
 #[derive(Debug, thiserror::Error)]
@@ -176,7 +184,8 @@ impl TurnExecutor {
       }))
       .await?;
 
-    let messages = self.build_messages(input.clone()).await?;
+    let prompt = self.build_messages(&input).await?;
+    let messages = prompt.messages.clone();
 
     let user_message = ModelMessage::User(input.content.clone());
     self.session.append_message(user_message.clone()).await;
@@ -192,7 +201,8 @@ impl TurnExecutor {
       self.tx_event.clone(),
       self.config.clone(),
       self.cancellation_token.child_token(),
-    );
+    )
+    .with_prompt_prefix(prompt.prefix_messages);
 
     let output = match sse_executor
       .run_sse_interaction(messages, thread_id.clone(), turn_id.clone())
@@ -249,23 +259,25 @@ impl TurnExecutor {
     Ok(output)
   }
 
-  async fn build_messages(&self, input: UserInput) -> Result<Vec<ModelMessage>, TurnError> {
-    let mut messages = Vec::new();
-
+  async fn build_messages(&self, input: &UserInput) -> Result<PromptAssembly, TurnError> {
+    let mut prefix_messages = Vec::new();
     if let Some(system) = &self.config.system_prompt {
-      messages.push(ModelMessage::System(system.clone()));
+      prefix_messages.push(ModelMessage::System(system.clone()));
     }
 
-    // 1:1 codex: inject environment_context so the model knows the cwd
-    // and uses absolute paths for file tools (read_file, write_file, list_dir).
     let env_context = format!(
       "<environment_context>\n  <cwd>{}</cwd>\n</environment_context>",
       self.config.cwd.display()
     );
-    messages.push(ModelMessage::User(env_context));
+    prefix_messages.push(ModelMessage::User(env_context));
 
     if let Some(ctx) = self.build_auto_context(&input.content).await? {
-      messages.push(ModelMessage::User(ctx));
+      prefix_messages.push(ModelMessage::User(ctx));
+    }
+
+    let explicit_injections = build_explicit_prompt_injections(&self.config.cwd, &input.content).await;
+    if let Some(rendered) = render_explicit_prompt_injections(&explicit_injections) {
+      prefix_messages.push(ModelMessage::User(rendered));
     }
 
     let history = if let Some(limit) = self.config.context_window_limit {
@@ -273,10 +285,14 @@ impl TurnExecutor {
     } else {
       self.session.get_history(100).await
     };
+    let mut messages = prefix_messages.clone();
     messages.extend(history);
-    messages.push(ModelMessage::User(input.content));
+    messages.push(ModelMessage::User(input.content.clone()));
 
-    Ok(messages)
+    Ok(PromptAssembly {
+      prefix_messages,
+      messages,
+    })
   }
 
   async fn build_auto_context(&self, content: &str) -> Result<Option<String>, TurnError> {
@@ -638,14 +654,14 @@ mod tests {
       cfg,
     );
 
-    let messages = executor
-      .build_messages(UserInput {
+    let prompt = executor
+      .build_messages(&UserInput {
         content: "Where is ToolRegistry registered?".to_string(),
         attachments: Vec::new(),
       })
       .await?;
 
-    let ctx = messages.iter().filter_map(|msg| match msg {
+    let ctx = prompt.messages.iter().filter_map(|msg| match msg {
       crate::model::Message::User(text) if text.contains("<auto_context>") => Some(text),
       _ => None,
     });
@@ -653,6 +669,59 @@ mod tests {
     let rendered = ctx.map(String::as_str).collect::<Vec<_>>().join("\n");
     assert!(rendered.contains("ToolRegistry"));
     assert!(rendered.contains(&target.display().to_string()));
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn build_messages_includes_explicit_skill_injections() -> anyhow::Result<()> {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+    let skill_dir = root.join(".cokra").join("skills").join("rust-expert");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+      skill_dir.join("SKILL.md"),
+      "---\nname: rust-expert\ndescription: Rust specialist\n---\n\nPrefer ownership-safe refactors.",
+    )
+    .expect("write skill");
+
+    let model_client = build_client(OrderedProvider::new(vec![vec![ResponseEvent::EndTurn]])).await;
+    let tool_registry = Arc::new(ToolRegistry::new());
+    let tool_router = build_router(tool_registry.clone());
+    let session = Arc::new(Session::new());
+    let (tx_event, _rx_event) = mpsc::channel(64);
+
+    let mut cfg = test_config();
+    cfg.cwd = root.to_path_buf();
+
+    let executor = TurnExecutor::new(
+      model_client,
+      tool_registry,
+      tool_router,
+      session,
+      tx_event,
+      cfg,
+    );
+
+    let prompt = executor
+      .build_messages(&UserInput {
+        content: "Use $rust-expert for this change.".to_string(),
+        attachments: Vec::new(),
+      })
+      .await?;
+
+    let rendered = prompt
+      .messages
+      .iter()
+      .filter_map(|msg| match msg {
+        crate::model::Message::User(text) if text.contains("<explicit_injections>") => Some(text),
+        _ => None,
+      })
+      .map(String::as_str)
+      .collect::<Vec<_>>()
+      .join("\n");
+
+    assert!(rendered.contains("rust-expert"));
+    assert!(rendered.contains("Prefer ownership-safe refactors."));
     Ok(())
   }
 

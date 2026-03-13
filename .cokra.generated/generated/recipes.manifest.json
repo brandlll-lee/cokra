@@ -1,0 +1,93 @@
+{
+  "generated_at": 1773397466,
+  "recipes": [
+    {
+      "name": "capability-overview",
+      "title": "Capability Overview",
+      "description": "Inventory the currently registered capabilities, adapters, and workflow surfaces before deciding what to execute.",
+      "category": "inventory",
+      "workflow_sequence": [
+        "plan"
+      ],
+      "required_capabilities": [
+        "inspect_tool",
+        "mcp__tavily__tavily_search",
+        "search_tool",
+        "list_mcp_resource_templates",
+        "list_mcp_resources",
+        "mcp__tavily__tavily_crawl",
+        "mcp__tavily__tavily_extract",
+        "mcp__tavily__tavily_map"
+      ],
+      "expected_artifacts": [
+        "capability_inventory",
+        "adapter_summary"
+      ],
+      "completion_checks": [
+        "List callable tools separately from resources and resource templates.",
+        "Call out which capabilities mutate state or require approval."
+      ],
+      "prompt_prelude": "Start from the capability catalog instead of repo documentation. Read resources first, then decide whether any callable tool is actually needed."
+    },
+    {
+      "name": "claim_next_team_task",
+      "title": "Claim Next Team Task",
+      "description": "Claim the next available team workflow task assigned to you or unassigned.",
+      "category": "coordination",
+      "workflow_sequence": [
+        "claim_next_team_task"
+      ],
+      "required_capabilities": [
+        "claim_next_team_task",
+        "create_team_task",
+        "mcp__tavily__tavily_research",
+        "skill",
+        "claim_team_task",
+        "todo_write",
+        "approve_team_plan",
+        "assign_team_task"
+      ],
+      "expected_artifacts": [
+        "claimed_task",
+        "workflow_resume_token"
+      ],
+      "completion_checks": [
+        "Persist the workflow run state after each meaningful step.",
+        "Verify approval state before mutating shared state.",
+        "Confirm which thread or agent owns the claimed task."
+      ],
+      "caution": "This workflow can mutate shared state. Confirm approvals before making irreversible changes.",
+      "prompt_prelude": "Use `claim_next_team_task` as the primary workflow anchor. Confirm the required capabilities are available before execution, and persist workflow state after each significant step."
+    },
+    {
+      "name": "plan",
+      "title": "Plan",
+      "description": "Emit a plan item and persist it into workflow state.",
+      "category": "planning",
+      "workflow_sequence": [
+        "plan"
+      ],
+      "required_capabilities": [
+        "plan",
+        "approve_team_plan",
+        "claim_team_task",
+        "close_agent",
+        "skill",
+        "spawn_agent",
+        "submit_team_plan",
+        "team_status"
+      ],
+      "expected_artifacts": [
+        "plan_text",
+        "workflow_resume_token"
+      ],
+      "completion_checks": [
+        "Persist the workflow run state after each meaningful step.",
+        "Verify approval state before mutating shared state.",
+        "Ensure the recorded plan is concrete enough for execution or review."
+      ],
+      "caution": "This workflow can mutate shared state. Confirm approvals before making irreversible changes.",
+      "prompt_prelude": "Use `plan` as the primary workflow anchor. Confirm the required capabilities are available before execution, and persist workflow state after each significant step."
+    }
+  ]
+}

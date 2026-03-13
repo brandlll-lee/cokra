@@ -51,6 +51,8 @@ pub struct TeamTask {
   pub details: Option<String>,
   pub status: TeamTaskStatus,
   pub assignee_thread_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub workflow_run_id: Option<String>,
   pub created_at: i64,
   pub updated_at: i64,
   pub notes: Vec<String>,
@@ -96,6 +98,8 @@ pub struct TeamSnapshot {
   pub tasks: Vec<TeamTask>,
   pub plans: Vec<TeamPlan>,
   pub unread_counts: HashMap<String, usize>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub workflow: Option<WorkflowRuntimeSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -116,8 +120,107 @@ pub struct TeamPlan {
   pub requires_approval: bool,
   pub reviewer_thread_id: Option<String>,
   pub review_note: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub workflow_run_id: Option<String>,
   pub created_at: i64,
   pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum WorkflowRunStatus {
+  #[default]
+  Pending,
+  Active,
+  WaitingApproval,
+  Completed,
+  Failed,
+  Canceled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum WorkflowStepStatus {
+  #[default]
+  Pending,
+  InProgress,
+  Completed,
+  Blocked,
+  Failed,
+  Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum WorkflowApprovalStatus {
+  #[default]
+  NotRequested,
+  Pending,
+  Approved,
+  Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WorkflowApprovalState {
+  #[serde(default)]
+  pub status: WorkflowApprovalStatus,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub requested_by_thread_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub reviewer_thread_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub note: Option<String>,
+  #[serde(default)]
+  pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowStepState {
+  pub id: String,
+  pub title: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub details: Option<String>,
+  #[serde(default)]
+  pub status: WorkflowStepStatus,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub assigned_thread_id: Option<String>,
+  pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowArtifact {
+  pub id: String,
+  pub kind: String,
+  pub label: String,
+  pub content: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub created_by_thread_id: Option<String>,
+  pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowRun {
+  pub id: String,
+  pub workflow_name: String,
+  pub title: String,
+  pub owner_thread_id: String,
+  pub status: WorkflowRunStatus,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub resume_token: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub current_step_id: Option<String>,
+  #[serde(default)]
+  pub steps: Vec<WorkflowStepState>,
+  #[serde(default)]
+  pub artifacts: Vec<WorkflowArtifact>,
+  #[serde(default)]
+  pub approval: WorkflowApprovalState,
+  pub created_at: i64,
+  pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WorkflowRuntimeSnapshot {
+  pub root_thread_id: String,
+  #[serde(default)]
+  pub runs: Vec<WorkflowRun>,
 }
 
 /// Token usage tracking

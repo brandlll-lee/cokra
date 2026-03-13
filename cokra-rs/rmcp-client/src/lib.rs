@@ -15,8 +15,12 @@ use rmcp::model::ClientRequest;
 use rmcp::model::Extensions;
 use rmcp::model::InitializeRequestParams;
 use rmcp::model::InitializeResult;
+use rmcp::model::ListResourceTemplatesResult;
+use rmcp::model::ListResourcesResult;
 use rmcp::model::ListToolsResult;
 use rmcp::model::PaginatedRequestParams;
+use rmcp::model::ReadResourceRequestParams;
+use rmcp::model::ReadResourceResult;
 use rmcp::model::ServerResult;
 use rmcp::service;
 use rmcp::service::RoleClient;
@@ -200,6 +204,54 @@ impl RmcpClient {
       Some(duration) => time::timeout(duration, fut)
         .await
         .map_err(|_| anyhow!("tools/list timed out after {duration:?}"))??,
+      None => fut.await?,
+    })
+  }
+
+  pub async fn list_resources(
+    &self,
+    params: Option<PaginatedRequestParams>,
+    timeout: Option<Duration>,
+  ) -> Result<ListResourcesResult> {
+    let service = self.service().await?;
+    let fut = service.list_resources(params);
+    Ok(match timeout {
+      Some(duration) => time::timeout(duration, fut)
+        .await
+        .map_err(|_| anyhow!("resources/list timed out after {duration:?}"))??,
+      None => fut.await?,
+    })
+  }
+
+  pub async fn list_resource_templates(
+    &self,
+    params: Option<PaginatedRequestParams>,
+    timeout: Option<Duration>,
+  ) -> Result<ListResourceTemplatesResult> {
+    let service = self.service().await?;
+    let fut = service.list_resource_templates(params);
+    Ok(match timeout {
+      Some(duration) => time::timeout(duration, fut)
+        .await
+        .map_err(|_| anyhow!("resources/templates/list timed out after {duration:?}"))??,
+      None => fut.await?,
+    })
+  }
+
+  pub async fn read_resource(
+    &self,
+    uri: impl Into<String>,
+    timeout: Option<Duration>,
+  ) -> Result<ReadResourceResult> {
+    let service = self.service().await?;
+    let fut = service.read_resource(ReadResourceRequestParams {
+      meta: None,
+      uri: uri.into(),
+    });
+    Ok(match timeout {
+      Some(duration) => time::timeout(duration, fut)
+        .await
+        .map_err(|_| anyhow!("resources/read timed out after {duration:?}"))??,
       None => fut.await?,
     })
   }

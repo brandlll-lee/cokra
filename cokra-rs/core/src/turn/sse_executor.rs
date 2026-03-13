@@ -53,6 +53,7 @@ pub struct SseTurnExecutor {
   tx_event: mpsc::Sender<EventMsg>,
   config: TurnConfig,
   cancellation_token: CancellationToken,
+  prompt_prefix: Vec<ModelMessage>,
 }
 
 impl SseTurnExecutor {
@@ -92,7 +93,13 @@ impl SseTurnExecutor {
       tx_event,
       config,
       cancellation_token,
+      prompt_prefix: Vec::new(),
     }
+  }
+
+  pub fn with_prompt_prefix(mut self, prompt_prefix: Vec<ModelMessage>) -> Self {
+    self.prompt_prefix = prompt_prefix;
+    self
   }
 
   async fn try_run_sampling_request(
@@ -246,10 +253,15 @@ impl SseTurnExecutor {
 
     self.session.compact_history_to_token_target(limit).await;
 
-    let mut rebuilt = Vec::new();
-    if let Some(system) = &self.config.system_prompt {
-      rebuilt.push(ModelMessage::System(system.clone()));
-    }
+    let mut rebuilt = if self.prompt_prefix.is_empty() {
+      let mut messages = Vec::new();
+      if let Some(system) = &self.config.system_prompt {
+        messages.push(ModelMessage::System(system.clone()));
+      }
+      messages
+    } else {
+      self.prompt_prefix.clone()
+    };
 
     if let Some(context_limit) = self.config.context_window_limit {
       rebuilt.extend(self.session.get_history_for_prompt(context_limit).await);

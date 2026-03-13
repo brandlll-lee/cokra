@@ -11,6 +11,7 @@ pub mod prompts;
 pub mod sandbox_manager;
 pub mod session;
 pub mod shell;
+pub mod skills;
 pub mod thread_manager;
 pub mod tools;
 pub mod truncate;

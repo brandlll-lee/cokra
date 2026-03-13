@@ -16,9 +16,12 @@ pub mod grep_files;
 pub mod handoff_team_task;
 pub mod inspect_tool;
 pub mod list_dir;
+pub mod list_mcp_resource_templates;
+pub mod list_mcp_resources;
 pub mod mcp;
 pub mod plan;
 pub mod read_file;
+pub mod read_mcp_resource;
 pub mod read_many_files;
 pub mod read_team_messages;
 pub mod request_user_input;
@@ -54,6 +57,24 @@ pub fn register_builtin_handlers(
   registry.register_handler("read_file", Arc::new(read_file::ReadFileHandler));
   registry.register_handler("write_file", Arc::new(write_file::WriteFileHandler));
   registry.register_handler("list_dir", Arc::new(list_dir::ListDirHandler));
+  registry.register_handler(
+    "list_mcp_resources",
+    Arc::new(list_mcp_resources::ListMcpResourcesHandler::new(Arc::clone(
+      &mcp_manager,
+    ))),
+  );
+  registry.register_handler(
+    "list_mcp_resource_templates",
+    Arc::new(
+      list_mcp_resource_templates::ListMcpResourceTemplatesHandler::new(Arc::clone(&mcp_manager)),
+    ),
+  );
+  registry.register_handler(
+    "read_mcp_resource",
+    Arc::new(read_mcp_resource::ReadMcpResourceHandler::new(Arc::clone(
+      &mcp_manager,
+    ))),
+  );
   registry.register_handler("grep_files", Arc::new(grep_files::GrepFilesHandler));
   registry.register_handler("code_search", Arc::new(code_search::CodeSearchHandler));
   for tool_name in mcp_manager.tool_names() {

@@ -21,6 +21,10 @@ use cokra_protocol::TeamSnapshot;
 use cokra_protocol::TeamTask;
 use cokra_protocol::TeamTaskStatus;
 use cokra_protocol::ThreadId;
+use cokra_protocol::WorkflowRun;
+use cokra_protocol::WorkflowRuntimeSnapshot;
+use cokra_protocol::WorkflowRunStatus;
+use cokra_protocol::WorkflowStepStatus;
 use cokra_state::StateDb;
 
 use crate::agent::AgentControl;
@@ -33,6 +37,8 @@ use crate::tools::build_default_tools;
 
 use super::Guards;
 use super::team_state::TeamState;
+use self::workflow_support::WorkflowState;
+use self::workflow_support::WorkflowStepSpec;
 
 const CHILD_COMMAND_CHANNEL_CAPACITY: usize = 32;
 const CHILD_EVENT_CHANNEL_CAPACITY: usize = 512;
@@ -98,7 +104,9 @@ impl ManagedAgentHandle {
 
 pub(crate) struct TeamRuntime {
   root_thread_id: ThreadId,
-  store_key: String,
+  legacy_store_key: String,
+  team_store_key: String,
+  workflow_store_key: String,
   config: Arc<Config>,
   model_client: Arc<ModelClient>,
   agent_control: Arc<AgentControl>,
@@ -107,6 +115,7 @@ pub(crate) struct TeamRuntime {
   root_tx_event: mpsc::Sender<EventMsg>,
   handles: Mutex<HashMap<String, Arc<ManagedAgentHandle>>>,
   team_state: Mutex<TeamState>,
+  workflow_state: Mutex<WorkflowState>,
   state_db: Arc<StateDb>,
 }
 
@@ -126,11 +135,16 @@ pub(crate) async fn register_team_runtime(
   root_thread_id: ThreadId,
 ) -> anyhow::Result<()> {
   let state_db = Arc::new(StateDb::new(StateDb::default_path_for(&config.cwd)).await?);
-  let store_key = config.cwd.display().to_string();
-  let persisted = state_db.load_json::<TeamState>(&store_key).await?;
+  let legacy_store_key = config.cwd.display().to_string();
+  let team_store_key = scoped_store_key("team", &legacy_store_key);
+  let workflow_store_key = scoped_store_key("workflow", &legacy_store_key);
+  let persisted = load_persisted_state::<TeamState>(&state_db, &team_store_key, Some(&legacy_store_key)).await?;
+  let workflow = load_persisted_state::<WorkflowState>(&state_db, &workflow_store_key, None).await?;
   let runtime = Arc::new(TeamRuntime {
     root_thread_id: root_thread_id.clone(),
-    store_key,
+    legacy_store_key,
+    team_store_key,
+    workflow_store_key,
     config,
     model_client,
     agent_control,
@@ -139,6 +153,7 @@ pub(crate) async fn register_team_runtime(
     root_tx_event,
     handles: Mutex::new(HashMap::new()),
     team_state: Mutex::new(persisted.unwrap_or_default()),
+    workflow_state: Mutex::new(workflow.unwrap_or_default()),
     state_db,
   });
 
@@ -148,6 +163,28 @@ pub(crate) async fn register_team_runtime(
   runtimes.retain(|item| item.root_thread_id != root_thread_id);
   runtimes.push(runtime);
   Ok(())
+}
+
+fn scoped_store_key(scope: &str, base_key: &str) -> String {
+  format!("{scope}::{base_key}")
+}
+
+async fn load_persisted_state<T>(
+  state_db: &StateDb,
+  primary_key: &str,
+  legacy_key: Option<&str>,
+) -> anyhow::Result<Option<T>>
+where
+  T: serde::de::DeserializeOwned,
+{
+  if let Some(value) = state_db.load_json(primary_key).await? {
+    return Ok(Some(value));
+  }
+  if let Some(legacy_key) = legacy_key {
+    let value = state_db.load_json(legacy_key).await?;
+    return Ok(value);
+  }
+  Ok(None)
 }
 
 pub(crate) fn clear_team_runtime(root_thread_id: &ThreadId) {
@@ -210,7 +247,100 @@ impl TeamRuntime {
       .team_state
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .snapshot(self.root_thread_id.to_string(), threads, statuses)
+      .snapshot(
+        self.root_thread_id.to_string(),
+        threads,
+        statuses,
+        Some(self.workflow_snapshot()),
+      )
+  }
+
+  pub(crate) fn workflow_snapshot(&self) -> WorkflowRuntimeSnapshot {
+    self
+      .workflow_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .snapshot(self.root_thread_id.to_string())
+  }
+
+  pub(crate) async fn record_plan_artifact(
+    &self,
+    thread_id: String,
+    text: String,
+  ) -> WorkflowRun {
+    let run = self
+      .workflow_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .record_ad_hoc_plan(thread_id, text);
+    self.persist_workflow_state().await;
+    run
+  }
+
+  pub(crate) async fn start_workflow_run(
+    &self,
+    owner_thread_id: String,
+    workflow_name: String,
+    title: String,
+    steps: Vec<WorkflowStepSpec>,
+  ) -> WorkflowRun {
+    let run = self
+      .workflow_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .create_run(owner_thread_id, workflow_name, title, &steps);
+    self.persist_workflow_state().await;
+    run
+  }
+
+  pub(crate) async fn update_workflow_step(
+    &self,
+    run_id: &str,
+    step_id: &str,
+    status: WorkflowStepStatus,
+    assigned_thread_id: Option<String>,
+    details: Option<String>,
+  ) -> Option<WorkflowRun> {
+    let run = self
+      .workflow_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .update_step(run_id, step_id, status, assigned_thread_id, details);
+    self.persist_workflow_state().await;
+    run
+  }
+
+  pub(crate) async fn append_workflow_artifact(
+    &self,
+    run_id: &str,
+    kind: impl Into<String>,
+    label: impl Into<String>,
+    content: impl Into<String>,
+    created_by_thread_id: Option<String>,
+  ) -> Option<WorkflowRun> {
+    let run = self
+      .workflow_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .append_artifact(run_id, kind, label, content, created_by_thread_id);
+    self.persist_workflow_state().await;
+    run
+  }
+
+  pub(crate) async fn set_workflow_run_status(
+    &self,
+    run_id: &str,
+    status: WorkflowRunStatus,
+    current_step_id: Option<String>,
+    resume_token: Option<String>,
+  ) -> Option<WorkflowRun> {
+    let run = self
+      .workflow_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .set_run_status(run_id, status, current_step_id, resume_token);
+    self.persist_workflow_state().await;
+    run
   }
 
   pub(crate) async fn create_task(
@@ -218,13 +348,21 @@ impl TeamRuntime {
     title: String,
     details: Option<String>,
     assignee_thread_id: Option<String>,
+    workflow_run_id: Option<String>,
   ) -> TeamTask {
     let task = self
       .team_state
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .create_task(title, details, assignee_thread_id);
-    self.persist_state().await;
+      .create_task(title, details, assignee_thread_id.clone(), workflow_run_id);
+    if let Some(assignee_thread_id) = assignee_thread_id.as_deref() {
+      self
+        .workflow_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .note_task_claim(&task, assignee_thread_id);
+    }
+    self.persist_states().await;
     task
   }
 
@@ -235,12 +373,28 @@ impl TeamRuntime {
     steps: Vec<String>,
     requires_approval: bool,
   ) -> TeamPlan {
+    let workflow_run = self
+      .workflow_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .create_run_for_team_plan(
+        author_thread_id.clone(),
+        summary.clone(),
+        &steps,
+        requires_approval,
+      );
     let plan = self
       .team_state
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .submit_plan(author_thread_id, summary, steps, requires_approval);
-    self.persist_state().await;
+      .submit_plan(
+        author_thread_id,
+        summary,
+        steps,
+        requires_approval,
+        Some(workflow_run.id.clone()),
+      );
+    self.persist_states().await;
     plan
   }
 
@@ -251,21 +405,38 @@ impl TeamRuntime {
     approved: bool,
     note: Option<String>,
   ) -> Option<TeamPlan> {
-    let plan = self
-      .team_state
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .decide_plan(plan_id, reviewer_thread_id, approved, note);
-    self.persist_state().await;
+    let plan = {
+      self
+        .team_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .decide_plan(plan_id, reviewer_thread_id, approved, note)
+    };
+    if let Some(plan) = &plan {
+      self
+        .workflow_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .sync_plan_decision(plan);
+    }
+    self.persist_states().await;
     plan
   }
 
   pub(crate) fn requires_plan_approval(&self, thread_id: &str) -> bool {
-    self
+    let team_requires = self
       .team_state
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .requires_plan_approval(thread_id)
+      .requires_plan_approval(thread_id);
+    if team_requires {
+      return true;
+    }
+    self
+      .workflow_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .requires_approval(thread_id)
   }
 
   pub(crate) async fn update_task(
@@ -280,7 +451,16 @@ impl TeamRuntime {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .update_task(task_id, status, assignee_thread_id, note);
-    self.persist_state().await;
+    if let Some(task) = &task
+      && let Some(assignee_thread_id) = task.assignee_thread_id.as_deref()
+    {
+      self
+        .workflow_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .note_task_claim(task, assignee_thread_id);
+    }
+    self.persist_states().await;
     task
   }
 
@@ -295,7 +475,16 @@ impl TeamRuntime {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .assign_task(task_id, assignee_thread_id, note);
-    self.persist_state().await;
+    if let Some(task) = &task
+      && let Some(assignee_thread_id) = task.assignee_thread_id.as_deref()
+    {
+      self
+        .workflow_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .note_task_claim(task, assignee_thread_id);
+    }
+    self.persist_states().await;
     task
   }
 
@@ -311,7 +500,16 @@ impl TeamRuntime {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .handoff_task(task_id, to_thread_id, note, review_mode);
-    self.persist_state().await;
+    if let Some(task) = &task
+      && let Some(assignee_thread_id) = task.assignee_thread_id.as_deref()
+    {
+      self
+        .workflow_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .note_task_claim(task, assignee_thread_id);
+    }
+    self.persist_states().await;
     task
   }
 
@@ -321,7 +519,14 @@ impl TeamRuntime {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .claim_next_task(claimer_thread_id);
-    self.persist_state().await;
+    if let Some(task) = &task {
+      self
+        .workflow_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .note_task_claim(task, claimer_thread_id);
+    }
+    self.persist_states().await;
     task
   }
 
@@ -344,7 +549,7 @@ impl TeamRuntime {
         route_key,
         message,
       );
-    self.persist_state().await;
+    self.persist_team_state().await;
     message
   }
 
@@ -358,7 +563,7 @@ impl TeamRuntime {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .read_messages(reader_thread_id, unread_only);
-    self.persist_state().await;
+    self.persist_team_state().await;
     messages
   }
 
@@ -373,7 +578,7 @@ impl TeamRuntime {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .claim_queue_messages(claimer_thread_id, queue_name, limit);
-    self.persist_state().await;
+    self.persist_team_state().await;
     messages
   }
 
@@ -383,7 +588,14 @@ impl TeamRuntime {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .clear();
-    let _ = self.state_db.delete(&self.store_key).await;
+    self
+      .workflow_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clear();
+    let _ = self.state_db.delete(&self.team_store_key).await;
+    let _ = self.state_db.delete(&self.workflow_store_key).await;
+    let _ = self.state_db.delete(&self.legacy_store_key).await;
   }
 
   pub(crate) fn thread_depth(&self, thread_id: &str) -> Option<usize> {
@@ -551,13 +763,30 @@ impl TeamRuntime {
       .cloned()
   }
 
-  async fn persist_state(&self) {
+  async fn persist_team_state(&self) {
     let snapshot = self
       .team_state
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .clone();
-    let _ = self.state_db.save_json(&self.store_key, &snapshot).await;
+    let _ = self.state_db.save_json(&self.team_store_key, &snapshot).await;
+  }
+
+  async fn persist_workflow_state(&self) {
+    let snapshot = self
+      .workflow_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone();
+    let _ = self
+      .state_db
+      .save_json(&self.workflow_store_key, &snapshot)
+      .await;
+  }
+
+  async fn persist_states(&self) {
+    self.persist_team_state().await;
+    self.persist_workflow_state().await;
   }
 
   pub(crate) async fn notify_exec_approval(
@@ -754,4 +983,467 @@ fn build_spawned_agent_system_prompt(base: &str, nickname: Option<&str>, role: &
 /// Prompt text lives in `src/prompts/agent_leader.md`.
 pub(crate) fn build_leader_agent_teams_prompt_suffix() -> &'static str {
   crate::prompts::AGENT_LEADER_SUFFIX
+}
+
+#[allow(dead_code)]
+mod workflow_support {
+  use std::collections::HashMap;
+
+  use chrono::Utc;
+  use serde::Deserialize;
+  use serde::Serialize;
+  use uuid::Uuid;
+
+  use cokra_protocol::TeamPlan;
+  use cokra_protocol::TeamPlanStatus;
+  use cokra_protocol::TeamTask;
+  use cokra_protocol::WorkflowApprovalState;
+  use cokra_protocol::WorkflowApprovalStatus;
+  use cokra_protocol::WorkflowArtifact;
+  use cokra_protocol::WorkflowRun;
+  use cokra_protocol::WorkflowRunStatus;
+  use cokra_protocol::WorkflowRuntimeSnapshot;
+  use cokra_protocol::WorkflowStepState;
+  use cokra_protocol::WorkflowStepStatus;
+
+  const AD_HOC_PLAN_WORKFLOW: &str = "ad_hoc_plan";
+  const TEAM_PLAN_WORKFLOW: &str = "team_plan";
+
+  #[derive(Debug, Clone)]
+  pub(crate) struct WorkflowStepSpec {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) details: Option<String>,
+  }
+
+  #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+  pub(crate) struct WorkflowState {
+    #[serde(default)]
+    runs: HashMap<String, WorkflowRun>,
+  }
+
+  impl WorkflowState {
+    pub(crate) fn snapshot(&self, root_thread_id: String) -> WorkflowRuntimeSnapshot {
+      let mut runs = self.runs.values().cloned().collect::<Vec<_>>();
+      runs.sort_by(|left, right| {
+        left
+          .created_at
+          .cmp(&right.created_at)
+          .then_with(|| left.id.cmp(&right.id))
+      });
+      WorkflowRuntimeSnapshot {
+        root_thread_id,
+        runs,
+      }
+    }
+
+    pub(crate) fn requires_approval(&self, thread_id: &str) -> bool {
+      self
+        .runs
+        .values()
+        .filter(|run| run.owner_thread_id == thread_id)
+        .any(|run| {
+          matches!(
+            run.approval.status,
+            WorkflowApprovalStatus::Pending | WorkflowApprovalStatus::Rejected
+          )
+        })
+    }
+
+    pub(crate) fn record_ad_hoc_plan(
+      &mut self,
+      owner_thread_id: String,
+      text: String,
+    ) -> WorkflowRun {
+      let run_id = self
+        .find_latest_open_run(&owner_thread_id, AD_HOC_PLAN_WORKFLOW)
+        .unwrap_or_else(|| {
+          let now = Utc::now().timestamp();
+          let run = WorkflowRun {
+            id: Uuid::new_v4().to_string(),
+            workflow_name: AD_HOC_PLAN_WORKFLOW.to_string(),
+            title: "Ad hoc plan".to_string(),
+            owner_thread_id: owner_thread_id.clone(),
+            status: WorkflowRunStatus::Active,
+            resume_token: None,
+            current_step_id: None,
+            steps: Vec::new(),
+            artifacts: Vec::new(),
+            approval: WorkflowApprovalState::default(),
+            created_at: now,
+            updated_at: now,
+          };
+          let run_id = run.id.clone();
+          self.runs.insert(run_id.clone(), run);
+          run_id
+        });
+
+      let now = Utc::now().timestamp();
+      let run = self.runs.get_mut(&run_id).expect("workflow run exists");
+      let step_id = "plan".to_string();
+      upsert_step(
+        &mut run.steps,
+        WorkflowStepState {
+          id: step_id.clone(),
+          title: "Capture plan".to_string(),
+          details: Some("Record an ad hoc plan item emitted by the agent.".to_string()),
+          status: WorkflowStepStatus::Completed,
+          assigned_thread_id: Some(owner_thread_id.clone()),
+          updated_at: now,
+        },
+      );
+      run.status = WorkflowRunStatus::Active;
+      run.current_step_id = Some(step_id);
+      run.resume_token = Some(format!("workflow://{}/{}", owner_thread_id, run.id));
+      run.updated_at = now;
+      run.artifacts.push(WorkflowArtifact {
+        id: Uuid::new_v4().to_string(),
+        kind: "plan_text".to_string(),
+        label: humanize_artifact_label(&text, "Plan item"),
+        content: text,
+        created_by_thread_id: Some(owner_thread_id),
+        created_at: now,
+      });
+      run.clone()
+    }
+
+    pub(crate) fn create_run(
+      &mut self,
+      owner_thread_id: String,
+      workflow_name: String,
+      title: String,
+      steps: &[WorkflowStepSpec],
+    ) -> WorkflowRun {
+      let now = Utc::now().timestamp();
+      let run_id = Uuid::new_v4().to_string();
+      let workflow_steps = steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| WorkflowStepState {
+          id: step.id.clone(),
+          title: step.title.clone(),
+          details: step.details.clone(),
+          status: if index == 0 {
+            WorkflowStepStatus::InProgress
+          } else {
+            WorkflowStepStatus::Pending
+          },
+          assigned_thread_id: Some(owner_thread_id.clone()),
+          updated_at: now,
+        })
+        .collect::<Vec<_>>();
+      let run = WorkflowRun {
+        id: run_id.clone(),
+        workflow_name,
+        title,
+        owner_thread_id: owner_thread_id.clone(),
+        status: WorkflowRunStatus::Active,
+        resume_token: Some(format!("workflow://{owner_thread_id}/{run_id}")),
+        current_step_id: workflow_steps.first().map(|step| step.id.clone()),
+        steps: workflow_steps,
+        artifacts: Vec::new(),
+        approval: WorkflowApprovalState {
+          status: WorkflowApprovalStatus::Approved,
+          requested_by_thread_id: None,
+          reviewer_thread_id: None,
+          note: None,
+          updated_at: now,
+        },
+        created_at: now,
+        updated_at: now,
+      };
+      self.runs.insert(run_id, run.clone());
+      run
+    }
+
+    pub(crate) fn create_run_for_team_plan(
+      &mut self,
+      author_thread_id: String,
+      summary: String,
+      steps: &[String],
+      requires_approval: bool,
+    ) -> WorkflowRun {
+      let now = Utc::now().timestamp();
+      let run_id = Uuid::new_v4().to_string();
+      let workflow_steps = steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| WorkflowStepState {
+          id: format!("step-{}", index + 1),
+          title: step.clone(),
+          details: None,
+          status: if index == 0 && !requires_approval {
+            WorkflowStepStatus::InProgress
+          } else if requires_approval {
+            WorkflowStepStatus::Blocked
+          } else {
+            WorkflowStepStatus::Pending
+          },
+          assigned_thread_id: Some(author_thread_id.clone()),
+          updated_at: now,
+        })
+        .collect::<Vec<_>>();
+      let approval = WorkflowApprovalState {
+        status: if requires_approval {
+          WorkflowApprovalStatus::Pending
+        } else {
+          WorkflowApprovalStatus::Approved
+        },
+        requested_by_thread_id: requires_approval.then_some(author_thread_id.clone()),
+        reviewer_thread_id: None,
+        note: None,
+        updated_at: now,
+      };
+      let run = WorkflowRun {
+        id: run_id.clone(),
+        workflow_name: TEAM_PLAN_WORKFLOW.to_string(),
+        title: summary.clone(),
+        owner_thread_id: author_thread_id.clone(),
+        status: if requires_approval {
+          WorkflowRunStatus::WaitingApproval
+        } else {
+          WorkflowRunStatus::Active
+        },
+        resume_token: Some(format!("workflow://{author_thread_id}/{run_id}")),
+        current_step_id: workflow_steps.first().map(|step| step.id.clone()),
+        steps: workflow_steps,
+        artifacts: vec![WorkflowArtifact {
+          id: Uuid::new_v4().to_string(),
+          kind: "team_plan_summary".to_string(),
+          label: humanize_artifact_label(&summary, "Team plan"),
+          content: summary,
+          created_by_thread_id: Some(author_thread_id),
+          created_at: now,
+        }],
+        approval,
+        created_at: now,
+        updated_at: now,
+      };
+      self.runs.insert(run_id, run.clone());
+      run
+    }
+
+    pub(crate) fn sync_plan_decision(&mut self, plan: &TeamPlan) -> Option<WorkflowRun> {
+      let workflow_run_id = plan.workflow_run_id.as_deref()?;
+      let run = self.runs.get_mut(workflow_run_id)?;
+      let now = Utc::now().timestamp();
+      run.approval.status = match plan.status {
+        TeamPlanStatus::Approved => WorkflowApprovalStatus::Approved,
+        TeamPlanStatus::Rejected => WorkflowApprovalStatus::Rejected,
+        TeamPlanStatus::PendingApproval => WorkflowApprovalStatus::Pending,
+        TeamPlanStatus::Draft => WorkflowApprovalStatus::NotRequested,
+      };
+      run.approval.reviewer_thread_id = plan.reviewer_thread_id.clone();
+      run.approval.note = plan.review_note.clone();
+      run.approval.updated_at = now;
+      run.status = match plan.status {
+        TeamPlanStatus::Approved => WorkflowRunStatus::Active,
+        TeamPlanStatus::Rejected => WorkflowRunStatus::Failed,
+        TeamPlanStatus::PendingApproval => WorkflowRunStatus::WaitingApproval,
+        TeamPlanStatus::Draft => WorkflowRunStatus::Pending,
+      };
+      if matches!(plan.status, TeamPlanStatus::Approved) {
+        if let Some(first) = run.steps.first_mut() {
+          first.status = WorkflowStepStatus::InProgress;
+          first.updated_at = now;
+          run.current_step_id = Some(first.id.clone());
+        }
+      } else if matches!(plan.status, TeamPlanStatus::Rejected) {
+        for step in &mut run.steps {
+          if !matches!(
+            step.status,
+            WorkflowStepStatus::Completed | WorkflowStepStatus::Skipped
+          ) {
+            step.status = WorkflowStepStatus::Blocked;
+            step.updated_at = now;
+          }
+        }
+      }
+      run.updated_at = now;
+      Some(run.clone())
+    }
+
+    pub(crate) fn update_step(
+      &mut self,
+      run_id: &str,
+      step_id: &str,
+      status: WorkflowStepStatus,
+      assigned_thread_id: Option<String>,
+      details: Option<String>,
+    ) -> Option<WorkflowRun> {
+      let run = self.runs.get_mut(run_id)?;
+      let now = Utc::now().timestamp();
+      let step = run.steps.iter_mut().find(|step| step.id == step_id)?;
+      step.status = status;
+      if let Some(assigned_thread_id) = assigned_thread_id {
+        step.assigned_thread_id = Some(assigned_thread_id);
+      }
+      if let Some(details) = details {
+        step.details = Some(details);
+      }
+      step.updated_at = now;
+      run.current_step_id = Some(step.id.clone());
+      run.updated_at = now;
+      Some(run.clone())
+    }
+
+    pub(crate) fn append_artifact(
+      &mut self,
+      run_id: &str,
+      kind: impl Into<String>,
+      label: impl Into<String>,
+      content: impl Into<String>,
+      created_by_thread_id: Option<String>,
+    ) -> Option<WorkflowRun> {
+      let run = self.runs.get_mut(run_id)?;
+      let now = Utc::now().timestamp();
+      run.artifacts.push(WorkflowArtifact {
+        id: Uuid::new_v4().to_string(),
+        kind: kind.into(),
+        label: label.into(),
+        content: content.into(),
+        created_by_thread_id,
+        created_at: now,
+      });
+      run.updated_at = now;
+      Some(run.clone())
+    }
+
+    pub(crate) fn set_run_status(
+      &mut self,
+      run_id: &str,
+      status: WorkflowRunStatus,
+      current_step_id: Option<String>,
+      resume_token: Option<String>,
+    ) -> Option<WorkflowRun> {
+      let run = self.runs.get_mut(run_id)?;
+      let now = Utc::now().timestamp();
+      run.status = status;
+      if let Some(current_step_id) = current_step_id {
+        run.current_step_id = Some(current_step_id);
+      }
+      if let Some(resume_token) = resume_token {
+        run.resume_token = Some(resume_token);
+      }
+      run.updated_at = now;
+      Some(run.clone())
+    }
+
+    pub(crate) fn note_task_claim(
+      &mut self,
+      task: &TeamTask,
+      claimer_thread_id: &str,
+    ) -> Option<WorkflowRun> {
+      let workflow_run_id = task.workflow_run_id.as_deref()?;
+      let run = self.runs.get_mut(workflow_run_id)?;
+      let now = Utc::now().timestamp();
+      run.owner_thread_id = claimer_thread_id.to_string();
+      run.resume_token = Some(format!("workflow://task/{}/{}", task.id, claimer_thread_id));
+      run.status = WorkflowRunStatus::Active;
+      run.updated_at = now;
+      if let Some(current_step_id) = run.current_step_id.clone()
+        && let Some(step) = run.steps.iter_mut().find(|step| step.id == current_step_id)
+      {
+        step.assigned_thread_id = Some(claimer_thread_id.to_string());
+        if matches!(step.status, WorkflowStepStatus::Pending | WorkflowStepStatus::Blocked) {
+          step.status = WorkflowStepStatus::InProgress;
+        }
+        step.updated_at = now;
+      }
+      Some(run.clone())
+    }
+
+    pub(crate) fn clear(&mut self) {
+      self.runs.clear();
+    }
+
+    fn find_latest_open_run(&self, owner_thread_id: &str, workflow_name: &str) -> Option<String> {
+      self
+        .runs
+        .values()
+        .filter(|run| {
+          run.owner_thread_id == owner_thread_id
+            && run.workflow_name == workflow_name
+            && !matches!(
+              run.status,
+              WorkflowRunStatus::Completed
+                | WorkflowRunStatus::Failed
+                | WorkflowRunStatus::Canceled
+            )
+        })
+        .max_by_key(|run| run.updated_at)
+        .map(|run| run.id.clone())
+    }
+  }
+
+  fn upsert_step(steps: &mut Vec<WorkflowStepState>, next: WorkflowStepState) {
+    if let Some(existing) = steps.iter_mut().find(|step| step.id == next.id) {
+      *existing = next;
+    } else {
+      steps.push(next);
+    }
+  }
+
+  fn humanize_artifact_label(text: &str, fallback: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+      return fallback.to_string();
+    }
+    let mut label = trimmed.lines().next().unwrap_or(trimmed).trim().to_string();
+    if label.len() > 48 {
+      label.truncate(45);
+      label.push_str("...");
+    }
+    label
+  }
+
+  #[cfg(test)]
+  mod tests {
+    use super::*;
+
+    #[test]
+    fn team_plan_workflow_requires_approval_until_reviewed() {
+      let mut state = WorkflowState::default();
+      let run = state.create_run_for_team_plan(
+        "root".to_string(),
+        "Review deploy plan".to_string(),
+        &["Inspect release".to_string(), "Deploy".to_string()],
+        true,
+      );
+
+      assert!(state.requires_approval("root"));
+      assert_eq!(run.approval.status, WorkflowApprovalStatus::Pending);
+      assert_eq!(run.status, WorkflowRunStatus::WaitingApproval);
+    }
+
+    #[test]
+    fn sync_plan_decision_promotes_first_step_after_approval() {
+      let mut state = WorkflowState::default();
+      let run = state.create_run_for_team_plan(
+        "root".to_string(),
+        "Review deploy plan".to_string(),
+        &["Inspect release".to_string(), "Deploy".to_string()],
+        true,
+      );
+      let plan = TeamPlan {
+        id: "plan-1".to_string(),
+        author_thread_id: "root".to_string(),
+        summary: "Review deploy plan".to_string(),
+        steps: vec!["Inspect release".to_string(), "Deploy".to_string()],
+        status: TeamPlanStatus::Approved,
+        requires_approval: true,
+        reviewer_thread_id: Some("reviewer".to_string()),
+        review_note: Some("Looks good".to_string()),
+        workflow_run_id: Some(run.id.clone()),
+        created_at: 0,
+        updated_at: 0,
+      };
+
+      let updated = state.sync_plan_decision(&plan).expect("run");
+      assert_eq!(updated.approval.status, WorkflowApprovalStatus::Approved);
+      assert_eq!(updated.status, WorkflowRunStatus::Active);
+      assert_eq!(updated.steps[0].status, WorkflowStepStatus::InProgress);
+      assert!(!state.requires_approval("root"));
+    }
+  }
 }

@@ -15,6 +15,7 @@ use cokra_protocol::TeamPlanStatus;
 use cokra_protocol::TeamSnapshot;
 use cokra_protocol::TeamTask;
 use cokra_protocol::TeamTaskStatus;
+use cokra_protocol::WorkflowRuntimeSnapshot;
 
 use crate::thread_manager::ThreadInfo;
 
@@ -50,6 +51,7 @@ impl TeamState {
     root_thread_id: String,
     threads: Vec<ThreadInfo>,
     statuses: HashMap<String, AgentStatus>,
+    workflow: Option<WorkflowRuntimeSnapshot>,
   ) -> TeamSnapshot {
     let members = threads
       .into_iter()
@@ -84,6 +86,7 @@ impl TeamState {
       tasks,
       plans,
       unread_counts,
+      workflow,
     }
   }
 
@@ -93,6 +96,7 @@ impl TeamState {
     summary: String,
     steps: Vec<String>,
     requires_approval: bool,
+    workflow_run_id: Option<String>,
   ) -> TeamPlan {
     let now = Utc::now().timestamp();
     let plan = TeamPlan {
@@ -108,6 +112,7 @@ impl TeamState {
       requires_approval,
       reviewer_thread_id: None,
       review_note: None,
+      workflow_run_id,
       created_at: now,
       updated_at: now,
     };
@@ -152,6 +157,7 @@ impl TeamState {
     title: String,
     details: Option<String>,
     assignee_thread_id: Option<String>,
+    workflow_run_id: Option<String>,
   ) -> TeamTask {
     let now = Utc::now().timestamp();
     let task = TeamTask {
@@ -160,6 +166,7 @@ impl TeamState {
       details,
       status: TeamTaskStatus::Pending,
       assignee_thread_id,
+      workflow_run_id,
       created_at: now,
       updated_at: now,
       notes: Vec::new(),

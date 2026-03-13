@@ -16,7 +16,6 @@
 //! If no LSP is found for the file type, returns a clear error.
 
 use std::path::Path;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -713,6 +712,7 @@ pub async fn collect_file_diagnostics(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::path::PathBuf;
 
   #[test]
   fn path_to_uri_unix_style() {

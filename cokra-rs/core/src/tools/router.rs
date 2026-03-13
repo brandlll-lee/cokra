@@ -244,6 +244,12 @@ impl ToolRouter {
   }
 
   pub fn tool_supports_parallel(&self, call: &ToolCall) -> bool {
+    if let Some(spec) = self.registry.get_spec(&call.tool_name) {
+      if !spec.supports_parallel || spec.mutates_state {
+        return false;
+      }
+    }
+
     let invocation = ToolInvocation {
       id: call.call_id.clone(),
       name: call.tool_name.clone(),
@@ -256,7 +262,7 @@ impl ToolRouter {
     };
     match self.registry.is_mutating(&invocation) {
       Ok(is_mutating) => !is_mutating,
-      Err(_) => false,
+      Err(_) => true,
     }
   }
 
@@ -358,6 +364,17 @@ pub(crate) fn summarize_tool_display_command(call: &ToolCall, cwd: &Path) -> Opt
       .get("name")
       .and_then(Value::as_str)
       .map(ToString::to_string),
+    "list_mcp_resources" | "list_mcp_resource_templates" => call
+      .args
+      .get("server")
+      .and_then(Value::as_str)
+      .map(ToString::to_string)
+      .or_else(|| Some("all_servers".to_string())),
+    "read_mcp_resource" => {
+      let server = call.args.get("server").and_then(Value::as_str)?;
+      let uri = call.args.get("uri").and_then(Value::as_str)?;
+      Some(format!("{server}::{uri}"))
+    }
     "code_search" => call
       .args
       .get("query")
@@ -558,7 +575,12 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
       }),
     };
 
-    let is_mutating = self.registry.is_mutating(&invocation).unwrap_or(false);
+    let declared_mutates_state = self
+      .spec
+      .as_ref()
+      .map(|spec| spec.mutates_state)
+      .unwrap_or(false);
+    let is_mutating = declared_mutates_state || self.registry.is_mutating(&invocation).unwrap_or(false);
     if is_mutating
       && let Some(runtime) = &invocation.runtime
       && let Some(team_runtime) = runtime_for_thread(&runtime.thread_id)

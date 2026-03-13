@@ -5,7 +5,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::tools::catalog::ToolCatalog;
-use crate::tools::catalog::ToolCatalogMatch;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -29,24 +28,7 @@ struct SearchArgs {
 struct SearchToolResponse {
   query: String,
   total_matches: usize,
-  results: Vec<SearchToolResult>,
-}
-
-#[derive(Debug, Serialize)]
-struct SearchToolResult {
-  canonical_name: String,
-  aliases: Vec<String>,
-  description: String,
-  input_keys: Vec<String>,
-  source: crate::tools::catalog::ToolCatalogSource,
-  is_mutating: bool,
-  requires_approval: bool,
-  allow_network: bool,
-  allow_fs_write: bool,
-  server_name: Option<String>,
-  remote_tool_name: Option<String>,
-  score: f64,
-  matched_terms: Vec<String>,
+  results: Vec<crate::tools::catalog::ToolCatalogMatch>,
 }
 
 fn default_limit() -> usize {
@@ -90,36 +72,12 @@ impl ToolHandler for DynamicToolHandler {
     let response = SearchToolResponse {
       query: query.to_string(),
       total_matches: results.len(),
-      results: results
-        .into_iter()
-        .map(SearchToolResult::from_match)
-        .collect(),
+      results,
     };
     let content = serde_json::to_string(&response).map_err(|err| {
       FunctionCallError::Fatal(format!("failed to serialize search_tool result: {err}"))
     })?;
     Ok(ToolOutput::success(content).with_id(invocation.id))
-  }
-}
-
-impl SearchToolResult {
-  fn from_match(value: ToolCatalogMatch) -> Self {
-    let permissions = value.entry.permissions.clone();
-    Self {
-      canonical_name: value.entry.canonical_name,
-      aliases: value.entry.aliases,
-      description: value.entry.description,
-      input_keys: value.entry.input_keys,
-      source: value.entry.source,
-      is_mutating: value.entry.is_mutating,
-      requires_approval: permissions.requires_approval,
-      allow_network: permissions.allow_network,
-      allow_fs_write: permissions.allow_fs_write,
-      server_name: value.entry.server_name,
-      remote_tool_name: value.entry.remote_tool_name,
-      score: value.score,
-      matched_terms: value.matched_terms,
-    }
   }
 }
 
@@ -129,13 +87,10 @@ mod tests {
   use std::sync::Arc;
 
   use async_trait::async_trait;
+  use cokra_config::McpConfig;
 
   use super::*;
-  use crate::tools::catalog::ToolCatalog;
-  use crate::tools::context::ToolOutput;
   use crate::tools::context::ToolPayload;
-  use crate::tools::registry::ToolHandler;
-  use crate::tools::registry::ToolKind;
   use crate::tools::registry::ToolRegistry;
   use crate::tools::spec::JsonSchema;
   use crate::tools::spec::ToolHandlerType;
@@ -200,7 +155,7 @@ mod tests {
       Arc::new(DummyHandler),
     );
     registry.register_alias("container.exec", "unified_exec");
-    ToolCatalog::from_registry(&registry, &cokra_config::McpConfig::default())
+    ToolCatalog::from_registry(&registry, &McpConfig::default())
   }
 
   #[tokio::test]
@@ -227,6 +182,6 @@ mod tests {
     let parsed: serde_json::Value =
       serde_json::from_str(&output.text_content()).expect("valid json");
     assert_eq!(parsed["query"], "container exec command");
-    assert_eq!(parsed["results"][0]["canonical_name"], "unified_exec");
+    assert_eq!(parsed["results"][0]["entry"]["canonical_name"], "unified_exec");
   }
 }

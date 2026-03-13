@@ -743,6 +743,7 @@ mod tests {
             details: Some("历史遗留任务".to_string()),
             status: TeamTaskStatus::Pending,
             assignee_thread_id: None,
+            workflow_run_id: None,
             created_at: 1,
             updated_at: 1,
             notes: Vec::new(),
@@ -753,6 +754,7 @@ mod tests {
             details: None,
             status: TeamTaskStatus::InProgress,
             assignee_thread_id: Some("ash-thread".to_string()),
+            workflow_run_id: None,
             created_at: 2,
             updated_at: 2,
             notes: Vec::new(),
@@ -767,6 +769,7 @@ mod tests {
           requires_approval: true,
           reviewer_thread_id: None,
           review_note: None,
+          workflow_run_id: None,
           created_at: 1,
           updated_at: 1,
         }],
@@ -775,6 +778,7 @@ mod tests {
           ("ash-thread".to_string(), 1),
           ("sparrow-thread".to_string(), 0),
         ]),
+        workflow: None,
       },
     });
 

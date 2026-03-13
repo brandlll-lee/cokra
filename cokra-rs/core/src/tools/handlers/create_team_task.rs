@@ -18,6 +18,7 @@ struct CreateTeamTaskArgs {
   title: String,
   details: Option<String>,
   assignee_thread_id: Option<String>,
+  workflow_run_id: Option<String>,
 }
 
 #[async_trait]
@@ -38,7 +39,12 @@ impl ToolHandler for CreateTeamTaskHandler {
       FunctionCallError::Execution("create_team_task runtime is not configured".to_string())
     })?;
     let task = team_runtime
-      .create_task(args.title, args.details, args.assignee_thread_id)
+      .create_task(
+        args.title,
+        args.details,
+        args.assignee_thread_id,
+        args.workflow_run_id,
+      )
       .await;
 
     if let Some(tx_event) = &runtime.tx_event {

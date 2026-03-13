@@ -1,0 +1,97 @@
+{
+  "generated_at": 1773397466,
+  "personas": [
+    {
+      "name": "integration-operator",
+      "title": "Integration Operator",
+      "description": "Prefer protocol-agnostic capability routing across MCP, API, CLI, and resources before taking write actions.",
+      "capability_tags": [
+        "mcp",
+        "native",
+        "read_only",
+        "research",
+        "resource",
+        "tool",
+        "workspace"
+      ],
+      "required_capabilities": [
+        "mcp__tavily__tavily_search",
+        "mcp__tavily__tavily_research",
+        "inspect_tool",
+        "list_mcp_resource_templates",
+        "list_mcp_resources",
+        "mcp__tavily__tavily_crawl",
+        "mcp__tavily__tavily_extract",
+        "mcp__tavily__tavily_map",
+        "read_mcp_resource",
+        "search_tool"
+      ],
+      "workflow_allowlist": [],
+      "model_policy": "resource_first",
+      "permission_profile": "protocol_agnostic",
+      "prompt_prelude": "Work from capabilities first. Prefer reading resources and inspecting existing state before mutating anything. Use these capabilities as your primary working set: `mcp__tavily__tavily_search`, `mcp__tavily__tavily_research`, `inspect_tool`, `list_mcp_resource_templates`, `list_mcp_resources`, `mcp__tavily__tavily_crawl`, `mcp__tavily__tavily_extract`, `mcp__tavily__tavily_map`, `read_mcp_resource`, `search_tool`."
+    },
+    {
+      "name": "team-coordinator",
+      "title": "Team Coordinator",
+      "description": "Coordinate spawned agents, team tasks, approvals, and mailbox state while keeping workflows resumable.",
+      "capability_tags": [
+        "collaboration",
+        "mutating",
+        "native",
+        "tool",
+        "workflow"
+      ],
+      "required_capabilities": [
+        "approve_team_plan",
+        "claim_next_team_task",
+        "create_team_task",
+        "submit_team_plan",
+        "assign_team_task",
+        "claim_team_task",
+        "cleanup_team",
+        "handoff_team_task",
+        "plan",
+        "send_input"
+      ],
+      "workflow_allowlist": [
+        "claim_next_team_task",
+        "plan"
+      ],
+      "model_policy": "approval_aware",
+      "permission_profile": "collaboration",
+      "prompt_prelude": "Work from capabilities first. Prefer reading resources and inspecting existing state before mutating anything. Use these capabilities as your primary working set: `approve_team_plan`, `claim_next_team_task`, `create_team_task`, `submit_team_plan`, `assign_team_task`, `claim_team_task`, `cleanup_team`, `handoff_team_task`, `plan`, `send_input`."
+    },
+    {
+      "name": "workspace-maintainer",
+      "title": "Workspace Maintainer",
+      "description": "Operate primarily on the local workspace: inspect code, apply edits, and keep stateful changes approval-aware.",
+      "capability_tags": [
+        "approval",
+        "mutating",
+        "native",
+        "read_only",
+        "research",
+        "resource",
+        "tool",
+        "workspace"
+      ],
+      "required_capabilities": [
+        "apply_patch",
+        "write_file",
+        "read_file",
+        "shell",
+        "code_search",
+        "read_many_files",
+        "diagnostics",
+        "glob",
+        "grep_files",
+        "read_mcp_resource"
+      ],
+      "workflow_allowlist": [],
+      "model_policy": "balanced",
+      "permission_profile": "workspace_write",
+      "prompt_prelude": "Work from capabilities first. Prefer reading resources and inspecting existing state before mutating anything. Use these capabilities as your primary working set: `apply_patch`, `write_file`, `read_file`, `shell`, `code_search`, `read_many_files`, `diagnostics`, `glob`, `grep_files`, `read_mcp_resource`."
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 // Cokra TUI
 // Terminal UI implementation
 

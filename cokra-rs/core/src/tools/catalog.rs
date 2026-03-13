@@ -12,6 +12,7 @@ use crate::tools::registry::ToolRegistry;
 use crate::tools::spec::JsonSchema;
 use crate::tools::spec::ToolHandlerType;
 use crate::tools::spec::ToolPermissions;
+use crate::tools::spec::ToolSourceKind;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -26,11 +27,15 @@ pub struct ToolCatalogEntry {
   pub aliases: Vec<String>,
   pub description: String,
   pub handler_type: ToolHandlerType,
+  pub source_kind: ToolSourceKind,
   pub permissions: ToolPermissions,
+  pub permission_key: Option<String>,
   pub input_schema: JsonSchema,
   pub input_keys: Vec<String>,
   pub source: ToolCatalogSource,
   pub is_active: bool,
+  pub supports_parallel: bool,
+  pub mutates_state: bool,
   pub is_mutating: bool,
   pub server_name: Option<String>,
   pub remote_tool_name: Option<String>,
@@ -67,10 +72,7 @@ impl ToolCatalog {
 
     for spec in registry.list_specs() {
       let aliases = registry.aliases_for(&spec.name);
-      let source = match spec.handler_type {
-        ToolHandlerType::Function => ToolCatalogSource::Builtin,
-        ToolHandlerType::Mcp => ToolCatalogSource::Mcp,
-      };
+      let source = catalog_source_from_kind(&spec.source_kind);
       let (server_name, remote_tool_name) = match source {
         ToolCatalogSource::Builtin => (None, None),
         ToolCatalogSource::Mcp => mcp_sources
@@ -83,12 +85,16 @@ impl ToolCatalog {
         aliases: aliases.clone(),
         description: spec.description.clone(),
         handler_type: spec.handler_type.clone(),
+        source_kind: spec.source_kind.clone(),
         permissions: spec.permissions.clone(),
+        permission_key: spec.permission_key.clone(),
         input_schema: spec.input_schema.clone(),
         input_keys: collect_input_keys(&spec.input_schema),
         source,
         is_active: !registry.is_excluded(&spec.name),
-        is_mutating: tool_is_mutating(registry, &spec.name),
+        supports_parallel: spec.supports_parallel,
+        mutates_state: spec.mutates_state,
+        is_mutating: spec.mutates_state || tool_is_mutating(registry, &spec.name),
         server_name,
         remote_tool_name,
       };
@@ -208,9 +214,13 @@ fn build_search_text(entry: &ToolCatalogEntry) -> String {
     entry.canonical_name.clone(),
     entry.description.clone(),
     format!("{:?}", entry.handler_type).to_lowercase(),
+    format!("{:?}", entry.source_kind).to_lowercase(),
   ];
   parts.extend(entry.aliases.iter().cloned());
   parts.extend(entry.input_keys.iter().cloned());
+  if let Some(permission_key) = &entry.permission_key {
+    parts.push(permission_key.clone());
+  }
   if let Some(server_name) = &entry.server_name {
     parts.push(server_name.clone());
   }
@@ -264,6 +274,15 @@ fn collect_input_keys(schema: &JsonSchema) -> Vec<String> {
   match schema {
     JsonSchema::Object { properties, .. } => properties.keys().cloned().collect(),
     _ => Vec::new(),
+  }
+}
+
+fn catalog_source_from_kind(source_kind: &ToolSourceKind) -> ToolCatalogSource {
+  match source_kind {
+    ToolSourceKind::Mcp => ToolCatalogSource::Mcp,
+    ToolSourceKind::BuiltinPrimitive
+    | ToolSourceKind::BuiltinCollaboration
+    | ToolSourceKind::BuiltinWorkflow => ToolCatalogSource::Builtin,
   }
 }
 
