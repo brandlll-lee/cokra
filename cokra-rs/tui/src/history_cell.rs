@@ -27,6 +27,7 @@ use crate::exec_cell::new_active_exec_command;
 use crate::render::renderable::Renderable;
 use crate::status_indicator_widget::fmt_elapsed_compact;
 use crate::style::user_message_style;
+use crate::ui_consts::LIVE_PREFIX_COLS;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_lines;
 
@@ -448,15 +449,14 @@ fn fill_user_message_bar_lines_with_gutter(
 
 impl HistoryCell for UserHistoryCell {
   fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    let wrap_width = width
+      .saturating_sub(
+        LIVE_PREFIX_COLS + 1, /* keep a one-column right margin for wrapping */
+      )
+      .max(1);
+
     let style = user_message_style();
     let element_style = style.fg(Color::Cyan);
-    let gutter_style = Style::default()
-      .add_modifier(Modifier::BOLD | Modifier::DIM)
-      .patch(style);
-    let gutter = Span::styled("> ".to_string(), gutter_style);
-    // Claude Code-style submitted messages read best as a filled bar with a `> ` gutter.
-    // Reserve: left pad (1) + gutter (2 cols) + right pad (1).
-    let wrap_width = width.saturating_sub(4).max(1);
 
     let wrapped_remote_images = if self.remote_image_urls.is_empty() {
       None
@@ -499,22 +499,19 @@ impl HistoryCell for UserHistoryCell {
       return Vec::new();
     }
 
-    // Compose: images first, then message text. Both are rendered as filled bars.
-    // Tradeoff: we don't attempt to "box" images differently; we reuse the same
-    // filled bar surface so the UI stays consistent across terminals.
+    // Match Codex's simpler, more robust submitted-message rendering. The
+    // previous full-width filled-bar path looked nice in screenshots, but in
+    // inline scrollback it could corrupt long mixed CJK/ASCII messages because
+    // we padded and re-truncated already wrapped lines before terminal insertion.
     let mut out: Vec<Line<'static>> = Vec::new();
     if let Some(imgs) = wrapped_remote_images {
-      out.extend(fill_user_message_bar_lines_with_gutter(
-        imgs,
-        width,
-        style,
-        gutter.clone(),
-      ));
+      out.extend(prefix_lines(imgs, "  ".into(), "  ".into()));
     }
     if let Some(msg) = wrapped_message {
-      out.extend(fill_user_message_bar_lines_with_gutter(
-        msg, width, style, gutter,
-      ));
+      if !out.is_empty() {
+        out.push(Line::from("").style(style));
+      }
+      out.extend(prefix_lines(msg, "> ".bold().dim(), "  ".into()));
     }
     out
   }
@@ -1048,7 +1045,7 @@ impl TodoUpdateCell {
 }
 
 impl HistoryCell for TodoUpdateCell {
-  fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+  fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
     use cokra_protocol::TodoItemStatus;
 
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -1297,8 +1294,51 @@ mod tests {
     let rendered = lines_to_string(&cell.display_lines(80));
 
     // Even when the terminal background can't be detected, user messages still
-    // render as a Claude Code-style `> ` bar (fallback bg tint is used).
+    // render as a visible `> ` bar.
     assert!(rendered.contains("> boxed inline message"));
+  }
+
+  #[test]
+  fn user_history_cell_preserves_mixed_cjk_and_ascii_message_content() {
+    let cell = UserHistoryCell::from_text(
+      "请只做只读分析，不要修改任何文件，不要运行会写入磁盘的命令，也不要联网。\
+先读取当前 cokra-rs workspace 的 Cargo.toml 和目录结构，告诉我这个 workspace \
+里有哪些主要 crate，再用 5-8 条说明它们各自负责什么。优先使用 read_file、list_dir、grep_files，不要使用 shell."
+        .to_string(),
+    );
+    let rendered = lines_to_string(&cell.display_lines(48));
+
+    assert!(rendered.contains("请只做只读分析"));
+    assert!(rendered.contains("cokra-"));
+    assert!(rendered.contains("workspace"));
+    assert!(rendered.contains("不要联网"));
+    assert!(rendered.contains("read_file"));
+    assert!(!rendered.contains("workspaceworkspace"));
+  }
+
+  #[test]
+  fn user_history_cell_keeps_wrapped_lines_within_viewport_width() {
+    let width = 36;
+    let cell = UserHistoryCell::from_text(
+      "左右分屏（最常用）Ctrl + b 然后 % 屏幕立刻分成左右两个。tmux 配置改完以后，这段中英混排消息也不能再被截断或重排。"
+        .to_string(),
+    );
+    let lines = cell.display_lines(width);
+
+    assert!(!lines.is_empty());
+    assert!(
+      lines.iter().all(|line| line.width() <= width as usize),
+      "rendered lines exceeded viewport width: {:?}",
+      lines
+    );
+    assert!(
+      lines_to_string(&lines)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .starts_with("> "),
+      "submitted user messages should render with a simple visible prefix",
+    );
   }
 
   #[test]

@@ -557,19 +557,28 @@ impl ChatWidget {
               remote_image_urls.push(image_url.clone());
             }
             cokra_protocol::UserInput::LocalImage { path } => {
-              text_parts.push(format!("[local_image] {}", path.display()));
-              byte_offset = text_parts.iter().map(|s| s.len()).sum::<usize>()
-                + text_parts.len().saturating_sub(1);
+              let s = format!("[local_image] {}", path.display());
+              if !text_parts.is_empty() {
+                byte_offset += 1;
+              }
+              byte_offset += s.len();
+              text_parts.push(s);
             }
             cokra_protocol::UserInput::Skill { name, .. } => {
-              text_parts.push(format!("[skill] {name}"));
-              byte_offset = text_parts.iter().map(|s| s.len()).sum::<usize>()
-                + text_parts.len().saturating_sub(1);
+              let s = format!("[skill] {name}");
+              if !text_parts.is_empty() {
+                byte_offset += 1;
+              }
+              byte_offset += s.len();
+              text_parts.push(s);
             }
             cokra_protocol::UserInput::Mention { name, path } => {
-              text_parts.push(format!("[@{name}] {path}"));
-              byte_offset = text_parts.iter().map(|s| s.len()).sum::<usize>()
-                + text_parts.len().saturating_sub(1);
+              let s = format!("[@{name}] {path}");
+              if !text_parts.is_empty() {
+                byte_offset += 1;
+              }
+              byte_offset += s.len();
+              text_parts.push(s);
             }
           }
         }
@@ -815,8 +824,12 @@ mod tests {
       "expected bottom working row to remain visible: {rendered}"
     );
     assert!(
-      rendered.contains("Type @ to mention files"),
-      "expected composer placeholder to remain visible: {rendered}"
+      rendered.contains("? for shortcuts"),
+      "expected composer shortcuts hint to remain visible: {rendered}"
+    );
+    assert!(
+      rendered.contains("/effort"),
+      "expected composer effort hint to remain visible: {rendered}"
     );
   }
 }

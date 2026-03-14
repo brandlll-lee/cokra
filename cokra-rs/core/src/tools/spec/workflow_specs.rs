@@ -10,23 +10,11 @@ use super::obj;
 use super::str_field;
 
 pub(crate) fn build_specs() -> Vec<ToolSpec> {
-  vec![
-    claim_next_team_task_tool(),
-    plan_tool(),
-  ]
+  vec![claim_next_team_task_tool(), plan_tool()]
 }
 
-fn workflow_tool(
-  name: &str,
-  description: impl Into<String>,
-  input_schema: JsonSchema,
-) -> ToolSpec {
-  workflow_tool_with_permissions(
-    name,
-    description,
-    input_schema,
-    default_permissions(),
-  )
+fn workflow_tool(name: &str, description: impl Into<String>, input_schema: JsonSchema) -> ToolSpec {
+  workflow_tool_with_permissions(name, description, input_schema, default_permissions())
 }
 
 fn workflow_tool_with_permissions(
@@ -60,6 +48,10 @@ fn claim_next_team_task_tool() -> ToolSpec {
 fn plan_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
   props.insert("text".to_string(), str_field("Plan text."));
-  workflow_tool("plan", "Emit a plan item and persist it into workflow state.", obj(props, &["text"]))
-    .with_permission_key("plan")
+  workflow_tool(
+    "plan",
+    "Emit a plan item and persist it into workflow state.",
+    obj(props, &["text"]),
+  )
+  .with_permission_key("plan")
 }

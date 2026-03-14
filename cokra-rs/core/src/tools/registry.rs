@@ -5,6 +5,7 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 
+use crate::model::transform::ProviderRuntimeKind;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -343,17 +344,33 @@ impl ToolRegistry {
 
   /// Returns tool definitions for the model, excluding tools in the excluded set.
   pub fn model_tools(&self) -> Vec<crate::model::Tool> {
-    self
-      .active_specs()
-      .into_iter()
-      .map(|spec| spec.to_model_tool())
-      .collect()
+    self.model_tools_for_runtime(ProviderRuntimeKind::Standard, &[])
+  }
+
+  pub fn model_tools_for_runtime(
+    &self,
+    runtime_kind: ProviderRuntimeKind,
+    allowed_domains: &[String],
+  ) -> Vec<crate::model::Tool> {
+    let native_web_search = matches!(runtime_kind, ProviderRuntimeKind::OpenAICodex);
+    let mut tools = Vec::new();
+
+    for spec in self.active_specs() {
+      if spec.name == "web_search" && native_web_search {
+        tools.push(crate::model::Tool::native_web_search(allowed_domains));
+        continue;
+      }
+      tools.push(spec.to_model_tool());
+    }
+
+    tools
   }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::model::transform::ProviderRuntimeKind;
   use crate::tools::spec::JsonSchema;
   use crate::tools::spec::ToolHandlerType;
   use crate::tools::spec::ToolPermissions;
@@ -466,7 +483,8 @@ mod tests {
   fn deactivate_external_hides_only_gateable_tools() {
     let mut reg = ToolRegistry::new();
     let builtin = dummy_spec("read_file");
-    let external = dummy_spec("echo_demo").with_source_kind(crate::tools::spec::ToolSourceKind::Cli);
+    let external =
+      dummy_spec("echo_demo").with_source_kind(crate::tools::spec::ToolSourceKind::Cli);
     reg.register_tool(builtin, Arc::new(DummyHandler));
     reg.register_tool(external, Arc::new(DummyHandler));
 
@@ -479,5 +497,27 @@ mod tests {
         .as_ref()
         .is_some_and(|function| function.name != "echo_demo")
     }));
+  }
+
+  #[test]
+  fn codex_runtime_replaces_function_web_search_with_native_tool() {
+    let mut reg = ToolRegistry::new();
+    reg.register_tool(dummy_spec("web_search"), Arc::new(DummyHandler));
+
+    let tools =
+      reg.model_tools_for_runtime(ProviderRuntimeKind::OpenAICodex, &["docs.rs".to_string()]);
+
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].tool_type, "web_search");
+    assert!(tools[0].function.is_none());
+    assert_eq!(
+      tools[0]
+        .extra
+        .get("filters")
+        .and_then(|value| value.get("allowed_domains"))
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len),
+      Some(1)
+    );
   }
 }

@@ -372,7 +372,7 @@ where
 }
 
 fn initial_inline_viewport_row(cursor_y: u16) -> u16 {
-  cursor_y.saturating_add(1)
+  cursor_y
 }
 
 use ratatui::buffer::Cell;
@@ -580,8 +580,8 @@ mod tests {
   use ratatui::style::Style;
 
   #[test]
-  fn initial_inline_viewport_row_starts_below_shell_prompt_row() {
-    assert_eq!(6, initial_inline_viewport_row(5));
+  fn initial_inline_viewport_row_matches_cursor_row() {
+    assert_eq!(5, initial_inline_viewport_row(5));
     assert_eq!(u16::MAX, initial_inline_viewport_row(u16::MAX));
   }
 

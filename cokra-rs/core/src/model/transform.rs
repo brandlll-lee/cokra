@@ -89,6 +89,10 @@ impl ProviderRuntimeTransform {
     self.runtime_kind
   }
 
+  pub fn supports_native_web_search(&self) -> bool {
+    matches!(self.runtime_kind, ProviderRuntimeKind::OpenAICodex)
+  }
+
   pub fn apply_client_defaults(
     &self,
     request: ChatRequest,

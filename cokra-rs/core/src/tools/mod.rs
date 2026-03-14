@@ -7,8 +7,8 @@
 //!
 //! The remaining submodules are crate-internal implementation details.
 
-pub(crate) mod context;
 pub(crate) mod command_intent;
+pub(crate) mod context;
 pub(crate) mod diff_tracker;
 pub(crate) mod events;
 pub(crate) mod handlers;
@@ -45,14 +45,14 @@ use crate::tool_runtime::UnifiedToolRuntime;
 use crate::tools::spec::build_specs;
 use crate::tools::spec::skill_tool_with_description;
 
+pub use context::FunctionCallError;
+pub use context::ToolInvocation;
+pub use context::ToolOutput;
 pub use registry::ToolHandler;
 pub use registry::ToolKind;
 pub use registry::ToolRegistry;
 pub use router::ToolRouter;
 pub use router::ToolRunContext;
-pub use context::FunctionCallError;
-pub use context::ToolInvocation;
-pub use context::ToolOutput;
 pub use spec::JsonSchema;
 pub use spec::ToolHandlerType;
 pub use spec::ToolPermissions;
@@ -170,7 +170,8 @@ pub(crate) async fn build_default_tooling_with_cwd(
     tracing::warn!("{warning}");
   }
   let projected_integrations = project_integrations(&config.mcp, &integration_catalog)?;
-  let mcp_manager = Arc::new(McpConnectionManager::new(&projected_integrations.effective_mcp).await?);
+  let mcp_manager =
+    Arc::new(McpConnectionManager::new(&projected_integrations.effective_mcp).await?);
   let exec_config = resolve_exec_tool_config(config);
 
   // Mirrors OpenCode's skill-tool pattern: compute the cwd-aware skill
@@ -229,11 +230,15 @@ pub(crate) async fn build_default_tooling_with_cwd(
   let tool_catalog = Arc::new(ToolRuntimeCatalog::from_providers(&providers).await?);
   registry.register_handler(
     "search_tool",
-    Arc::new(handlers::dynamic::DynamicToolHandler::new(Arc::clone(&tool_catalog))),
+    Arc::new(handlers::dynamic::DynamicToolHandler::new(Arc::clone(
+      &tool_catalog,
+    ))),
   );
   registry.register_handler(
     "inspect_tool",
-    Arc::new(handlers::inspect_tool::InspectToolHandler::new(Arc::clone(&tool_catalog))),
+    Arc::new(handlers::inspect_tool::InspectToolHandler::new(Arc::clone(
+      &tool_catalog,
+    ))),
   );
 
   let registry = Arc::new(registry);

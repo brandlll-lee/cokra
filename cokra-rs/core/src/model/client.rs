@@ -17,6 +17,7 @@ use super::provider_catalog::find_provider_catalog_entry;
 use super::providers::register_provider_by_registration;
 use super::providers::registration_token_for_stored;
 use super::registry::ProviderRegistryRef;
+use super::transform::ProviderRuntimeKind;
 use super::transform::ProviderRuntimeTransform;
 use super::transform::RuntimeRequestDefaults;
 use super::types::ChatRequest;
@@ -30,6 +31,13 @@ pub struct ModelClient {
   registry: ProviderRegistryRef,
   default_provider: RwLock<Option<String>>,
   config: RwLock<ClientConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelRuntimeInfo {
+  pub provider_id: String,
+  pub runtime_kind: ProviderRuntimeKind,
+  pub connect_source: Option<String>,
 }
 
 impl ModelClient {
@@ -64,6 +72,27 @@ impl ModelClient {
   /// Get the default provider ID
   pub async fn get_default_provider(&self) -> Option<String> {
     self.default_provider.read().await.clone()
+  }
+
+  pub async fn runtime_info_for_model(&self, model: &str) -> Result<ModelRuntimeInfo> {
+    let provider_id = self.resolve_provider_id(model).await?;
+    let provider = self
+      .registry
+      .get(&provider_id)
+      .await
+      .ok_or_else(|| ModelError::ProviderNotFound(provider_id.clone()))?;
+    let connect_source = provider
+      .config()
+      .headers
+      .get("x-cokra-connect-source")
+      .cloned();
+    let transform = ProviderRuntimeTransform::from_config(provider.config());
+
+    Ok(ModelRuntimeInfo {
+      provider_id,
+      runtime_kind: transform.runtime_kind(),
+      connect_source,
+    })
   }
 
   /// Send a chat completion request

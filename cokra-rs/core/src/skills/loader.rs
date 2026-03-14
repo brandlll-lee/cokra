@@ -301,7 +301,9 @@ mod tests {
   async fn discover_skills_prefers_nearest_project_root() {
     let root = tempfile::tempdir().expect("tempdir");
     let child = root.path().join("child");
-    tokio::fs::create_dir_all(&child).await.expect("create child");
+    tokio::fs::create_dir_all(&child)
+      .await
+      .expect("create child");
 
     let parent_skill_dir = root.path().join(COKRA_DIR).join(SKILLS_DIR).join("demo");
     tokio::fs::create_dir_all(&parent_skill_dir)
@@ -385,7 +387,11 @@ mod tests {
       .expect("demo skill");
     assert_eq!(skill.description, "Generated demo");
     assert_eq!(skill.content, "generated");
-    assert!(skill.location.starts_with(root.path().join(COKRA_GENERATED_DIR)));
+    assert!(
+      skill
+        .location
+        .starts_with(root.path().join(COKRA_GENERATED_DIR))
+    );
   }
 
   #[tokio::test]

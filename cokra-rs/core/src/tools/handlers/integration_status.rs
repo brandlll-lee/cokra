@@ -74,10 +74,12 @@ impl ToolHandler for IntegrationStatusHandler {
       });
     }
 
-    let content = serde_json::to_string(&IntegrationStatusResponse { integrations: entries })
-      .map_err(|err| {
-        FunctionCallError::Fatal(format!("failed to serialize integration_status: {err}"))
-      })?;
+    let content = serde_json::to_string(&IntegrationStatusResponse {
+      integrations: entries,
+    })
+    .map_err(|err| {
+      FunctionCallError::Fatal(format!("failed to serialize integration_status: {err}"))
+    })?;
     Ok(ToolOutput::success(content).with_id(invocation.id))
   }
 }
@@ -110,7 +112,11 @@ fn active_tool_ids_for_manifest(
       .list_specs()
       .into_iter()
       .filter(|spec| spec.source_kind == ToolSourceKind::Mcp)
-      .filter(|spec| spec.name.starts_with(&format!("mcp__{}__", manifest.manifest.name)))
+      .filter(|spec| {
+        spec
+          .name
+          .starts_with(&format!("mcp__{}__", manifest.manifest.name))
+      })
       .filter(|spec| registry.is_active(&spec.name))
       .map(|spec| spec.name)
       .collect(),

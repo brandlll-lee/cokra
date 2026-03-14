@@ -65,7 +65,7 @@ pub(crate) enum InlineViewportSizing {
 fn inline_viewport_height(
   requested_height: u16,
   screen_height: u16,
-  visible_history_rows: u16,
+  _visible_history_rows: u16,
   sizing: InlineViewportSizing,
 ) -> u16 {
   if screen_height == 0 {
@@ -76,28 +76,7 @@ fn inline_viewport_height(
     return requested_height.min(screen_height);
   }
 
-  // Inline mode relies on `insert_history_lines()` to render committed history *above* the viewport.
-  // That implementation uses a scroll region capped at `viewport.top()`, which becomes invalid when
-  // the viewport reaches the very top of the screen (top == 0).
-  //
-  // Keep at least one row above the viewport whenever possible so:
-  // - history insertions never need to emit `ESC[1;0r` (broken scroll region)
-  // - the compositor never "covers" freshly inserted history, which looks like the user message
-  //   was swallowed
-  //
-  // Tradeoff: even when no history has been inserted yet, the inline viewport is capped to
-  // `screen_height - 1` on screens that are at least 2 rows tall.
-  let reserved_history_rows = if screen_height > 1 {
-    visible_history_rows
-      .max(1)
-      .min(screen_height.saturating_sub(1))
-  } else {
-    0
-  };
-  // Tradeoff: preserve already visible history above the inline viewport even if that means
-  // the live transcript must scroll within a smaller viewport once the lower region fills up.
-  let max_inline_height = screen_height.saturating_sub(reserved_history_rows).max(1);
-  requested_height.min(max_inline_height)
+  requested_height.min(screen_height)
 }
 
 pub fn set_modes() -> Result<()> {
@@ -484,15 +463,6 @@ impl Tui {
       area.height =
         inline_viewport_height(height, size.height, terminal.visible_history_rows(), sizing);
       area.width = size.width;
-      if !self.alt_screen_active.load(Ordering::Relaxed) && size.height > 1 {
-        // In inline mode, keep at least one row above the viewport. This avoids invalid scroll
-        // regions during `insert_history_lines()` and prevents "history swallowed by viewport"
-        // when the screen is resized small.
-        //
-        // Tradeoff: overlays that request full-screen height in inline mode will be clipped by 1 row.
-        area.height = area.height.min(size.height.saturating_sub(1)).max(1);
-        area.y = area.y.max(1);
-      }
       if area.bottom() > size.height {
         // Inline mode runs inside the normal terminal screen buffer.
         // If the viewport expanded, scroll the region *above* it up to make room.
@@ -562,21 +532,21 @@ mod tests {
   use super::inline_viewport_height;
 
   #[test]
-  fn cap_inline_viewport_height_preserves_visible_history_rows() {
+  fn cap_inline_viewport_height_matches_requested_when_space_allows() {
     assert_eq!(
       12,
       inline_viewport_height(12, 24, 8, InlineViewportSizing::PreserveVisibleHistory)
     );
     assert_eq!(
-      16,
+      20,
       inline_viewport_height(20, 24, 8, InlineViewportSizing::PreserveVisibleHistory)
     );
   }
 
   #[test]
-  fn cap_inline_viewport_height_keeps_one_row_for_inline_ui() {
+  fn cap_inline_viewport_height_handles_small_screens() {
     assert_eq!(
-      1,
+      5,
       inline_viewport_height(5, 6, 6, InlineViewportSizing::PreserveVisibleHistory)
     );
     assert_eq!(
@@ -598,18 +568,15 @@ mod tests {
   }
 
   #[test]
-  fn preserve_visible_history_always_leaves_one_row_when_possible() {
-    // Even with no already-inserted scrollback, we reserve one row above the
-    // inline viewport so insert_history_lines has a valid region.
+  fn preserve_visible_history_caps_to_screen_height() {
     assert_eq!(
-      23,
+      24,
       inline_viewport_height(40, 24, 0, InlineViewportSizing::PreserveVisibleHistory)
     );
     assert_eq!(
-      1,
+      2,
       inline_viewport_height(40, 2, 0, InlineViewportSizing::PreserveVisibleHistory)
     );
-    // Degenerate 1-row terminals can't reserve space.
     assert_eq!(
       1,
       inline_viewport_height(40, 1, 0, InlineViewportSizing::PreserveVisibleHistory)

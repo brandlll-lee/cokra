@@ -18,6 +18,7 @@ use crate::integrations::manifest::IntegrationToolManifest;
 use crate::integrations::projector::RegisteredIntegrationTool;
 use crate::tool_runtime::ApprovalMode;
 use crate::tool_runtime::ToolApproval;
+use crate::tool_runtime::ToolCapabilityFacets;
 use crate::tool_runtime::ToolDefinition;
 use crate::tool_runtime::ToolRiskLevel;
 use crate::tool_runtime::ToolSource;
@@ -110,9 +111,8 @@ impl ToolHandler for ManifestCliHandler {
       .env
       .iter()
       .map(|(key, value)| {
-        render_string_template(value, &input, invocation.cwd.as_path()).map(|rendered| {
-          (key.clone(), rendered)
-        })
+        render_string_template(value, &input, invocation.cwd.as_path())
+          .map(|rendered| (key.clone(), rendered))
       })
       .collect::<Result<HashMap<_, _>, _>>()?;
     let output = execute_command(&ExecParams {
@@ -158,10 +158,7 @@ pub(crate) fn spec_from_manifest(
     tool.output_schema.as_ref().map(json_schema_from_value),
     ToolHandlerType::Function,
     ToolPermissions {
-      requires_approval: matches!(
-        tool.approval_mode.unwrap_or_default(),
-        ApprovalMode::Manual
-      ),
+      requires_approval: matches!(tool.approval_mode.unwrap_or_default(), ApprovalMode::Manual),
       allow_network: tool.allow_network,
       allow_fs_write: tool.allow_fs_write || tool.mutates_state.unwrap_or(false),
     },
@@ -194,13 +191,15 @@ pub(crate) fn definition_from_manifest(
     tags: {
       let mut tags = vec![provider_id.to_string()];
       tags.extend(tool.tags.clone());
-      tags.push(match source {
-        ToolSource::Builtin => "builtin",
-        ToolSource::Mcp => "mcp",
-        ToolSource::Cli => "cli",
-        ToolSource::Api => "api",
-      }
-      .to_string());
+      tags.push(
+        match source {
+          ToolSource::Builtin => "builtin",
+          ToolSource::Mcp => "mcp",
+          ToolSource::Cli => "cli",
+          ToolSource::Api => "api",
+        }
+        .to_string(),
+      );
       tags.sort();
       tags.dedup();
       tags
@@ -222,7 +221,10 @@ pub(crate) fn definition_from_manifest(
           ApprovalMode::Auto
         }
       }),
-      permission_key: tool.permission_key.clone().or_else(|| Some(tool.id.clone())),
+      permission_key: tool
+        .permission_key
+        .clone()
+        .or_else(|| Some(tool.id.clone())),
       allow_network: tool.allow_network,
       allow_fs_write: tool.allow_fs_write || tool.mutates_state.unwrap_or(false),
     },
@@ -230,16 +232,19 @@ pub(crate) fn definition_from_manifest(
     supports_parallel: tool.supports_parallel.unwrap_or(true),
     mutates_state: tool.mutates_state.unwrap_or(tool.allow_fs_write),
     input_keys: input_keys_from_value(&tool.input_schema),
+    capabilities: ToolCapabilityFacets::for_tool_name(&tool.id, tool.allow_network),
     provider_id: Some(provider_id.to_string()),
-    source_kind: Some(match source_kind {
-      ToolSourceKind::BuiltinPrimitive => "builtin_primitive",
-      ToolSourceKind::BuiltinCollaboration => "builtin_collaboration",
-      ToolSourceKind::BuiltinWorkflow => "builtin_workflow",
-      ToolSourceKind::Cli => "cli",
-      ToolSourceKind::Api => "api",
-      ToolSourceKind::Mcp => "mcp",
-    }
-    .to_string()),
+    source_kind: Some(
+      match source_kind {
+        ToolSourceKind::BuiltinPrimitive => "builtin_primitive",
+        ToolSourceKind::BuiltinCollaboration => "builtin_collaboration",
+        ToolSourceKind::BuiltinWorkflow => "builtin_workflow",
+        ToolSourceKind::Cli => "cli",
+        ToolSourceKind::Api => "api",
+        ToolSourceKind::Mcp => "mcp",
+      }
+      .to_string(),
+    ),
     server_name: None,
     remote_name: None,
   }
@@ -370,16 +375,13 @@ fn json_schema_from_value(value: &serde_json::Value) -> JsonSchema {
         .map(ToString::to_string),
     },
     Some("array") => JsonSchema::Array {
-      items: Box::new(
-        object
-          .get("items")
-          .map(json_schema_from_value)
-          .unwrap_or(JsonSchema::Object {
-            properties: BTreeMap::new(),
-            required: Some(Vec::new()),
-            additional_properties: Some(false.into()),
-          }),
-      ),
+      items: Box::new(object.get("items").map(json_schema_from_value).unwrap_or(
+        JsonSchema::Object {
+          properties: BTreeMap::new(),
+          required: Some(Vec::new()),
+          additional_properties: Some(false.into()),
+        },
+      )),
       description: object
         .get("description")
         .and_then(serde_json::Value::as_str)

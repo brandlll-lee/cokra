@@ -1,15 +1,3 @@
-//! web_search tool handler — multi-backend web search.
-//!
-//! Supports three backends, selected via config or env:
-//!   1. **Exa** (default, no key required for public endpoint) — MCP JSON-RPC over HTTP
-//!   2. **Brave Search API** — requires BRAVE_SEARCH_API_KEY
-//!   3. **SearXNG** — self-hosted, requires SEARXNG_BASE_URL
-//!
-//! Backend selection order:
-//!   1. `BRAVE_SEARCH_API_KEY` env var → Brave
-//!   2. `SEARXNG_BASE_URL` env var → SearXNG
-//!   3. Fallback → Exa public endpoint
-
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
@@ -24,11 +12,100 @@ pub struct WebSearchHandler;
 
 const DEFAULT_NUM_RESULTS: u32 = 8;
 const SEARCH_TIMEOUT_SECS: u64 = 25;
-const MAX_CONTENT_CHARS: usize = 20_000;
-
-// ── Exa MCP endpoint (1:1 opencode websearch.ts) ────────────────────────────
+const DEFAULT_CONTEXT_MAX_CHARACTERS: u32 = 10_000;
+const MAX_RESULT_SNIPPET_CHARS_SHORT: usize = 240;
+const MAX_RESULT_SNIPPET_CHARS_MEDIUM: usize = 480;
+const MAX_RESULT_SNIPPET_CHARS_LONG: usize = 900;
 
 const EXA_MCP_URL: &str = "https://mcp.exa.ai/mcp";
+const BRAVE_SEARCH_URL: &str = "https://api.search.brave.com/res/v1/web/search";
+
+fn default_num_results() -> u32 {
+  DEFAULT_NUM_RESULTS
+}
+
+fn default_livecrawl() -> String {
+  "fallback".to_string()
+}
+
+fn default_response_length() -> String {
+  "medium".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+struct WebSearchArgs {
+  query: String,
+  #[serde(default = "default_num_results")]
+  num_results: u32,
+  #[serde(default = "default_livecrawl")]
+  livecrawl: String,
+  #[serde(default)]
+  context_max_characters: Option<u32>,
+  #[serde(default)]
+  domains: Vec<String>,
+  #[serde(default)]
+  recency: Option<u32>,
+  #[serde(default, rename = "type")]
+  query_type: Option<String>,
+  #[serde(default)]
+  country: Option<String>,
+  #[serde(default = "default_response_length")]
+  response_length: String,
+  #[serde(default)]
+  images: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WebSearchBackend {
+  Brave,
+  Searxng,
+  Exa,
+}
+
+impl WebSearchBackend {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::Brave => "brave",
+      Self::Searxng => "searxng",
+      Self::Exa => "exa",
+    }
+  }
+}
+
+#[derive(Debug, Serialize)]
+struct WebSearchResponse {
+  query: String,
+  backend: String,
+  backend_mode: String,
+  result_count: usize,
+  fetched_at: String,
+  response_length: String,
+  requested_result_count: u32,
+  citation_ready: bool,
+  used_provider_native: bool,
+  results: Vec<WebSearchResult>,
+  images: Vec<WebSearchImage>,
+}
+
+#[derive(Debug, Serialize)]
+struct WebSearchResult {
+  rank: usize,
+  title: Option<String>,
+  url: Option<String>,
+  domain: Option<String>,
+  snippet: String,
+  http_status: Option<u16>,
+  truncated: bool,
+  fetched_at: String,
+  citation: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct WebSearchImage {
+  title: String,
+  url: String,
+}
 
 #[derive(Debug, Serialize)]
 struct ExaMcpRequest {
@@ -41,21 +118,7 @@ struct ExaMcpRequest {
 #[derive(Debug, Serialize)]
 struct ExaMcpParams {
   name: &'static str,
-  arguments: ExaSearchArgs,
-}
-
-#[derive(Debug, Serialize)]
-struct ExaSearchArgs {
-  query: String,
-  #[serde(rename = "numResults")]
-  num_results: u32,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  livecrawl: Option<String>,
-  #[serde(
-    rename = "contextMaxCharacters",
-    skip_serializing_if = "Option::is_none"
-  )]
-  context_max_characters: Option<u32>,
+  arguments: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,10 +144,6 @@ struct ExaMcpError {
   message: String,
 }
 
-// ── Brave Search API ─────────────────────────────────────────────────────────
-
-const BRAVE_SEARCH_URL: &str = "https://api.search.brave.com/res/v1/web/search";
-
 #[derive(Debug, Deserialize)]
 struct BraveSearchResponse {
   web: Option<BraveWebResults>,
@@ -102,8 +161,6 @@ struct BraveResult {
   description: Option<String>,
 }
 
-// ── SearXNG ──────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Deserialize)]
 struct SearxngResponse {
   results: Vec<SearxngResult>,
@@ -115,31 +172,6 @@ struct SearxngResult {
   url: String,
   content: Option<String>,
 }
-
-// ── Tool args ────────────────────────────────────────────────────────────────
-
-fn default_num_results() -> u32 {
-  DEFAULT_NUM_RESULTS
-}
-
-fn default_livecrawl() -> String {
-  "fallback".to_string()
-}
-
-#[derive(Debug, Deserialize)]
-struct WebSearchArgs {
-  query: String,
-  #[serde(default = "default_num_results")]
-  num_results: u32,
-  /// livecrawl mode: "fallback" | "preferred"
-  #[serde(default = "default_livecrawl")]
-  livecrawl: String,
-  /// context_max_characters for Exa backend
-  #[serde(default)]
-  context_max_characters: Option<u32>,
-}
-
-// ── Handler ──────────────────────────────────────────────────────────────────
 
 #[async_trait]
 impl ToolHandler for WebSearchHandler {
@@ -157,8 +189,8 @@ impl ToolHandler for WebSearchHandler {
   ) -> Result<ToolOutput, FunctionCallError> {
     let id = invocation.id.clone();
     let args: WebSearchArgs = invocation.parse_arguments()?;
-
-    if args.query.trim().is_empty() {
+    let query = args.query.trim();
+    if query.is_empty() {
       return Err(FunctionCallError::RespondToModel(
         "query must not be empty".to_string(),
       ));
@@ -168,7 +200,7 @@ impl ToolHandler for WebSearchHandler {
       .timeout(std::time::Duration::from_secs(SEARCH_TIMEOUT_SECS))
       .user_agent("Mozilla/5.0 (compatible; cokra/1.0)")
       .build()
-      .map_err(|e| FunctionCallError::Execution(format!("failed to build HTTP client: {e}")))?;
+      .map_err(|err| FunctionCallError::Execution(format!("failed to build HTTP client: {err}")))?;
 
     let output = if let Ok(api_key) = std::env::var("BRAVE_SEARCH_API_KEY") {
       if let Some(runtime) = invocation.runtime.as_ref() {
@@ -209,28 +241,30 @@ impl ToolHandler for WebSearchHandler {
       search_exa(&client, &args).await?
     };
 
-    Ok(ToolOutput::success(output).with_id(id))
+    let content = serde_json::to_string(&output).map_err(|err| {
+      FunctionCallError::Fatal(format!("failed to serialize web_search result: {err}"))
+    })?;
+    Ok(ToolOutput::success(content).with_id(id))
   }
 }
-
-// ── Exa backend ──────────────────────────────────────────────────────────────
 
 async fn search_exa(
   client: &reqwest::Client,
   args: &WebSearchArgs,
-) -> Result<String, FunctionCallError> {
+) -> Result<WebSearchResponse, FunctionCallError> {
   let request = ExaMcpRequest {
     jsonrpc: "2.0",
     id: 1,
     method: "tools/call",
     params: ExaMcpParams {
       name: "web_search_exa",
-      arguments: ExaSearchArgs {
-        query: args.query.clone(),
-        num_results: args.num_results,
-        livecrawl: Some(args.livecrawl.clone()),
-        context_max_characters: args.context_max_characters,
-      },
+      arguments: serde_json::json!({
+        "query": decorate_query(args),
+        "numResults": args.num_results.min(20),
+        "livecrawl": args.livecrawl,
+        "contextMaxCharacters": args.context_max_characters.unwrap_or(DEFAULT_CONTEXT_MAX_CHARACTERS),
+        "country": args.country,
+      }),
     },
   };
 
@@ -241,46 +275,232 @@ async fn search_exa(
     .json(&request)
     .send()
     .await
-    .map_err(|e| FunctionCallError::RespondToModel(format!("Exa search request failed: {e}")))?;
+    .map_err(|err| {
+      FunctionCallError::RespondToModel(format!("Exa search request failed: {err}"))
+    })?;
 
   if !response.status().is_success() {
-    let status = response.status();
     return Err(FunctionCallError::RespondToModel(format!(
-      "Exa search failed with status {status}"
+      "Exa search failed with status {}",
+      response.status()
     )));
   }
 
   let body = response
     .text()
     .await
-    .map_err(|e| FunctionCallError::Execution(format!("failed to read Exa response: {e}")))?;
+    .map_err(|err| FunctionCallError::Execution(format!("failed to read Exa response: {err}")))?;
+  let snippet = parse_exa_response(&body)?;
+  let fetched_at = chrono::Utc::now().to_rfc3339();
+  let (snippet, truncated) = truncate_snippet(&snippet, snippet_limit(&args.response_length));
 
-  // Parse SSE or plain JSON response (1:1 opencode pattern)
-  let parsed = parse_exa_response(&body, &args.query)?;
-  Ok(parsed)
+  Ok(WebSearchResponse {
+    query: args.query.clone(),
+    backend: WebSearchBackend::Exa.as_str().to_string(),
+    backend_mode: "local_fallback".to_string(),
+    result_count: 1,
+    fetched_at: fetched_at.clone(),
+    response_length: args.response_length.clone(),
+    requested_result_count: args.num_results,
+    citation_ready: true,
+    used_provider_native: false,
+    results: vec![WebSearchResult {
+      rank: 1,
+      title: Some(args.query.clone()),
+      url: None,
+      domain: None,
+      snippet,
+      http_status: Some(200),
+      truncated,
+      fetched_at,
+      citation: serde_json::json!({
+        "backend": "exa",
+        "query": args.query,
+      }),
+    }],
+    images: Vec::new(),
+  })
 }
 
-fn parse_exa_response(body: &str, query: &str) -> Result<String, FunctionCallError> {
-  // Try SSE format first: lines starting with "data: "
+async fn search_brave(
+  client: &reqwest::Client,
+  args: &WebSearchArgs,
+  api_key: &str,
+) -> Result<WebSearchResponse, FunctionCallError> {
+  let mut query = vec![
+    ("q".to_string(), decorate_query(args)),
+    ("count".to_string(), args.num_results.min(20).to_string()),
+  ];
+  if let Some(country) = args
+    .country
+    .as_deref()
+    .filter(|country| !country.is_empty())
+  {
+    query.push(("country".to_string(), country.to_string()));
+  }
+
+  let response = client
+    .get(BRAVE_SEARCH_URL)
+    .header("Accept", "application/json")
+    .header("Accept-Encoding", "gzip")
+    .header("X-Subscription-Token", api_key)
+    .query(&query)
+    .send()
+    .await
+    .map_err(|err| {
+      FunctionCallError::RespondToModel(format!("Brave search request failed: {err}"))
+    })?;
+
+  if !response.status().is_success() {
+    return Err(FunctionCallError::RespondToModel(format!(
+      "Brave search failed with status {}",
+      response.status()
+    )));
+  }
+
+  let resp: BraveSearchResponse = response.json().await.map_err(|err| {
+    FunctionCallError::Execution(format!("failed to parse Brave response: {err}"))
+  })?;
+  let fetched_at = chrono::Utc::now().to_rfc3339();
+  let results = resp
+    .web
+    .map(|web| web.results)
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|result| matches_domain_filter(&result.url, &args.domains))
+    .take(args.num_results.min(20) as usize)
+    .enumerate()
+    .map(|(index, result)| {
+      let (snippet, truncated) = truncate_snippet(
+        result.description.as_deref().unwrap_or_default(),
+        snippet_limit(&args.response_length),
+      );
+      WebSearchResult {
+        rank: index + 1,
+        title: Some(result.title.clone()),
+        url: Some(result.url.clone()),
+        domain: url_domain(&result.url),
+        snippet,
+        http_status: Some(200),
+        truncated,
+        fetched_at: fetched_at.clone(),
+        citation: serde_json::json!({
+          "url": result.url,
+          "title": result.title,
+          "backend": "brave",
+        }),
+      }
+    })
+    .collect::<Vec<_>>();
+
+  Ok(WebSearchResponse {
+    query: args.query.clone(),
+    backend: WebSearchBackend::Brave.as_str().to_string(),
+    backend_mode: "local_fallback".to_string(),
+    result_count: results.len(),
+    fetched_at,
+    response_length: args.response_length.clone(),
+    requested_result_count: args.num_results,
+    citation_ready: true,
+    used_provider_native: false,
+    results,
+    images: Vec::new(),
+  })
+}
+
+async fn search_searxng(
+  client: &reqwest::Client,
+  args: &WebSearchArgs,
+  base_url: &str,
+) -> Result<WebSearchResponse, FunctionCallError> {
+  let search_url = format!("{}/search", base_url.trim_end_matches('/'));
+  let response = client
+    .get(&search_url)
+    .query(&[
+      ("q", decorate_query(args)),
+      ("format", "json".to_string()),
+      ("engines", "google,bing,duckduckgo".to_string()),
+    ])
+    .send()
+    .await
+    .map_err(|err| {
+      FunctionCallError::RespondToModel(format!("SearXNG search request failed: {err}"))
+    })?;
+
+  if !response.status().is_success() {
+    return Err(FunctionCallError::RespondToModel(format!(
+      "SearXNG search failed with status {}",
+      response.status()
+    )));
+  }
+
+  let resp: SearxngResponse = response.json().await.map_err(|err| {
+    FunctionCallError::Execution(format!("failed to parse SearXNG response: {err}"))
+  })?;
+  let fetched_at = chrono::Utc::now().to_rfc3339();
+  let results = resp
+    .results
+    .into_iter()
+    .filter(|result| matches_domain_filter(&result.url, &args.domains))
+    .take(args.num_results.min(20) as usize)
+    .enumerate()
+    .map(|(index, result)| {
+      let (snippet, truncated) = truncate_snippet(
+        result.content.as_deref().unwrap_or_default(),
+        snippet_limit(&args.response_length),
+      );
+      WebSearchResult {
+        rank: index + 1,
+        title: Some(result.title.clone()),
+        url: Some(result.url.clone()),
+        domain: url_domain(&result.url),
+        snippet,
+        http_status: Some(200),
+        truncated,
+        fetched_at: fetched_at.clone(),
+        citation: serde_json::json!({
+          "url": result.url,
+          "title": result.title,
+          "backend": "searxng",
+        }),
+      }
+    })
+    .collect::<Vec<_>>();
+
+  Ok(WebSearchResponse {
+    query: args.query.clone(),
+    backend: WebSearchBackend::Searxng.as_str().to_string(),
+    backend_mode: "local_fallback".to_string(),
+    result_count: results.len(),
+    fetched_at,
+    response_length: args.response_length.clone(),
+    requested_result_count: args.num_results,
+    citation_ready: true,
+    used_provider_native: false,
+    results,
+    images: Vec::new(),
+  })
+}
+
+fn parse_exa_response(body: &str) -> Result<String, FunctionCallError> {
   for line in body.lines() {
     if let Some(json_str) = line.strip_prefix("data: ")
       && let Ok(resp) = serde_json::from_str::<ExaMcpResponse>(json_str)
     {
-      return extract_exa_text(resp, query);
+      return extract_exa_text(resp);
     }
   }
 
-  // Try plain JSON
   if let Ok(resp) = serde_json::from_str::<ExaMcpResponse>(body) {
-    return extract_exa_text(resp, query);
+    return extract_exa_text(resp);
   }
 
-  Err(FunctionCallError::RespondToModel(format!(
-    "unexpected Exa response format for query \"{query}\""
-  )))
+  Err(FunctionCallError::RespondToModel(
+    "unexpected Exa response format".to_string(),
+  ))
 }
 
-fn extract_exa_text(resp: ExaMcpResponse, query: &str) -> Result<String, FunctionCallError> {
+fn extract_exa_text(resp: ExaMcpResponse) -> Result<String, FunctionCallError> {
   if let Some(err) = resp.error {
     return Err(FunctionCallError::RespondToModel(format!(
       "Exa search error: {}",
@@ -288,149 +508,86 @@ fn extract_exa_text(resp: ExaMcpResponse, query: &str) -> Result<String, Functio
     )));
   }
 
-  let result = resp
-    .result
-    .ok_or_else(|| FunctionCallError::RespondToModel(format!("no results for \"{query}\"")))?;
-
-  let text = result
-    .content
-    .into_iter()
-    .filter(|item| item.kind == "text")
-    .filter_map(|item| item.text)
-    .next()
-    .unwrap_or_else(|| format!("No search results found for \"{query}\""));
-
-  let truncated = truncate_to_chars(text, MAX_CONTENT_CHARS);
-  Ok(format!(
-    "Web search results for \"{query}\":\n\n{truncated}"
-  ))
-}
-
-// ── Brave backend ─────────────────────────────────────────────────────────────
-
-async fn search_brave(
-  client: &reqwest::Client,
-  args: &WebSearchArgs,
-  api_key: &str,
-) -> Result<String, FunctionCallError> {
-  let response = client
-    .get(BRAVE_SEARCH_URL)
-    .header("Accept", "application/json")
-    .header("Accept-Encoding", "gzip")
-    .header("X-Subscription-Token", api_key)
-    .query(&[
-      ("q", args.query.as_str()),
-      ("count", &args.num_results.to_string()),
-    ])
-    .send()
-    .await
-    .map_err(|e| FunctionCallError::RespondToModel(format!("Brave search request failed: {e}")))?;
-
-  if !response.status().is_success() {
-    let status = response.status();
-    return Err(FunctionCallError::RespondToModel(format!(
-      "Brave search failed with status {status}"
-    )));
-  }
-
-  let resp: BraveSearchResponse = response
-    .json()
-    .await
-    .map_err(|e| FunctionCallError::Execution(format!("failed to parse Brave response: {e}")))?;
-
-  let results = resp.web.map(|w| w.results).unwrap_or_default();
-
-  if results.is_empty() {
-    return Ok(format!("No search results found for \"{}\"", args.query));
-  }
-
-  let mut output = format!("Web search results for \"{}\":\n\n", args.query);
-  for (i, result) in results.iter().enumerate() {
-    output.push_str(&format!("{}. **{}**\n", i + 1, result.title));
-    output.push_str(&format!("   URL: {}\n", result.url));
-    if let Some(desc) = &result.description {
-      output.push_str(&format!("   {}\n", desc));
-    }
-    output.push('\n');
-  }
-
-  Ok(truncate_to_chars(output, MAX_CONTENT_CHARS))
-}
-
-// ── SearXNG backend ───────────────────────────────────────────────────────────
-
-async fn search_searxng(
-  client: &reqwest::Client,
-  args: &WebSearchArgs,
-  base_url: &str,
-) -> Result<String, FunctionCallError> {
-  let search_url = format!("{}/search", base_url.trim_end_matches('/'));
-
-  let response = client
-    .get(&search_url)
-    .query(&[
-      ("q", args.query.as_str()),
-      ("format", "json"),
-      ("engines", "google,bing,duckduckgo"),
-    ])
-    .send()
-    .await
-    .map_err(|e| {
-      FunctionCallError::RespondToModel(format!("SearXNG search request failed: {e}"))
-    })?;
-
-  if !response.status().is_success() {
-    let status = response.status();
-    return Err(FunctionCallError::RespondToModel(format!(
-      "SearXNG search failed with status {status}"
-    )));
-  }
-
-  let resp: SearxngResponse = response
-    .json()
-    .await
-    .map_err(|e| FunctionCallError::Execution(format!("failed to parse SearXNG response: {e}")))?;
-
-  if resp.results.is_empty() {
-    return Ok(format!("No search results found for \"{}\"", args.query));
-  }
-
-  let mut output = format!("Web search results for \"{}\":\n\n", args.query);
-  let count = (args.num_results as usize).min(resp.results.len());
-  for (i, result) in resp.results.iter().take(count).enumerate() {
-    output.push_str(&format!("{}. **{}**\n", i + 1, result.title));
-    output.push_str(&format!("   URL: {}\n", result.url));
-    if let Some(content) = &result.content {
-      output.push_str(&format!("   {}\n", content));
-    }
-    output.push('\n');
-  }
-
-  Ok(truncate_to_chars(output, MAX_CONTENT_CHARS))
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn truncate_to_chars(s: String, max: usize) -> String {
-  if s.len() <= max {
-    return s;
-  }
-  // Find a valid UTF-8 boundary at or before `max` bytes.
-  let boundary = (0..=max)
-    .rev()
-    .find(|&i| s.is_char_boundary(i))
-    .unwrap_or(0);
-  format!(
-    "{}\n\n[Content truncated at {max} characters]",
-    &s[..boundary]
+  let result = resp.result.ok_or_else(|| {
+    FunctionCallError::RespondToModel("Exa search returned no result".to_string())
+  })?;
+  Ok(
+    result
+      .content
+      .into_iter()
+      .find(|item| item.kind == "text")
+      .and_then(|item| item.text)
+      .unwrap_or_else(|| "No search results found".to_string()),
   )
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+fn decorate_query(args: &WebSearchArgs) -> String {
+  let mut query = args.query.trim().to_string();
+  if let Some(query_type) = args.query_type.as_deref().filter(|value| !value.is_empty()) {
+    query.push(' ');
+    query.push_str(query_type);
+  }
+  if let Some(recency) = args.recency {
+    query.push_str(&format!(" last {recency} days"));
+  }
+  if args.domains.len() == 1 {
+    query.push_str(&format!(" site:{}", args.domains[0]));
+  } else if !args.domains.is_empty() {
+    let domains = args
+      .domains
+      .iter()
+      .map(|domain| format!("site:{domain}"))
+      .collect::<Vec<_>>();
+    query.push_str(&format!(" ({})", domains.join(" OR ")));
+  }
+  query
+}
+
+fn snippet_limit(response_length: &str) -> usize {
+  match response_length {
+    "short" => MAX_RESULT_SNIPPET_CHARS_SHORT,
+    "long" => MAX_RESULT_SNIPPET_CHARS_LONG,
+    _ => MAX_RESULT_SNIPPET_CHARS_MEDIUM,
+  }
+}
+
+fn truncate_snippet(snippet: &str, max_chars: usize) -> (String, bool) {
+  if snippet.len() <= max_chars {
+    return (snippet.to_string(), false);
+  }
+  let boundary = snippet.floor_char_boundary(max_chars);
+  (snippet[..boundary].to_string(), true)
+}
+
+fn matches_domain_filter(url: &str, domains: &[String]) -> bool {
+  if domains.is_empty() {
+    return true;
+  }
+  let Some(domain) = url_domain(url) else {
+    return false;
+  };
+  domains.iter().any(|candidate| {
+    let candidate = candidate
+      .trim()
+      .trim_start_matches("*.")
+      .to_ascii_lowercase();
+    domain == candidate || domain.ends_with(&format!(".{candidate}"))
+  })
+}
+
+fn url_domain(url: &str) -> Option<String> {
+  reqwest::Url::parse(url)
+    .ok()
+    .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+}
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use tokio::io::AsyncReadExt;
+  use tokio::io::AsyncWriteExt;
+  use tokio::net::TcpListener;
+
   use crate::tools::context::ToolPayload;
 
   fn make_inv(args: serde_json::Value) -> ToolInvocation {
@@ -445,71 +602,125 @@ mod tests {
     }
   }
 
+  async fn spawn_http_server(status: &str, headers: &[(&str, String)], body: String) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let status = status.to_string();
+    let headers = headers
+      .iter()
+      .map(|(name, value)| ((*name).to_string(), value.clone()))
+      .collect::<Vec<_>>();
+    tokio::spawn(async move {
+      let (mut stream, _) = listener.accept().await.expect("accept");
+      let mut buffer = [0u8; 2048];
+      let _ = stream.read(&mut buffer).await;
+      let mut response = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.as_bytes().len()
+      );
+      for (name, value) in headers {
+        response.push_str(&format!("{name}: {value}\r\n"));
+      }
+      response.push_str("\r\n");
+      response.push_str(&body);
+      stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write response");
+    });
+    format!("http://{addr}")
+  }
+
   #[tokio::test]
   async fn rejects_empty_query() {
-    let inv = make_inv(serde_json::json!({ "query": "  " }));
-    let err = WebSearchHandler.handle_async(inv).await.unwrap_err();
+    let err = WebSearchHandler
+      .handle_async(make_inv(serde_json::json!({ "query": " " })))
+      .await
+      .unwrap_err();
     assert!(err.to_string().contains("empty"));
   }
 
-  #[tokio::test]
-  async fn rejects_missing_query() {
-    let inv = make_inv(serde_json::json!({}));
-    let err = WebSearchHandler.handle_async(inv).await.unwrap_err();
-    assert!(err.to_string().contains("query"));
-  }
-
   #[test]
-  fn parse_exa_sse_response() {
-    let sse_body = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Rust is a systems language.\"}]}}\n";
-    let result = parse_exa_response(sse_body, "rust programming").unwrap();
-    assert!(result.contains("Rust is a systems language."));
-    assert!(result.contains("rust programming"));
+  fn decorate_query_includes_domain_and_recency() {
+    let args: WebSearchArgs = serde_json::from_value(serde_json::json!({
+      "query": "rust lsp",
+      "domains": ["docs.rs"],
+      "recency": 7
+    }))
+    .expect("args");
+    let query = decorate_query(&args);
+    assert!(query.contains("site:docs.rs"));
+    assert!(query.contains("last 7 days"));
   }
 
   #[test]
   fn parse_exa_plain_json_response() {
-    let json_body =
+    let body =
       r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Hello world"}]}}"#;
-    let result = parse_exa_response(json_body, "hello").unwrap();
+    let result = parse_exa_response(body).expect("exa response");
     assert!(result.contains("Hello world"));
   }
 
   #[test]
   fn parse_exa_error_response() {
-    let json_body = r#"{"jsonrpc":"2.0","id":1,"error":{"message":"Rate limit exceeded"}}"#;
-    let err = parse_exa_response(json_body, "test").unwrap_err();
+    let body = r#"{"jsonrpc":"2.0","id":1,"error":{"message":"Rate limit exceeded"}}"#;
+    let err = parse_exa_response(body).unwrap_err();
     assert!(err.to_string().contains("Rate limit exceeded"));
   }
 
   #[test]
-  fn truncate_to_chars_short() {
-    let s = "hello".to_string();
-    assert_eq!(truncate_to_chars(s.clone(), 100), s);
+  fn domain_filter_matches_subdomains() {
+    assert!(matches_domain_filter(
+      "https://docs.rs/reqwest",
+      &["docs.rs".to_string()]
+    ));
+    assert!(!matches_domain_filter(
+      "https://example.com",
+      &["docs.rs".to_string()]
+    ));
   }
 
-  #[test]
-  fn truncate_to_chars_long() {
-    let s = "a".repeat(30_000);
-    let result = truncate_to_chars(s, 20_000);
-    assert!(result.contains("[Content truncated"));
-  }
+  #[tokio::test]
+  async fn search_searxng_returns_structured_results() {
+    let base_url = spawn_http_server(
+      "200 OK",
+      &[("Content-Type", "application/json".to_string())],
+      serde_json::json!({
+        "results": [
+          {
+            "title": "Reqwest docs",
+            "url": "https://docs.rs/reqwest/latest/reqwest/",
+            "content": "Rust HTTP client documentation"
+          },
+          {
+            "title": "Ignored result",
+            "url": "https://example.com/ignored",
+            "content": "Should be filtered out"
+          }
+        ]
+      })
+      .to_string(),
+    )
+    .await;
+    let client = reqwest::Client::builder()
+      .timeout(std::time::Duration::from_secs(5))
+      .build()
+      .expect("client");
+    let args: WebSearchArgs = serde_json::from_value(serde_json::json!({
+      "query": "reqwest",
+      "domains": ["docs.rs"],
+      "response_length": "short"
+    }))
+    .expect("args");
 
-  #[test]
-  fn default_num_results_is_8() {
-    let args: WebSearchArgs = serde_json::from_str(r#"{"query":"test"}"#).unwrap();
-    assert_eq!(args.num_results, 8);
-  }
+    let response = search_searxng(&client, &args, &base_url)
+      .await
+      .expect("search succeeds");
 
-  #[test]
-  fn default_livecrawl_is_fallback() {
-    let args: WebSearchArgs = serde_json::from_str(r#"{"query":"test"}"#).unwrap();
-    assert_eq!(args.livecrawl, "fallback");
-  }
-
-  #[test]
-  fn custom_num_results_parsed() {
-    let args: WebSearchArgs = serde_json::from_str(r#"{"query":"test","num_results":5}"#).unwrap();
-    assert_eq!(args.num_results, 5);
+    assert_eq!(response.backend, "searxng");
+    assert_eq!(response.backend_mode, "local_fallback");
+    assert_eq!(response.result_count, 1);
+    assert_eq!(response.results[0].domain.as_deref(), Some("docs.rs"));
+    assert!(response.results[0].snippet.contains("Rust HTTP client"));
   }
 }

@@ -33,9 +33,9 @@ use crate::thread_manager::ThreadInfo;
 use crate::thread_manager::ThreadManagerState;
 use crate::tools::build_default_tooling_with_cwd;
 
+use self::team_runs::TeamRunState;
 use super::Guards;
 use super::team_state::TeamState;
-use self::team_runs::TeamRunState;
 
 const CHILD_COMMAND_CHANNEL_CAPACITY: usize = 32;
 const CHILD_EVENT_CHANNEL_CAPACITY: usize = 512;
@@ -135,7 +135,8 @@ pub(crate) async fn register_team_runtime(
   let legacy_store_key = config.cwd.display().to_string();
   let team_store_key = scoped_store_key("team", &legacy_store_key);
   let run_store_key = scoped_store_key("workflow", &legacy_store_key);
-  let persisted = load_persisted_state::<TeamState>(&state_db, &team_store_key, Some(&legacy_store_key)).await?;
+  let persisted =
+    load_persisted_state::<TeamState>(&state_db, &team_store_key, Some(&legacy_store_key)).await?;
   let run_state = load_persisted_state::<TeamRunState>(&state_db, &run_store_key, None).await?;
   let runtime = Arc::new(TeamRuntime {
     root_thread_id: root_thread_id.clone(),
@@ -260,11 +261,7 @@ impl TeamRuntime {
       .snapshot(self.root_thread_id.to_string())
   }
 
-  pub(crate) async fn record_plan_artifact(
-    &self,
-    thread_id: String,
-    text: String,
-  ) -> WorkflowRun {
+  pub(crate) async fn record_plan_artifact(&self, thread_id: String, text: String) -> WorkflowRun {
     let run = self
       .run_state
       .lock()
@@ -700,7 +697,10 @@ impl TeamRuntime {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .clone();
-    let _ = self.state_db.save_json(&self.team_store_key, &snapshot).await;
+    let _ = self
+      .state_db
+      .save_json(&self.team_store_key, &snapshot)
+      .await;
   }
 
   async fn persist_run_state(&self) {
@@ -1224,7 +1224,10 @@ mod team_runs {
         && let Some(step) = run.steps.iter_mut().find(|step| step.id == current_step_id)
       {
         step.assigned_thread_id = Some(claimer_thread_id.to_string());
-        if matches!(step.status, WorkflowStepStatus::Pending | WorkflowStepStatus::Blocked) {
+        if matches!(
+          step.status,
+          WorkflowStepStatus::Pending | WorkflowStepStatus::Blocked
+        ) {
           step.status = WorkflowStepStatus::InProgress;
         }
         step.updated_at = now;

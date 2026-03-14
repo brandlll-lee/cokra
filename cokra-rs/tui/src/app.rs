@@ -77,6 +77,9 @@ pub struct App {
   task_running: bool,
   inline_stable_height: u16,
   pending_approval: Option<PendingApproval>,
+  pending_approval_request: Option<ExecApprovalRequestEvent>,
+  pending_user_input_request: Option<RequestUserInputEvent>,
+  prompt_queue: VecDeque<PromptRequest>,
   ui_mode: UiMode,
   transcript_cells: Vec<Box<dyn HistoryCell>>,
   transcript_lines_cache: Vec<Line<'static>>,
@@ -107,6 +110,12 @@ pub struct App {
 struct PendingApproval {
   id: String,
   turn_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum PromptRequest {
+  ExecApproval(ExecApprovalRequestEvent),
+  UserInput(RequestUserInputEvent),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -261,6 +270,9 @@ impl App {
       task_running: false,
       inline_stable_height: 0,
       pending_approval: None,
+      pending_approval_request: None,
+      pending_user_input_request: None,
+      prompt_queue: VecDeque::new(),
       ui_mode,
       transcript_cells: Vec::new(),
       transcript_lines_cache: Vec::new(),
@@ -273,7 +285,7 @@ impl App {
       history_width: 1,
       has_emitted_history_lines: false,
       backtrack_render_pending: false,
-      status_line_mode: StatusLineMode::Default,
+      status_line_mode: StatusLineMode::Off,
       queued_submissions: VecDeque::new(),
       primary_thread_id: primary_thread_id.clone(),
       active_thread_id: primary_thread_id,
@@ -294,8 +306,7 @@ impl App {
       false,
     );
 
-    // 1:1 codex: status line is enabled by default.
-    app.chat_widget.bottom_pane.set_status_line_enabled(true);
+    // Claude Code-style footer by default (no status line).
     app.refresh_status_line();
 
     app
@@ -330,9 +341,9 @@ impl App {
               self.handle_cokra_event(event).await?;
               // 1:1 codex streaming flush: after handling a core event in Inline mode,
               // immediately drain any InsertHistoryCell events that were produced by the
-              // handler (e.g. from on_agent_message_delta 鈫?append_boxed_history) and
+              // handler (e.g. from on_agent_message_delta -> append_boxed_history) and
               // write them directly into scrollback. This eliminates the two-round-trip
-              // delay (app_event_rx 鈫?TuiEvent::Draw) that makes streaming appear sluggish
+              // delay (app_event_rx -> TuiEvent::Draw) that makes streaming appear sluggish
               // when LLM tokens arrive faster than the tokio::select! scheduling rate.
               if self.ui_mode == UiMode::Inline {
                 self.flush_inline_history_cells(tui);
@@ -446,7 +457,7 @@ impl App {
         self
           .chat_widget
           .add_to_history(PlainHistoryCell::new(vec![Line::from(
-            format!("鈼?Failed to wire provider runtime for {provider_id}: {err}").red(),
+            format!("● Failed to wire provider runtime for {provider_id}: {err}").red(),
           )]));
         // Tradeoff: don't early-return here; if wiring fails we still want to fall back
         // to the provider's connect flow so users can re-auth / reconfigure in-TUI.
@@ -465,7 +476,7 @@ impl App {
             self
               .chat_widget
               .add_to_history(PlainHistoryCell::new(vec![Line::from(
-                format!("鈼?OAuth connect failed for {connect_id}: {err}").red(),
+                format!("● OAuth connect failed for {connect_id}: {err}").red(),
               )]));
           }
           return Ok(());
@@ -510,7 +521,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("鈼?Connected, but failed to save credentials locally: {err}").red(),
+          format!("● Connected, but failed to save credentials locally: {err}").red(),
         )]));
     }
     Ok(())
@@ -554,7 +565,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("鈼?Post-connect probe: {warning}").dim(),
+          format!("● Post-connect probe: {warning}").dim(),
         )]));
     }
 
@@ -599,7 +610,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("鈼?Connected, but failed to save credentials locally: {err}").red(),
+          format!("● Connected, but failed to save credentials locally: {err}").red(),
         )]));
     }
 
@@ -623,7 +634,7 @@ impl App {
           .chat_widget
           .add_to_history(PlainHistoryCell::new(vec![Line::from(
             format!(
-              "鈼?Connected auth for {}, but no runtime token was produced.",
+              "● Connected auth for {}, but no runtime token was produced.",
               entry.name
             )
             .red(),
@@ -633,7 +644,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("鈼?Connected provider: {}", entry.name).dim(),
+          format!("● Connected provider: {}", entry.name).dim(),
         )]));
     }
 
@@ -664,7 +675,7 @@ impl App {
     if !opens_connect_view {
       self.chat_widget.add_to_history(PlainHistoryCell::new(vec![
         Line::from(format!(
-          "鈼?Starting OAuth connect for {}",
+          "● Starting OAuth connect for {}",
           start.provider_name
         ))
         .dim(),
@@ -699,7 +710,7 @@ impl App {
           Err(err) => {
             if !flow.cancel.is_cancelled() {
               tx.insert_history_cell(PlainHistoryCell::new(vec![Line::from(
-                format!("鈼?Automatic localhost callback did not complete: {err}. You can still paste the redirect URL manually.").dim(),
+                format!("● Automatic localhost callback did not complete: {err}. You can still paste the redirect URL manually.").dim(),
               )]));
             }
           }
@@ -745,7 +756,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          format!("鈼?OAuth session expired for {provider_id}; start Connect again.").dim(),
+          format!("● OAuth session expired for {provider_id}; start Connect again.").dim(),
         )]));
       return Ok(());
     };
@@ -757,13 +768,13 @@ impl App {
         self
           .chat_widget
           .add_to_history(PlainHistoryCell::new(vec![Line::from(
-            format!("鈼?OAuth connect failed for {provider_id}: {err}").red(),
+            format!("● OAuth connect failed for {provider_id}: {err}").red(),
           )]));
         if provider_id == "openai-codex" && err.to_string().contains("unknown_error") {
           self
             .chat_widget
             .add_to_history(PlainHistoryCell::new(vec![Line::from(
-              "鈼?OpenAI browser auth returned unknown_error. Recovery: Connect OpenAI with API key from Connect menu.".dim(),
+              "● OpenAI browser auth returned unknown_error. Recovery: Connect OpenAI with API key from Connect menu.".dim(),
             )]));
         }
         return Ok(());
@@ -812,7 +823,7 @@ impl App {
           self
             .chat_widget
             .add_to_history(PlainHistoryCell::new(vec![Line::from(
-              format!("鈼?OAuth connect failed for {provider_id}: {err}").red(),
+              format!("● OAuth connect failed for {provider_id}: {err}").red(),
             )]));
           if let Some(provider) = self
             .cokra
@@ -841,7 +852,7 @@ impl App {
           self
             .chat_widget
             .add_to_history(PlainHistoryCell::new(vec![Line::from(
-              format!("鈼?Failed to disconnect provider {provider_id}: {err}").red(),
+              format!("● Failed to disconnect provider {provider_id}: {err}").red(),
             )]));
         }
       }
@@ -862,7 +873,7 @@ impl App {
           self
             .chat_widget
             .add_to_history(PlainHistoryCell::new(vec![Line::from(
-              format!("鈼?Failed to apply model selection {model_id}: {err}").red(),
+              format!("● Failed to apply model selection {model_id}: {err}").red(),
             )]));
         }
       }
@@ -890,7 +901,7 @@ impl App {
               self
                 .chat_widget
                 .add_to_history(PlainHistoryCell::new(vec![Line::from(
-                  format!("鈼?Failed to apply model selection {model_id}: {err}").red(),
+                  format!("● Failed to apply model selection {model_id}: {err}").red(),
                 )]));
             }
           }
@@ -898,7 +909,7 @@ impl App {
             self
               .chat_widget
               .add_to_history(PlainHistoryCell::new(vec![Line::from(
-                format!("鈼?Failed to register API key for {provider_id}: {err}").red(),
+                format!("● Failed to register API key for {provider_id}: {err}").red(),
               )]));
           }
         }
@@ -908,7 +919,7 @@ impl App {
           self
             .chat_widget
             .add_to_history(PlainHistoryCell::new(vec![Line::from(
-              format!("鈼?OAuth code submission failed for {provider_id}: {err}").red(),
+              format!("● OAuth code submission failed for {provider_id}: {err}").red(),
             )]));
         }
       }
@@ -926,7 +937,7 @@ impl App {
             .chat_widget
             .add_to_history(PlainHistoryCell::new(vec![Line::from(
             format!(
-              "鈼?OAuth connect succeeded but provider registration failed for {provider_id}: {err}"
+              "● OAuth connect succeeded but provider registration failed for {provider_id}: {err}"
             )
             .red(),
           )]));
@@ -942,13 +953,13 @@ impl App {
         self
           .chat_widget
           .add_to_history(PlainHistoryCell::new(vec![Line::from(
-            format!("鈼?OAuth connect failed for {provider_id}: {message}").red(),
+            format!("● OAuth connect failed for {provider_id}: {message}").red(),
           )]));
         if provider_id == "openai-codex" && message.contains("unknown_error") {
           self
             .chat_widget
             .add_to_history(PlainHistoryCell::new(vec![Line::from(
-              "鈼?This browser auth flow is unstable. Recovery: Connect OpenAI with API key, or retry this flow later.".dim(),
+              "● This browser auth flow is unstable. Recovery: Connect OpenAI with API key, or retry this flow later.".dim(),
             )]));
         }
         if let Some(provider) = self
@@ -1012,14 +1023,14 @@ impl App {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from("鈼?New session".dim()),
+            Line::from("● New session".dim()),
           ]));
       }
       AppEvent::ForkCurrentSession => {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from("鈼?Fork current session (not implemented)".dim()),
+            Line::from("● Fork current session is not implemented yet.".dim()),
           ]));
       }
       AppEvent::SetStatusLineMode(mode) => {
@@ -1032,7 +1043,7 @@ impl App {
           self
             .chat_widget
             .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-              Line::from(format!("鈼?Status line: {label}")).dim(),
+              Line::from(format!("● Status line: {label}")).dim(),
             ]));
         }
         self.status_line_mode = mode;
@@ -1046,7 +1057,7 @@ impl App {
   /// Inline-mode streaming flush: drain any `InsertHistoryCell` events queued in
   /// `app_event_rx` and write them directly into scrollback without waiting for the
   /// next `tokio::select!` round-trip. Called immediately after `handle_cokra_event`
-  /// so that delta lines produced by `on_agent_message_delta 鈫?append_boxed_history`
+  /// so that delta lines produced by `on_agent_message_delta -> append_boxed_history`
   /// appear on screen in the same scheduling cycle they were emitted.
   fn flush_inline_history_cells(&mut self, tui: &mut Tui) {
     loop {
@@ -1202,7 +1213,7 @@ impl App {
         // If still in a burst (first char held for flicker suppression), schedule a
         // follow-up tick so the held char is eventually released even without a keypress.
         if self.chat_widget.bottom_pane.flush_paste_burst_if_due() {
-          // Something flushed 鈥?schedule an immediate redraw and skip this frame.
+          // Something flushed - schedule an immediate redraw and skip this frame.
           tui.frame_requester().schedule_frame();
           return Ok(());
         }
@@ -1403,7 +1414,14 @@ impl App {
               decision,
             })
             .await?;
+
+          self.pending_approval_request = None;
+          self.maybe_open_next_prompt();
         }
+      }
+      BottomPaneAction::UserInputDismissed => {
+        self.pending_user_input_request = None;
+        self.maybe_open_next_prompt();
       }
       BottomPaneAction::SlashCommand(cmd) => {
         self.dispatch_command(cmd).await?;
@@ -1776,12 +1794,12 @@ impl App {
     self.task_running = false;
     self.inline_stable_height = 0;
     self.chat_widget.set_agent_turn_running(false);
-    self.pending_approval = None;
     self.replay_thread_snapshot(snapshot, tui.terminal.last_known_screen_size.width.max(1));
     if self.ui_mode == UiMode::Inline && !self.deferred_history_lines.is_empty() {
       let lines = std::mem::take(&mut self.deferred_history_lines);
       tui.insert_history_lines(lines);
     }
+    self.restore_pending_prompts();
     self.sync_bottom_pane_context();
     Ok(())
   }
@@ -1819,6 +1837,7 @@ impl App {
             .entry(req.thread_id.clone())
             .or_default()
             .push(req.clone());
+          self.enqueue_prompt(PromptRequest::ExecApproval(req.clone()));
         }
         EventMsg::RequestUserInput(req) => {
           let pending = self
@@ -1831,6 +1850,7 @@ impl App {
             .entry(req.thread_id.clone())
             .or_default()
             .push(req.clone());
+          self.enqueue_prompt(PromptRequest::UserInput(req.clone()));
         }
         _ => {}
       }
@@ -1839,6 +1859,7 @@ impl App {
         self.background_pending_threads.remove(&owner_thread_id);
         self.background_approval_requests.remove(&owner_thread_id);
         self.background_user_input_requests.remove(&owner_thread_id);
+        self.remove_queued_prompts_for_thread(&owner_thread_id);
       }
 
       self.sync_bottom_pane_context();
@@ -1854,22 +1875,10 @@ impl App {
     if let Some(action) = self.chat_widget.handle_event(&enriched_event) {
       match action {
         ChatWidgetAction::ShowApproval(req) => {
-          self.pending_approval = Some(PendingApproval {
-            id: req.id.clone(),
-            turn_id: Some(req.turn_id.clone()),
-          });
-
-          self
-            .chat_widget
-            .bottom_pane
-            .push_approval_request(ApprovalRequest {
-              call_id: req.id,
-              tool_name: req.tool_name,
-              command: format!("{}  (cwd: {})", req.command, req.cwd.display()),
-            });
+          self.enqueue_prompt(PromptRequest::ExecApproval(req));
         }
         ChatWidgetAction::ShowRequestUserInput(req) => {
-          self.chat_widget.bottom_pane.push_user_input_request(req);
+          self.enqueue_prompt(PromptRequest::UserInput(req));
         }
       }
     }
@@ -1882,7 +1891,23 @@ impl App {
       self.background_user_input_requests.remove(&owner_thread_id);
       self.task_running = false;
       self.chat_widget.set_agent_turn_running(false);
-      self.pending_approval = None;
+      if self
+        .pending_approval_request
+        .as_ref()
+        .is_some_and(|req| req.thread_id == owner_thread_id)
+      {
+        self.pending_approval = None;
+        self.pending_approval_request = None;
+      }
+      if self
+        .pending_user_input_request
+        .as_ref()
+        .is_some_and(|req| req.thread_id == owner_thread_id)
+      {
+        self.pending_user_input_request = None;
+      }
+      self.remove_queued_prompts_for_thread(&owner_thread_id);
+      self.maybe_open_next_prompt();
       if self.active_thread_id == self.primary_thread_id {
         self.submit_next_queued_submission().await?;
       }
@@ -1937,7 +1962,7 @@ impl App {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from("鈼?Context compacted".dim()),
+            Line::from("● Context compacted".dim()),
           ]));
       }
       SlashCommand::Quit | SlashCommand::Exit => {
@@ -1952,13 +1977,13 @@ impl App {
           .cloned()
           .unwrap_or_else(|| self.cokra.cwd());
         let lines = vec![
-          Line::from(format!("鈼?Model: {model}")),
-          Line::from(format!("鈼?Cwd: {}", cwd.display())),
+          Line::from(format!("● Model: {model}")),
+          Line::from(format!("● Cwd: {}", cwd.display())),
           Line::from(format!(
-            "鈼?Tokens: {} input, {} output, {} total",
+            "● Tokens: {} input, {} output, {} total",
             usage.input_tokens, usage.output_tokens, usage.total_tokens
           )),
-          Line::from(format!("鈼?Task running: {}", self.task_running)),
+          Line::from(format!("● Task running: {}", self.task_running)),
         ];
         self
           .chat_widget
@@ -1969,30 +1994,27 @@ impl App {
           self
             .chat_widget
             .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-              Line::from("鈼?No config layer stack available.".dim()),
+              Line::from("● No config layer stack available.".dim()),
             ]));
           return Ok(());
         };
 
         let mut lines = Vec::new();
-        lines.push(Line::from("鈼?Config layers (high 鈫?low):".to_string()));
+        lines.push(Line::from("● Config layers (high -> low):".to_string()));
         for layer in stack.layers_high_to_low() {
-          let mut header = String::new();
-          match &layer.source {
-            cokra_config::ConfigLayerSource::Default => header = "  - default".to_string(),
+          let mut header = match &layer.source {
+            cokra_config::ConfigLayerSource::Default => "  - default".to_string(),
             cokra_config::ConfigLayerSource::System { file } => {
-              header = format!("  - system  {}", file.display());
+              format!("  - system  {}", file.display())
             }
             cokra_config::ConfigLayerSource::User { file } => {
-              header = format!("  - user    {}", file.display());
+              format!("  - user    {}", file.display())
             }
             cokra_config::ConfigLayerSource::Project { dot_cokra_folder } => {
-              header = format!("  - project {}", dot_cokra_folder.display());
+              format!("  - project {}", dot_cokra_folder.display())
             }
-            cokra_config::ConfigLayerSource::SessionFlags => {
-              header = "  - session-flags".to_string()
-            }
-          }
+            cokra_config::ConfigLayerSource::SessionFlags => "  - session-flags".to_string(),
+          };
           if layer.disabled_reason.is_some() {
             header.push_str("  [disabled]");
           }
@@ -2004,7 +2026,7 @@ impl App {
         }
 
         let origins = stack.origins();
-        lines.push(Line::from(format!("鈼?Origins keys: {}", origins.len())));
+        lines.push(Line::from(format!("● Origins keys: {}", origins.len())));
 
         self
           .chat_widget
@@ -2020,7 +2042,7 @@ impl App {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from("鈼?/diff is not yet implemented.".dim()),
+            Line::from("● /diff is not implemented yet.".dim()),
           ]));
       }
       SlashCommand::Agent => {
@@ -2037,7 +2059,7 @@ impl App {
         self
           .chat_widget
           .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from(format!("鈼?/{}  鈥?not yet implemented.", cmd.command()).dim()),
+            Line::from(format!("● /{} is not implemented yet.", cmd.command()).dim()),
           ]));
       }
     }
@@ -2257,7 +2279,7 @@ impl App {
       .show_selection_view(SelectionViewParams {
         title: Some(provider.name.clone()),
         subtitle: Some(format!(
-          "{} 鈥?{}",
+          "{} - {}",
           if provider.authenticated {
             "Connected"
           } else {
@@ -2301,7 +2323,7 @@ impl App {
     self
       .chat_widget
       .add_to_history(PlainHistoryCell::new(vec![Line::from(
-        format!("鈼?Disconnected provider: {provider_id}").dim(),
+        format!("● Disconnected provider: {provider_id}").dim(),
       )]));
     Ok(())
   }
@@ -2503,7 +2525,7 @@ impl App {
       .await?;
 
     // 2) Persist selection: update ModelClient default provider.
-    //    The model_id may be "provider/model" 鈥?extract provider portion.
+    //    The model_id may be "provider/model" - extract provider portion.
     if let Some(provider_id) = model_id.split('/').next() {
       let _ = self
         .cokra
@@ -2519,7 +2541,7 @@ impl App {
     self
       .chat_widget
       .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-        Line::from(format!("鈼?Model changed to {model_id}")),
+        Line::from(format!("● Model changed to {model_id}")),
       ]));
     Ok(())
   }
@@ -2609,11 +2631,11 @@ impl App {
           &self.active_thread_id,
           self.status_line_agent_selector_active,
         ));
-        spans.push(ratatui::text::Span::from("  鈥? ").dim());
+        spans.push(ratatui::text::Span::from("  |  ").dim());
         let hint = if self.status_line_agent_selector_active {
-          "鈫?鈫?switch  Esc done"
+          "Left/Right switch  Esc done"
         } else {
-          "鈫?team switch"
+          "Left/Right team switch"
         };
         spans.push(ratatui::text::Span::from(hint).dim());
       } else {
@@ -2626,7 +2648,7 @@ impl App {
       StatusLineMode::Minimal => {
         let mut spans = Vec::new();
         push_agent_switcher(&mut spans);
-        spans.push(ratatui::text::Span::from("  鈥? ").dim());
+        spans.push(ratatui::text::Span::from("  |  ").dim());
         spans.push(ratatui::text::Span::from("cwd: ").dim());
         spans.push(ratatui::text::Span::from(cwd.display().to_string()));
         Line::from(spans)
@@ -2634,18 +2656,18 @@ impl App {
       StatusLineMode::Default => {
         let mut spans = Vec::new();
         push_agent_switcher(&mut spans);
-        spans.push(ratatui::text::Span::from("  鈥? ").dim());
+        spans.push(ratatui::text::Span::from("  |  ").dim());
         if !model.is_empty() {
           spans.push(ratatui::text::Span::from("model: ").dim());
           spans.push(ratatui::text::Span::from(model));
-          spans.push(ratatui::text::Span::from("  鈥? ").dim());
+          spans.push(ratatui::text::Span::from("  |  ").dim());
         }
         spans.push(ratatui::text::Span::from("tokens: ").dim());
         spans.push(ratatui::text::Span::from(format!(
           "{} in, {} out, {} total",
           usage.input_tokens, usage.output_tokens, usage.total_tokens
         )));
-        spans.push(ratatui::text::Span::from("  鈥? ").dim());
+        spans.push(ratatui::text::Span::from("  |  ").dim());
         if let Some(snapshot) = &team_snapshot {
           let unread_total: usize = snapshot.unread_counts.values().copied().sum();
           let pending_plans = snapshot
@@ -2660,7 +2682,7 @@ impl App {
             self.background_pending_count(),
             pending_plans
           )));
-          spans.push(ratatui::text::Span::from("  鈥? ").dim());
+          spans.push(ratatui::text::Span::from("  |  ").dim());
         }
         spans.push(ratatui::text::Span::from("cwd: ").dim());
         spans.push(ratatui::text::Span::from(cwd.display().to_string()));
@@ -2722,7 +2744,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "鈼?No active team runtime".dim(),
+          "● No active team runtime".dim(),
         )]));
       return;
     };
@@ -2730,7 +2752,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "鈼?No active team runtime".dim(),
+          "● No active team runtime".dim(),
         )]));
       return;
     };
@@ -2856,12 +2878,116 @@ impl App {
     self.background_pending_threads.clear();
     self.background_approval_requests.clear();
     self.background_user_input_requests.clear();
+    self.prompt_queue.clear();
+    self.pending_approval = None;
+    self.pending_approval_request = None;
+    self.pending_user_input_request = None;
     self.show_team_dashboard();
     self.sync_bottom_pane_context();
     Ok(())
   }
 
+  fn has_active_prompt(&self) -> bool {
+    self.pending_approval.is_some() || self.pending_user_input_request.is_some()
+  }
+
+  fn enqueue_prompt(&mut self, prompt: PromptRequest) {
+    self.prompt_queue.push_back(prompt);
+    self.maybe_open_next_prompt();
+  }
+
+  fn maybe_open_next_prompt(&mut self) {
+    if self.has_active_prompt() {
+      return;
+    }
+
+    let Some(prompt) = self.prompt_queue.pop_front() else {
+      return;
+    };
+
+    match prompt {
+      PromptRequest::ExecApproval(req) => self.open_background_approval(req),
+      PromptRequest::UserInput(req) => self.open_background_user_input(req),
+    }
+  }
+
+  fn restore_pending_prompts(&mut self) {
+    if let Some(req) = self.pending_approval_request.clone() {
+      if self.pending_approval.is_some() {
+        self
+          .chat_widget
+          .bottom_pane
+          .push_approval_request(ApprovalRequest {
+            call_id: req.id.clone(),
+            tool_name: req.tool_name.clone(),
+            command: self.format_exec_approval_command(&req),
+          });
+        return;
+      }
+
+      self.pending_approval_request = None;
+    }
+
+    if let Some(req) = self.pending_user_input_request.clone() {
+      self.chat_widget.bottom_pane.push_user_input_request(req);
+      return;
+    }
+
+    self.maybe_open_next_prompt();
+  }
+
+  fn thread_label_for(&self, thread_id: &str) -> String {
+    if thread_id == self.primary_thread_id {
+      return "@main".to_string();
+    }
+
+    self
+      .agent_picker_threads
+      .get(thread_id)
+      .and_then(|entry| entry.nickname.as_deref())
+      .map(|nickname| format!("@{nickname}"))
+      .unwrap_or_else(|| {
+        let short = thread_id.chars().take(8).collect::<String>();
+        format!("@{short}")
+      })
+  }
+
+  fn format_exec_approval_command(&self, req: &ExecApprovalRequestEvent) -> String {
+    let thread_label = self.thread_label_for(&req.thread_id);
+    format!("{thread_label} | {} (cwd: {})", req.command, req.cwd.display())
+  }
+
+  fn remove_queued_exec_approval(&mut self, id: &str) {
+    self.prompt_queue.retain(|prompt| match prompt {
+      PromptRequest::ExecApproval(req) => req.id != id,
+      PromptRequest::UserInput(_) => true,
+    });
+  }
+
+  fn remove_queued_user_input(&mut self, turn_id: &str) {
+    self.prompt_queue.retain(|prompt| match prompt {
+      PromptRequest::ExecApproval(_) => true,
+      PromptRequest::UserInput(req) => req.turn_id != turn_id,
+    });
+  }
+
+  fn remove_queued_prompts_for_thread(&mut self, thread_id: &str) {
+    self.prompt_queue.retain(|prompt| match prompt {
+      PromptRequest::ExecApproval(req) => req.thread_id != thread_id,
+      PromptRequest::UserInput(req) => req.thread_id != thread_id,
+    });
+  }
+
   fn open_background_approval(&mut self, req: ExecApprovalRequestEvent) {
+    self.remove_queued_exec_approval(&req.id);
+
+    if self.has_active_prompt() {
+      self
+        .prompt_queue
+        .push_front(PromptRequest::ExecApproval(req));
+      return;
+    }
+
     decrement_background_approval(&mut self.background_pending_threads, &req.thread_id);
     if let Some(requests) = self.background_approval_requests.get_mut(&req.thread_id) {
       requests.retain(|item| item.id != req.id);
@@ -2870,22 +2996,32 @@ impl App {
       id: req.id.clone(),
       turn_id: Some(req.turn_id.clone()),
     });
+    self.pending_approval_request = Some(req.clone());
+    let command = self.format_exec_approval_command(&req);
     self
       .chat_widget
       .bottom_pane
       .push_approval_request(ApprovalRequest {
         call_id: req.id,
         tool_name: req.tool_name,
-        command: format!("{}  (cwd: {})", req.command, req.cwd.display()),
+        command,
       });
     self.sync_bottom_pane_context();
   }
 
   fn open_background_user_input(&mut self, req: RequestUserInputEvent) {
+    self.remove_queued_user_input(&req.turn_id);
+
+    if self.has_active_prompt() {
+      self.prompt_queue.push_front(PromptRequest::UserInput(req));
+      return;
+    }
+
     decrement_background_user_input(&mut self.background_pending_threads, &req.thread_id);
     if let Some(requests) = self.background_user_input_requests.get_mut(&req.thread_id) {
       requests.retain(|item| item.turn_id != req.turn_id);
     }
+    self.pending_user_input_request = Some(req.clone());
     self.chat_widget.bottom_pane.push_user_input_request(req);
     self.sync_bottom_pane_context();
   }
@@ -2905,10 +3041,7 @@ impl App {
         })];
         items.push(SelectionItem {
           name: format!("approval {}", req.id),
-          description: Some(format!(
-            "thread={} 鈥?tool={}",
-            req.thread_id, req.tool_name
-          )),
+          description: Some(format!("thread={} | tool={}", req.thread_id, req.tool_name)),
           actions,
           dismiss_on_select: true,
           ..Default::default()
@@ -2924,7 +3057,7 @@ impl App {
         items.push(SelectionItem {
           name: format!("user input {}", req.turn_id),
           description: Some(format!(
-            "thread={} 鈥?questions={}",
+            "thread={} | questions={}",
             req.thread_id,
             req.questions.len()
           )),
@@ -2939,7 +3072,7 @@ impl App {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "鈼?No background approvals pending".dim(),
+          "● No background approvals pending".dim(),
         )]));
       return;
     }

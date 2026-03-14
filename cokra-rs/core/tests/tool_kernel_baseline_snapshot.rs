@@ -5,8 +5,8 @@ use cokra_core::tools::LOCAL_SHELL_TOOL_ALIAS;
 use cokra_core::tools::ToolRegistry;
 use cokra_core::tools::UNIFIED_EXEC_TOOL_NAME;
 use cokra_core::tools::spec::build_specs;
-use serde_json::json;
 use serde_json::Value;
+use serde_json::json;
 
 fn canonicalize_json(value: Value) -> Value {
   match value {
@@ -87,11 +87,7 @@ async fn builtin_tool_schema_baseline_snapshot() -> anyhow::Result<()> {
       })
     })
     .collect::<Vec<_>>();
-  selected.sort_by(|left, right| {
-    left["name"]
-      .as_str()
-      .cmp(&right["name"].as_str())
-  });
+  selected.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
   let selected = canonicalize_json(Value::Array(selected));
 
   insta::assert_json_snapshot!(
@@ -367,14 +363,32 @@ async fn builtin_tool_schema_baseline_snapshot() -> anyhow::Result<()> {
     },
     "input_keys": [
       "context_max_characters",
+      "country",
+      "domains",
+      "images",
       "livecrawl",
       "num_results",
-      "query"
+      "query",
+      "recency",
+      "response_length",
+      "type"
     ],
     "input_schema": {
       "properties": {
         "context_max_characters": {
           "type": "number"
+        },
+        "country": {
+          "type": "string"
+        },
+        "domains": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "images": {
+          "type": "boolean"
         },
         "livecrawl": {
           "type": "string"
@@ -383,6 +397,15 @@ async fn builtin_tool_schema_baseline_snapshot() -> anyhow::Result<()> {
           "type": "number"
         },
         "query": {
+          "type": "string"
+        },
+        "recency": {
+          "type": "number"
+        },
+        "response_length": {
+          "type": "string"
+        },
+        "type": {
           "type": "string"
         }
       },

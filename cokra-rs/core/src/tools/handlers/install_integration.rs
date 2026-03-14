@@ -55,7 +55,9 @@ impl ToolHandler for InstallIntegrationHandler {
       .manifests
       .iter()
       .find(|loaded| loaded.manifest.name == args.name)
-      .ok_or_else(|| FunctionCallError::RespondToModel(format!("unknown integration: {}", args.name)))?;
+      .ok_or_else(|| {
+        FunctionCallError::RespondToModel(format!("unknown integration: {}", args.name))
+      })?;
     let command = manifest
       .manifest
       .install
@@ -107,7 +109,12 @@ impl ToolHandler for InstallIntegrationHandler {
       name: manifest.manifest.name.clone(),
       command,
       exit_code: output.exit_code,
-      status: if bootstrap.ready { "ready" } else { "needs_followup" }.to_string(),
+      status: if bootstrap.ready {
+        "ready"
+      } else {
+        "needs_followup"
+      }
+      .to_string(),
       activated_tools,
       output: format_exec_output(&output),
     };
@@ -127,14 +134,21 @@ fn connectable_tool_names(
   manifest: &LoadedIntegrationManifest,
 ) -> Vec<String> {
   match manifest.manifest.kind {
-    IntegrationKind::Cli | IntegrationKind::Api => {
-      manifest.manifest.tools.iter().map(|tool| tool.id.clone()).collect()
-    }
+    IntegrationKind::Cli | IntegrationKind::Api => manifest
+      .manifest
+      .tools
+      .iter()
+      .map(|tool| tool.id.clone())
+      .collect(),
     IntegrationKind::Mcp => registry
       .list_specs()
       .into_iter()
       .filter(|spec| spec.source_kind == ToolSourceKind::Mcp)
-      .filter(|spec| spec.name.starts_with(&format!("mcp__{}__", manifest.manifest.name)))
+      .filter(|spec| {
+        spec
+          .name
+          .starts_with(&format!("mcp__{}__", manifest.manifest.name))
+      })
       .map(|spec| spec.name)
       .collect(),
   }

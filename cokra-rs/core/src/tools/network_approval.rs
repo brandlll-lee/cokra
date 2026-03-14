@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use serde::Serialize;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -67,6 +68,17 @@ pub enum NetworkApprovalOutcome {
   DeniedByPolicy(String),
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct NetworkAuditEvent {
+  pub timestamp: String,
+  pub host: String,
+  pub protocol: String,
+  pub port: u16,
+  pub decision: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct HostApprovalKey {
   host: String,
@@ -126,6 +138,7 @@ struct NetworkApprovalService {
   pending_host_approvals: Mutex<HashMap<HostApprovalKey, Arc<PendingHostApproval>>>,
   session_approved_hosts: Mutex<HashSet<HostApprovalKey>>,
   session_denied_hosts: Mutex<HashSet<HostApprovalKey>>,
+  audit_log: Mutex<Vec<NetworkAuditEvent>>,
 }
 
 impl NetworkApprovalService {
@@ -160,6 +173,15 @@ impl NetworkApprovalService {
     let created = Arc::new(PendingHostApproval::new());
     pending.insert(key, Arc::clone(&created));
     (created, true)
+  }
+
+  async fn push_audit_event(&self, event: NetworkAuditEvent) {
+    let mut audit_log = self.audit_log.lock().await;
+    audit_log.push(event);
+    if audit_log.len() > 200 {
+      let drain = audit_log.len() - 200;
+      audit_log.drain(..drain);
+    }
   }
 }
 
@@ -210,7 +232,12 @@ pub async fn authorize_http_url(
       "Network access to \"{}://{}:{}\" was blocked by denied_domains policy.",
       key.protocol, key.host, key.port
     );
-    record_runtime_outcome(runtime, NetworkApprovalOutcome::DeniedByPolicy(reason.clone())).await;
+    record_network_audit_event(&key, "policy_denied", Some(reason.clone())).await;
+    record_runtime_outcome(
+      runtime,
+      NetworkApprovalOutcome::DeniedByPolicy(reason.clone()),
+    )
+    .await;
     return Err(reason);
   }
 
@@ -247,7 +274,12 @@ pub async fn authorize_http_url(
       "Network access to \"{}://{}:{}\" is blocked by approval policy.",
       key.protocol, key.host, key.port
     );
-    record_runtime_outcome(runtime, NetworkApprovalOutcome::DeniedByPolicy(reason.clone())).await;
+    record_network_audit_event(&key, "policy_denied", Some(reason.clone())).await;
+    record_runtime_outcome(
+      runtime,
+      NetworkApprovalOutcome::DeniedByPolicy(reason.clone()),
+    )
+    .await;
     return Err(reason);
   }
 
@@ -276,14 +308,34 @@ pub async fn authorize_http_url(
     ReviewDecision::Denied => PendingApprovalDecision::Deny,
   };
 
+  match resolved {
+    PendingApprovalDecision::AllowOnce => {
+      record_network_audit_event(&key, "allow_once", None).await;
+    }
+    PendingApprovalDecision::AllowForSession => {
+      record_network_audit_event(&key, "allow_session", None).await;
+    }
+    PendingApprovalDecision::Deny => {
+      record_network_audit_event(&key, "deny", None).await;
+    }
+  }
+
   if matches!(resolved, PendingApprovalDecision::AllowForSession) {
     service().session_denied_hosts.lock().await.remove(&key);
-    service().session_approved_hosts.lock().await.insert(key.clone());
+    service()
+      .session_approved_hosts
+      .lock()
+      .await
+      .insert(key.clone());
   }
 
   if matches!(resolved, PendingApprovalDecision::Deny) {
     service().session_approved_hosts.lock().await.remove(&key);
-    service().session_denied_hosts.lock().await.insert(key.clone());
+    service()
+      .session_denied_hosts
+      .lock()
+      .await
+      .insert(key.clone());
     record_runtime_outcome(runtime, NetworkApprovalOutcome::DeniedByUser).await;
   }
 
@@ -307,6 +359,18 @@ pub async fn record_network_policy_denial(attempt_id: &str, message: impl Into<S
 
 pub async fn is_network_approval_attempt_active(attempt_id: &str) -> bool {
   service().attempts.lock().await.contains_key(attempt_id)
+}
+
+pub async fn recent_network_audit_events(limit: usize) -> Vec<NetworkAuditEvent> {
+  let audit_log = service().audit_log.lock().await;
+  let mut events = audit_log
+    .iter()
+    .rev()
+    .take(limit.max(1))
+    .cloned()
+    .collect::<Vec<_>>();
+  events.reverse();
+  events
 }
 
 pub async fn finish_immediate_network_approval(
@@ -374,6 +438,19 @@ async fn record_runtime_outcome(runtime: &ToolRuntimeContext, outcome: NetworkAp
   }
 }
 
+async fn record_network_audit_event(key: &HostApprovalKey, decision: &str, reason: Option<String>) {
+  service()
+    .push_audit_event(NetworkAuditEvent {
+      timestamp: chrono::Utc::now().to_rfc3339(),
+      host: key.host.clone(),
+      protocol: key.protocol.clone(),
+      port: key.port,
+      decision: decision.to_string(),
+      reason,
+    })
+    .await;
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -386,6 +463,9 @@ mod tests {
       thread_id: "thread-1".to_string(),
       turn_id: "turn-1".to_string(),
       approval_policy: AskForApproval::OnRequest,
+      model_provider_id: None,
+      model_runtime_kind: None,
+      supports_native_web_search: false,
       has_managed_network_requirements: true,
       allowed_domains: Vec::new(),
       denied_domains: Vec::new(),
@@ -478,10 +558,7 @@ mod tests {
     let mut notified = false;
     for _ in 0..20 {
       if session
-        .notify_exec_approval(
-          "network#https#docs.example.com#443",
-          ReviewDecision::Always,
-        )
+        .notify_exec_approval("network#https#docs.example.com#443", ReviewDecision::Always)
         .await
       {
         notified = true;

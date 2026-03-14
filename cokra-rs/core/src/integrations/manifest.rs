@@ -81,7 +81,9 @@ pub struct IntegrationAuth {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IntegrationHealthcheck {
-  Command { run: Vec<String> },
+  Command {
+    run: Vec<String>,
+  },
   Http {
     method: Option<String>,
     url: String,

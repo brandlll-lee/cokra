@@ -477,17 +477,26 @@ fn extract_openai_account_id_from_jwt(token: &str) -> Option<String> {
 }
 
 fn tool_to_response_tool(tool: Tool) -> Value {
-  let function = tool.function.unwrap_or(FunctionDefinition {
-    name: String::new(),
-    description: String::new(),
-    parameters: serde_json::json!({}),
-  });
-  serde_json::json!({
-    "type": "function",
-    "name": function.name,
-    "description": function.description,
-    "parameters": function.parameters,
-  })
+  if tool.tool_type == "function" {
+    let function = tool.function.unwrap_or(FunctionDefinition {
+      name: String::new(),
+      description: String::new(),
+      parameters: serde_json::json!({}),
+    });
+    return serde_json::json!({
+      "type": "function",
+      "name": function.name,
+      "description": function.description,
+      "parameters": function.parameters,
+    });
+  }
+
+  let mut value = serde_json::Map::new();
+  value.insert("type".to_string(), Value::String(tool.tool_type));
+  for (key, item) in tool.extra {
+    value.insert(key, item);
+  }
+  Value::Object(value)
 }
 
 #[cfg(test)]

@@ -102,7 +102,11 @@ impl ToolRuntimeCatalog {
   }
 
   pub fn definitions(&self) -> Vec<ToolDefinition> {
-    self.entries.iter().map(|entry| entry.tool.clone()).collect()
+    self
+      .entries
+      .iter()
+      .map(|entry| entry.tool.clone())
+      .collect()
   }
 
   pub fn inspect(&self, name: &str) -> Option<ToolDefinition> {
@@ -284,6 +288,13 @@ fn build_search_text(tool: &ToolDefinition) -> String {
   parts.extend(tool.aliases.iter().cloned());
   parts.extend(tool.tags.iter().cloned());
   parts.extend(tool.input_keys.iter().cloned());
+  parts.extend(tool.capabilities.network_backends.iter().cloned());
+  if tool.capabilities.semantic_lsp {
+    parts.push("semantic_lsp".to_string());
+  }
+  if tool.capabilities.interactive_exec {
+    parts.push("interactive_exec".to_string());
+  }
   if let Some(provider_id) = &tool.provider_id {
     parts.push(provider_id.clone());
   }
@@ -367,6 +378,7 @@ mod tests {
       supports_parallel: true,
       mutates_state: false,
       input_keys: vec!["path".to_string()],
+      capabilities: crate::tool_runtime::ToolCapabilityFacets::for_tool_name(name, false),
       provider_id: Some("builtin".to_string()),
       source_kind: Some("builtin_primitive".to_string()),
       server_name: None,

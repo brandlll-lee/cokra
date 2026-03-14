@@ -316,7 +316,15 @@ where
       bg = next_bg;
     }
 
-    queue!(writer, Print(span.content.clone()))?;
+    let content = span.content.as_ref();
+    if content.contains('\r') {
+      // Defensive: strip carriage returns so inline scrollback can't be corrupted
+      // by cursor-return control characters in pasted text/tool output.
+      let sanitized = content.replace('\r', "");
+      queue!(writer, Print(sanitized))?;
+    } else {
+      queue!(writer, Print(span.content.clone()))?;
+    }
   }
 
   queue!(

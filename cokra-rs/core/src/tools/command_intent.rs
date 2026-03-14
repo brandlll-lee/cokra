@@ -69,9 +69,10 @@ fn unwrap_shell_wrapper(command: &[String]) -> Option<Vec<String>> {
     "cmd" | "cmd.exe" if command.len() >= 3 && command[1].eq_ignore_ascii_case("/c") => {
       command.get(2)
     }
-    value if value.contains("powershell")
-      && command.len() >= 3
-      && matches!(command[1].as_str(), "-Command" | "-command" | "-c") =>
+    value
+      if value.contains("powershell")
+        && command.len() >= 3
+        && matches!(command[1].as_str(), "-Command" | "-command" | "-c") =>
     {
       command.get(2)
     }
@@ -83,10 +84,7 @@ fn unwrap_shell_wrapper(command: &[String]) -> Option<Vec<String>> {
 }
 
 fn basename(command: &str) -> &str {
-  command
-    .rsplit(['/', '\\'])
-    .next()
-    .unwrap_or(command)
+  command.rsplit(['/', '\\']).next().unwrap_or(command)
 }
 
 fn build_command_prefix(command: &[String]) -> Vec<String> {
@@ -177,7 +175,11 @@ fn collect_path_intents(command: &[String], cwd: &Path) -> Vec<PathIntent> {
 
 fn normalize_path(arg: &str, cwd: &Path) -> PathBuf {
   let path = PathBuf::from(arg);
-  let joined = if path.is_absolute() { path } else { cwd.join(path) };
+  let joined = if path.is_absolute() {
+    path
+  } else {
+    cwd.join(path)
+  };
   lexically_normalize_path(joined)
 }
 

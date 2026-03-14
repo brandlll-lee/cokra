@@ -16,6 +16,58 @@ pub enum ToolSource {
   Api,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ToolCapabilityFacets {
+  #[serde(default)]
+  pub interactive_exec: bool,
+  #[serde(default)]
+  pub semantic_lsp: bool,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub network_backends: Vec<String>,
+}
+
+impl ToolCapabilityFacets {
+  pub fn for_tool_name(name: &str, allow_network: bool) -> Self {
+    match name {
+      "web_search" => Self {
+        interactive_exec: false,
+        semantic_lsp: false,
+        network_backends: vec![
+          "provider_native_openai_codex".to_string(),
+          "local_exa".to_string(),
+          "local_brave".to_string(),
+          "local_searxng".to_string(),
+        ],
+      },
+      "web_fetch" | "web_open_page" | "web_find_in_page" => Self {
+        interactive_exec: false,
+        semantic_lsp: false,
+        network_backends: vec!["http_fetch".to_string()],
+      },
+      "code_search" => Self {
+        interactive_exec: false,
+        semantic_lsp: false,
+        network_backends: vec!["exa_code_context".to_string()],
+      },
+      "lsp" | "lsp_status" | "lsp_restart" | "diagnostics" => Self {
+        interactive_exec: false,
+        semantic_lsp: true,
+        network_backends: Vec::new(),
+      },
+      _ if allow_network => Self {
+        interactive_exec: false,
+        semantic_lsp: false,
+        network_backends: vec!["network_enabled".to_string()],
+      },
+      _ => Self {
+        interactive_exec: false,
+        semantic_lsp: false,
+        network_backends: Vec::new(),
+      },
+    }
+  }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
   pub id: String,
@@ -38,6 +90,8 @@ pub struct ToolDefinition {
   pub mutates_state: bool,
   #[serde(default)]
   pub input_keys: Vec<String>,
+  #[serde(default)]
+  pub capabilities: ToolCapabilityFacets,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub provider_id: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]

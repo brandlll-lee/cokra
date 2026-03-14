@@ -1,5 +1,5 @@
-pub mod active_tool_status;
 pub mod activate_tools;
+pub mod active_tool_status;
 pub mod apply_patch;
 pub mod approve_team_plan;
 pub mod assign_team_task;
@@ -18,17 +18,18 @@ pub mod edit_file;
 pub mod glob;
 pub mod grep_files;
 pub mod handoff_team_task;
+pub mod inspect_tool;
 pub mod install_integration;
 pub mod integration_status;
-pub mod inspect_tool;
 pub mod list_dir;
 pub mod list_mcp_resource_templates;
 pub mod list_mcp_resources;
+pub mod lsp;
 pub mod mcp;
 pub mod plan;
 pub mod read_file;
-pub mod read_mcp_resource;
 pub mod read_many_files;
+pub mod read_mcp_resource;
 pub mod read_team_messages;
 pub mod request_user_input;
 pub mod reset_active_tools;
@@ -40,12 +41,13 @@ pub mod skill;
 pub mod spawn_agent;
 pub mod submit_team_plan;
 pub mod team_status;
-pub mod tool_audit_log;
 pub mod todo;
+pub mod tool_audit_log;
 pub mod update_team_task;
 pub mod view_image;
 pub mod wait;
 pub mod web_fetch;
+pub mod web_page;
 pub mod web_search;
 pub mod write_file;
 
@@ -67,9 +69,9 @@ pub fn register_builtin_handlers(
   registry.register_handler("list_dir", Arc::new(list_dir::ListDirHandler));
   registry.register_handler(
     "list_mcp_resources",
-    Arc::new(list_mcp_resources::ListMcpResourcesHandler::new(Arc::clone(
-      &mcp_manager,
-    ))),
+    Arc::new(list_mcp_resources::ListMcpResourcesHandler::new(
+      Arc::clone(&mcp_manager),
+    )),
   );
   registry.register_handler(
     "list_mcp_resource_templates",
@@ -89,7 +91,10 @@ pub fn register_builtin_handlers(
     "active_tool_status",
     Arc::new(active_tool_status::ActiveToolStatusHandler),
   );
-  registry.register_handler("activate_tools", Arc::new(activate_tools::ActivateToolsHandler));
+  registry.register_handler(
+    "activate_tools",
+    Arc::new(activate_tools::ActivateToolsHandler),
+  );
   registry.register_handler(
     "deactivate_tools",
     Arc::new(deactivate_tools::DeactivateToolsHandler),
@@ -110,7 +115,10 @@ pub fn register_builtin_handlers(
     "install_integration",
     Arc::new(install_integration::InstallIntegrationHandler),
   );
-  registry.register_handler("tool_audit_log", Arc::new(tool_audit_log::ToolAuditLogHandler));
+  registry.register_handler(
+    "tool_audit_log",
+    Arc::new(tool_audit_log::ToolAuditLogHandler),
+  );
   for tool_name in mcp_manager.tool_names() {
     registry.register_handler(
       tool_name,
@@ -174,7 +182,12 @@ pub fn register_builtin_handlers(
   );
   registry.register_handler("view_image", Arc::new(view_image::ViewImageHandler));
   registry.register_handler("web_search", Arc::new(web_search::WebSearchHandler));
+  registry.register_handler("web_open_page", Arc::new(web_page::WebOpenPageHandler));
+  registry.register_handler("web_find_in_page", Arc::new(web_page::WebFindInPageHandler));
   registry.register_handler("save_memory", Arc::new(save_memory::SaveMemoryHandler));
+  registry.register_handler("lsp", Arc::new(lsp::LspHandler));
+  registry.register_handler("lsp_status", Arc::new(lsp::LspStatusHandler));
+  registry.register_handler("lsp_restart", Arc::new(lsp::LspRestartHandler));
   registry.register_handler("diagnostics", Arc::new(diagnostics::DiagnosticsHandler));
   registry.register_handler("skill", Arc::new(skill::SkillHandler));
   registry.register_handler(

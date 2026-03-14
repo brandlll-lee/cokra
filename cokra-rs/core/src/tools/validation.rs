@@ -5,11 +5,11 @@ use cokra_config::SandboxConfig;
 
 use crate::exec::PermissionProfile;
 use crate::exec::SandboxPermissions;
-use crate::tools::command_intent::CommandIntent;
-use crate::tools::command_intent::CommandMutationClass;
 use crate::tools::SHELL_TOOL_NAME;
 use crate::tools::UNIFIED_EXEC_TOOL_NAME;
 use crate::tools::canonical_exec_tool_name;
+use crate::tools::command_intent::CommandIntent;
+use crate::tools::command_intent::CommandMutationClass;
 use crate::tools::context::FunctionCallError;
 
 #[derive(Debug, Clone)]

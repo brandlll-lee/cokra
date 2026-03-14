@@ -23,6 +23,7 @@ pub(crate) mod config;
 pub(crate) mod exec;
 pub(crate) mod exec_policy;
 pub mod integrations;
+pub(crate) mod lsp;
 pub mod mcp;
 #[allow(dead_code)]
 pub mod model;
@@ -31,8 +32,8 @@ pub(crate) mod sandbox_manager;
 pub(crate) mod session;
 pub(crate) mod shell;
 pub mod skills;
-pub mod tool_runtime;
 pub(crate) mod thread_manager;
+pub mod tool_runtime;
 pub mod tools;
 pub(crate) mod truncate;
 #[allow(dead_code)]

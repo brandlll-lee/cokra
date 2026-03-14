@@ -84,7 +84,8 @@ impl ToolHandler for ManifestApiHandler {
     let input = invocation.parse_arguments_value()?;
     let client = reqwest::Client::builder()
       .timeout(
-        self.timeout_ms
+        self
+          .timeout_ms
           .map(std::time::Duration::from_millis)
           .unwrap_or_else(|| std::time::Duration::from_secs(15)),
       )
@@ -107,21 +108,23 @@ impl ToolHandler for ManifestApiHandler {
         .query
         .iter()
         .map(|(key, value)| {
-          render_string_template(value, &input, invocation.cwd.as_path()).map(|rendered| {
-            (key.clone(), rendered)
-          })
+          render_string_template(value, &input, invocation.cwd.as_path())
+            .map(|rendered| (key.clone(), rendered))
         })
         .collect::<Result<Vec<_>, _>>()?;
       request = request.query(&rendered);
     }
     if let Some(body) = &self.body {
-      request = request.json(&render_json_template(body, &input, invocation.cwd.as_path())?);
+      request = request.json(&render_json_template(
+        body,
+        &input,
+        invocation.cwd.as_path(),
+      )?);
     }
 
-    let response = request
-      .send()
-      .await
-      .map_err(|err| FunctionCallError::Execution(format!("API integration request failed: {err}")))?;
+    let response = request.send().await.map_err(|err| {
+      FunctionCallError::Execution(format!("API integration request failed: {err}"))
+    })?;
     let status = response.status();
     let text = response
       .text()

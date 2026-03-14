@@ -57,7 +57,12 @@ impl ToolHandler for ReadMcpResourceHandler {
         "uri must not be empty".to_string(),
       ));
     }
-    if !self.manager.server_names().iter().any(|name| name == server) {
+    if !self
+      .manager
+      .server_names()
+      .iter()
+      .any(|name| name == server)
+    {
       return Err(FunctionCallError::RespondToModel(format!(
         "unknown MCP server `{server}`"
       )));
@@ -78,7 +83,9 @@ impl ToolHandler for ReadMcpResourceHandler {
         .collect(),
     })
     .map_err(|err| {
-      FunctionCallError::Fatal(format!("failed to serialize read_mcp_resource result: {err}"))
+      FunctionCallError::Fatal(format!(
+        "failed to serialize read_mcp_resource result: {err}"
+      ))
     })?;
     Ok(ToolOutput::success(content).with_id(invocation.id))
   }

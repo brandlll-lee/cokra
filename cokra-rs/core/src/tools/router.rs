@@ -74,6 +74,9 @@ pub struct ToolRunContext {
   pub cwd: PathBuf,
   pub approval_policy: AskForApproval,
   pub sandbox_policy: SandboxPolicy,
+  pub model_provider_id: Option<String>,
+  pub model_runtime_kind: Option<String>,
+  pub supports_native_web_search: bool,
   pub has_managed_network_requirements: bool,
   pub allowed_domains: Vec<String>,
   pub denied_domains: Vec<String>,
@@ -100,6 +103,9 @@ impl ToolRunContext {
       cwd,
       approval_policy,
       sandbox_policy,
+      model_provider_id: None,
+      model_runtime_kind: None,
+      supports_native_web_search: false,
       has_managed_network_requirements: false,
       allowed_domains: Vec::new(),
       denied_domains: Vec::new(),
@@ -191,6 +197,9 @@ impl ToolRouter {
       tx_event: run_ctx.tx_event.clone(),
       approval_policy: run_ctx.approval_policy,
       sandbox_policy: run_ctx.sandbox_policy.clone(),
+      model_provider_id: run_ctx.model_provider_id.clone(),
+      model_runtime_kind: run_ctx.model_runtime_kind.clone(),
+      supports_native_web_search: run_ctx.supports_native_web_search,
       has_managed_network_requirements: run_ctx.has_managed_network_requirements,
       allowed_domains: run_ctx.allowed_domains.clone(),
       denied_domains: run_ctx.denied_domains.clone(),
@@ -371,17 +380,19 @@ pub(crate) fn summarize_tool_display_command(call: &ToolCall, cwd: &Path) -> Opt
       .map(ToString::to_string),
     "active_tool_status" => Some("runtime_tool_space".to_string()),
     "reset_active_tools" => Some("all_external_tools".to_string()),
-    "activate_tools" | "deactivate_tools" => call
-      .args
-      .get("names")
-      .and_then(Value::as_array)
-      .map(|items| {
-        items
-          .iter()
-          .filter_map(Value::as_str)
-          .collect::<Vec<_>>()
-          .join(", ")
-      }),
+    "activate_tools" | "deactivate_tools" => {
+      call
+        .args
+        .get("names")
+        .and_then(Value::as_array)
+        .map(|items| {
+          items
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+        })
+    }
     "integration_status" | "connect_integration" | "install_integration" => call
       .args
       .get("name")
@@ -405,11 +416,50 @@ pub(crate) fn summarize_tool_display_command(call: &ToolCall, cwd: &Path) -> Opt
       let uri = call.args.get("uri").and_then(Value::as_str)?;
       Some(format!("{server}::{uri}"))
     }
-    "code_search" => call
+    "code_search" => call.args.get("query").and_then(Value::as_str).map(|query| {
+      let scope = call
+        .args
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("local");
+      format!("{scope}:{query}")
+    }),
+    "web_search" => call
       .args
       .get("query")
       .and_then(Value::as_str)
       .map(ToString::to_string),
+    "web_fetch" | "web_open_page" => call
+      .args
+      .get("url")
+      .and_then(Value::as_str)
+      .map(ToString::to_string),
+    "web_find_in_page" => {
+      let url = call.args.get("url").and_then(Value::as_str)?;
+      let pattern = call.args.get("pattern").and_then(Value::as_str)?;
+      Some(format!("{pattern} @ {url}"))
+    }
+    "lsp" => {
+      let operation = call.args.get("operation").and_then(Value::as_str)?;
+      let file_path = call.args.get("file_path").and_then(Value::as_str)?;
+      Some(format!(
+        "{operation} {}",
+        summarize_path_for_display(file_path, cwd)
+      ))
+    }
+    "lsp_restart" => call
+      .args
+      .get("file_path")
+      .and_then(Value::as_str)
+      .map(|path| format!("restart {}", summarize_path_for_display(path, cwd)))
+      .or_else(|| {
+        call
+          .args
+          .get("server_id")
+          .and_then(Value::as_str)
+          .map(|server| format!("restart {server}"))
+      }),
+    "lsp_status" => Some("lsp_manager".to_string()),
     _ => None,
   }
 }
@@ -460,10 +510,7 @@ impl RegistryToolRuntime {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 enum RegistryApprovalKey {
-  Tool {
-    tool_name: String,
-    args: String,
-  },
+  Tool { tool_name: String, args: String },
   Exec(ExecApprovalKey),
 }
 
@@ -679,10 +726,12 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
         _ => None,
       })
       .or_else(|| {
-        self
-          .spec
-          .as_ref()
-          .and_then(|spec| spec.permissions.allow_network.then_some(NetworkApprovalMode::Immediate))
+        self.spec.as_ref().and_then(|spec| {
+          spec
+            .permissions
+            .allow_network
+            .then_some(NetworkApprovalMode::Immediate)
+        })
       })?;
 
     Some(NetworkApprovalSpec { mode })
@@ -720,6 +769,9 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
           thread_id: runtime.thread_id.clone(),
           turn_id: runtime.turn_id.clone(),
           approval_policy: ctx.turn.approval_policy.clone(),
+          model_provider_id: ctx.turn.model_provider_id.clone(),
+          model_runtime_kind: ctx.turn.model_runtime_kind.clone(),
+          supports_native_web_search: ctx.turn.supports_native_web_search,
           has_managed_network_requirements: ctx.turn.has_managed_network_requirements,
           allowed_domains: ctx.turn.allowed_domains.clone(),
           denied_domains: ctx.turn.denied_domains.clone(),
@@ -733,7 +785,8 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
       .as_ref()
       .map(|spec| spec.mutates_state)
       .unwrap_or(false);
-    let is_mutating = declared_mutates_state || self.registry.is_mutating(&invocation).unwrap_or(false);
+    let is_mutating =
+      declared_mutates_state || self.registry.is_mutating(&invocation).unwrap_or(false);
     if is_mutating
       && let Some(runtime) = &invocation.runtime
       && let Some(team_runtime) = runtime_for_thread(&runtime.thread_id)
@@ -952,12 +1005,12 @@ mod tests {
   use std::path::Path;
   use std::sync::Arc;
 
-  use serde_json::json;
   use serde_json::Value;
+  use serde_json::json;
 
+  use super::RegistryToolRuntime;
   use super::ToolCall;
   use super::exec_approval_key;
-  use super::RegistryToolRuntime;
   use super::should_emit_exec_events;
   use super::summarize_tool_display_command;
   use crate::tools::registry::ToolRegistry;
@@ -1005,7 +1058,7 @@ mod tests {
 
     assert_eq!(
       summarize_tool_display_command(&call, Path::new("/tmp/project")),
-      Some("spawn_agent".to_string())
+      Some("local:spawn_agent".to_string())
     );
   }
 

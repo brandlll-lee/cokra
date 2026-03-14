@@ -13,8 +13,8 @@ use cokra_protocol::ThreadId;
 
 use crate::model::ModelClient;
 use crate::session::Session;
-use crate::tool_runtime::UnifiedToolRuntime;
 use crate::thread_manager::ThreadManagerState;
+use crate::tool_runtime::UnifiedToolRuntime;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
 use crate::turn::TurnConfig;

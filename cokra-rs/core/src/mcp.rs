@@ -227,7 +227,8 @@ impl McpConnectionManager {
         exposed_name: exposed_name.clone(),
         server_name: tool.server.clone(),
         remote_tool_name: tool.tool.clone(),
-        description: (!tool.spec.description.trim().is_empty()).then(|| tool.spec.description.clone()),
+        description: (!tool.spec.description.trim().is_empty())
+          .then(|| tool.spec.description.clone()),
       })
       .collect::<Vec<_>>();
     descriptors.sort_by(|left, right| left.exposed_name.cmp(&right.exposed_name));
@@ -253,17 +254,15 @@ impl McpConnectionManager {
       .resources
       .iter()
       .flat_map(|(server_name, resources)| {
-        resources
-          .iter()
-          .map(move |resource| McpResourceDescriptor {
-            server_name: server_name.clone(),
-            uri: resource.uri.clone(),
-            name: resource.name.clone(),
-            title: resource.title.clone(),
-            description: resource.description.clone(),
-            mime_type: resource.mime_type.clone(),
-            size: resource.size,
-          })
+        resources.iter().map(move |resource| McpResourceDescriptor {
+          server_name: server_name.clone(),
+          uri: resource.uri.clone(),
+          name: resource.name.clone(),
+          title: resource.title.clone(),
+          description: resource.description.clone(),
+          mime_type: resource.mime_type.clone(),
+          size: resource.size,
+        })
       })
       .collect::<Vec<_>>();
     descriptors.sort_by(|left, right| {

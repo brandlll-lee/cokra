@@ -1,4 +1,4 @@
-﻿use ratatui::style::Stylize;
+use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
 
@@ -930,4 +930,3 @@ mod tests {
     assert!(rendered.contains("⎿ Completed"));
   }
 }
-

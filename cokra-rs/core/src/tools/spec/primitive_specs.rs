@@ -41,8 +41,13 @@ pub(crate) fn build_specs() -> Vec<ToolSpec> {
     request_user_input_tool(),
     view_image_tool(),
     web_fetch_tool(),
+    web_open_page_tool(),
+    web_find_in_page_tool(),
     web_search_tool(),
     save_memory_tool(),
+    lsp_tool(),
+    lsp_status_tool(),
+    lsp_restart_tool(),
     diagnostics_tool(),
     skill_tool(),
     read_many_files_tool(),
@@ -362,9 +367,15 @@ fn code_search_tool() -> ToolSpec {
     "max_matches_per_file".to_string(),
     int_field("Maximum snippet matches per file. Default 8."),
   );
+  props.insert(
+    "scope".to_string(),
+    str_field(
+      "Search scope: local for workspace search, web for external code and documentation search.",
+    ),
+  );
   primitive_tool(
     "code_search",
-    "Search the local workspace for code or text matching a query and return ranked file hits with line-numbered snippets.",
+    "Search the local workspace or external code/documentation sources for code matching a query and return structured ranked hits.",
     obj(props, &["query"]),
     default_permissions(),
   )
@@ -638,9 +649,7 @@ fn web_fetch_tool() -> ToolSpec {
   );
   props.insert(
     "format".to_string(),
-    str_field(
-      "Response format: text for HTML converted to plain text, html for raw HTML, or raw for the unprocessed response body.",
-    ),
+    str_field("Response format: text, markdown, or html."),
   );
   props.insert(
     "timeout".to_string(),
@@ -648,8 +657,66 @@ fn web_fetch_tool() -> ToolSpec {
   );
   primitive_tool(
     "web_fetch",
-    "Fetch content from a URL. Use this to read web documentation, API references, or other online resources.",
+    "Fetch content from a URL and return structured metadata plus text, markdown, or html content.",
     obj(props, &["url"]),
+    ToolPermissions {
+      requires_approval: true,
+      allow_network: true,
+      allow_fs_write: false,
+    },
+  )
+  .with_permission_key("web")
+}
+
+fn web_open_page_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "url".to_string(),
+    str_field("The URL to open. Must start with http:// or https://."),
+  );
+  props.insert(
+    "format".to_string(),
+    str_field("Response format: text, markdown, or html. Defaults to markdown."),
+  );
+  props.insert(
+    "timeout".to_string(),
+    int_field("Optional timeout in seconds. Default 30, max 120."),
+  );
+  primitive_tool(
+    "web_open_page",
+    "Open a web page and return structured page metadata plus page content. Use this after web_search when you need page-level context.",
+    obj(props, &["url"]),
+    ToolPermissions {
+      requires_approval: true,
+      allow_network: true,
+      allow_fs_write: false,
+    },
+  )
+  .with_permission_key("web")
+}
+
+fn web_find_in_page_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "url".to_string(),
+    str_field("The URL whose page content should be searched."),
+  );
+  props.insert(
+    "pattern".to_string(),
+    str_field("Case-insensitive text pattern to search for in the fetched page."),
+  );
+  props.insert(
+    "timeout".to_string(),
+    int_field("Optional timeout in seconds. Default 30, max 120."),
+  );
+  props.insert(
+    "max_matches".to_string(),
+    int_field("Maximum number of matched lines to return. Default 20."),
+  );
+  primitive_tool(
+    "web_find_in_page",
+    "Fetch a web page and search for matching lines inside it. Use this after web_open_page when you need to locate a specific term quickly.",
+    obj(props, &["url", "pattern"]),
     ToolPermissions {
       requires_approval: true,
       allow_network: true,
@@ -685,6 +752,39 @@ fn web_search_tool() -> ToolSpec {
     int_field("Number of results to return. Default 8, max 20."),
   );
   props.insert(
+    "domains".to_string(),
+    JsonSchema::Array {
+      items: Box::new(str_field(
+        "Optional domain filter, for example docs.rs or openai.com.",
+      )),
+      description: Some(
+        "Restrict results to specific domains when supported by the backend.".to_string(),
+      ),
+    },
+  );
+  props.insert(
+    "recency".to_string(),
+    int_field("Optional recency filter in days."),
+  );
+  props.insert(
+    "type".to_string(),
+    str_field("Optional search type hint, for example news, docs, or reference."),
+  );
+  props.insert(
+    "country".to_string(),
+    str_field("Optional country hint for backends that support geographic search ranking."),
+  );
+  props.insert(
+    "response_length".to_string(),
+    str_field("Preferred result length: short, medium, or long."),
+  );
+  props.insert(
+    "images".to_string(),
+    bool_field(
+      "Whether image-oriented search hints should be enabled when supported by the backend.",
+    ),
+  );
+  props.insert(
     "livecrawl".to_string(),
     str_field("Live crawl mode for the Exa backend: fallback or preferred."),
   );
@@ -694,7 +794,7 @@ fn web_search_tool() -> ToolSpec {
   );
   primitive_tool(
     "web_search",
-    "Search the web for information using the configured backend and return titles, URLs, and summaries.",
+    "Search the web using provider-native search when available or a local backend fallback otherwise, and return structured citation-ready results.",
     obj(props, &["query"]),
     ToolPermissions {
       requires_approval: true,
@@ -736,11 +836,90 @@ fn diagnostics_tool() -> ToolSpec {
   );
   primitive_tool(
     "diagnostics",
-    "Get LSP diagnostics for a source file by invoking the appropriate language server on PATH.",
+    "Compatibility diagnostics view backed by the shared LSP service. Prefer the lsp tool for semantic navigation and use this when you specifically need the latest diagnostics list for a file.",
     obj(props, &["path"]),
     default_permissions(),
   )
   .with_permission_key("read")
+}
+
+fn lsp_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "operation".to_string(),
+    str_field(
+      "The LSP operation to run: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, or outgoingCalls.",
+    ),
+  );
+  props.insert(
+    "file_path".to_string(),
+    str_field("Absolute or relative path to the source file that anchors the LSP request."),
+  );
+  props.insert(
+    "line".to_string(),
+    int_field("One-indexed line number for position-based operations."),
+  );
+  props.insert(
+    "character".to_string(),
+    int_field("One-indexed character offset for position-based operations."),
+  );
+  props.insert(
+    "query".to_string(),
+    str_field("Optional workspace symbol query string. Defaults to an empty query."),
+  );
+  props.insert(
+    "max_results".to_string(),
+    int_field("Maximum number of semantic results to keep after filtering. Default 20."),
+  );
+  props.insert(
+    "symbol_kinds".to_string(),
+    JsonSchema::Array {
+      items: Box::new(str_field(
+        "Symbol kind name or numeric LSP SymbolKind value.",
+      )),
+      description: Some(
+        "Optional symbol kind filters for workspaceSymbol/documentSymbol results.".to_string(),
+      ),
+    },
+  );
+  primitive_tool(
+    "lsp",
+    "Run semantic LSP operations against a workspace-aware language server and return a JSON result payload with a short summary.",
+    obj(props, &["operation", "file_path"]),
+    default_permissions(),
+  )
+  .with_permission_key("lsp")
+}
+
+fn lsp_status_tool() -> ToolSpec {
+  primitive_tool(
+    "lsp_status",
+    "Inspect the current LSP service state, including connected clients, broken clients, and manager configuration.",
+    obj(BTreeMap::new(), &[]),
+    default_permissions(),
+  )
+  .with_permission_key("lsp")
+}
+
+fn lsp_restart_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "file_path".to_string(),
+    str_field("Optional source file path whose matching LSP client should be restarted."),
+  );
+  props.insert(
+    "server_id".to_string(),
+    str_field("Optional LSP server id filter, for example rust-analyzer or gopls."),
+  );
+  primitive_tool(
+    "lsp_restart",
+    "Restart one or more cached LSP clients and clear any broken-client cache entries for the same target.",
+    obj(props, &[]),
+    default_permissions(),
+  )
+  .with_permission_key("lsp")
+  .with_mutates_state(true)
+  .with_supports_parallel(false)
 }
 
 pub fn skill_tool_with_description(description: impl Into<String>) -> ToolSpec {

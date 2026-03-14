@@ -48,7 +48,9 @@ impl ToolHandler for ConnectIntegrationHandler {
       .manifests
       .iter()
       .find(|loaded| loaded.manifest.name == args.name)
-      .ok_or_else(|| FunctionCallError::RespondToModel(format!("unknown integration: {}", args.name)))?;
+      .ok_or_else(|| {
+        FunctionCallError::RespondToModel(format!("unknown integration: {}", args.name))
+      })?;
     let bootstrap = evaluate_bootstrap(manifest, invocation.cwd.as_path()).await;
     let mut missing_prerequisites = Vec::new();
     if matches!(bootstrap.status, IntegrationBootstrapStatus::NeedsInstall) {
@@ -88,14 +90,21 @@ fn connectable_tool_names(
   manifest: &LoadedIntegrationManifest,
 ) -> Vec<String> {
   match manifest.manifest.kind {
-    IntegrationKind::Cli | IntegrationKind::Api => {
-      manifest.manifest.tools.iter().map(|tool| tool.id.clone()).collect()
-    }
+    IntegrationKind::Cli | IntegrationKind::Api => manifest
+      .manifest
+      .tools
+      .iter()
+      .map(|tool| tool.id.clone())
+      .collect(),
     IntegrationKind::Mcp => registry
       .list_specs()
       .into_iter()
       .filter(|spec| spec.source_kind == ToolSourceKind::Mcp)
-      .filter(|spec| spec.name.starts_with(&format!("mcp__{}__", manifest.manifest.name)))
+      .filter(|spec| {
+        spec
+          .name
+          .starts_with(&format!("mcp__{}__", manifest.manifest.name))
+      })
       .map(|spec| spec.name)
       .collect(),
   }

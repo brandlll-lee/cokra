@@ -133,6 +133,10 @@ pub struct Tool {
   /// Function tool definition
   #[serde(default)]
   pub function: Option<FunctionDefinition>,
+
+  /// Provider-native tool configuration fields.
+  #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+  pub extra: HashMap<String, serde_json::Value>,
 }
 
 impl Tool {
@@ -141,6 +145,29 @@ impl Tool {
     Self {
       tool_type: "function".to_string(),
       function: Some(function),
+      extra: HashMap::new(),
+    }
+  }
+
+  pub fn native_web_search(allowed_domains: &[String]) -> Self {
+    let mut extra = HashMap::new();
+    if !allowed_domains.is_empty() {
+      extra.insert(
+        "filters".to_string(),
+        serde_json::json!({
+          "allowed_domains": allowed_domains,
+        }),
+      );
+    }
+    extra.insert(
+      "search_context_size".to_string(),
+      serde_json::Value::String("high".to_string()),
+    );
+
+    Self {
+      tool_type: "web_search".to_string(),
+      function: None,
+      extra,
     }
   }
 }

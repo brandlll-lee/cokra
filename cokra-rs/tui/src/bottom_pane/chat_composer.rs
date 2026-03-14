@@ -12,6 +12,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -43,6 +45,7 @@ use crate::style::user_message_style;
 use crate::ui_consts::LIVE_PREFIX_COLS;
 
 const FOOTER_TRANSIENT_HINT_TIMEOUT: Duration = Duration::from_secs(1);
+const CLAUDE_EFFORT_HINT: &str = "○ medium · /effort";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ComposerSubmission {
@@ -85,8 +88,6 @@ pub(crate) struct ChatComposer {
   remote_image_urls: Vec<String>,
   mention_bindings: Vec<MentionBinding>,
   pending_pastes: Vec<(String, String)>,
-  // 1:1 codex: placeholder shown when textarea is empty.
-  placeholder_text: String,
 }
 
 impl ChatComposer {
@@ -94,9 +95,6 @@ impl ChatComposer {
     Self {
       textarea: TextArea::new(),
       textarea_state: RefCell::new(TextAreaState::default()),
-      // 1:1 codex: default placeholder text matching codex's input hint.
-      placeholder_text:
-        "Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts".to_string(),
       is_task_running: false,
       footer_mode: FooterMode::ComposerEmpty,
       footer_timer: None,
@@ -693,6 +691,7 @@ impl ChatComposer {
   }
 
   pub(crate) fn handle_paste(&mut self, text: String) {
+    let text = super::normalize_pasted_newlines(text);
     self.textarea.insert_str(&text);
     self.history.reset_navigation();
     self.footer_mode = footer::reset_mode_after_activity(self.footer_mode);
@@ -771,6 +770,10 @@ impl ChatComposer {
   }
 
   pub(crate) fn prepare_submission(&mut self) -> Option<ComposerSubmission> {
+    if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
+      self.handle_paste(pasted);
+    }
+
     let text = self.textarea.text().to_string();
     let text_elements = self.textarea.text_elements();
     if text.trim().is_empty() && self.remote_image_urls.is_empty() {
@@ -816,9 +819,53 @@ impl ChatComposer {
   }
 }
 
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn prepare_submission_flushes_buffered_paste_burst_text() {
+    let mut composer = ChatComposer::new();
+    let now = Instant::now();
+
+    composer.paste_burst.append_char_to_buffer('请', now);
+    composer.paste_burst.append_char_to_buffer('只', now);
+    composer.paste_burst.append_char_to_buffer('读', now);
+
+    let submission = composer.prepare_submission().expect("submission");
+
+    assert_eq!(submission.text, "请只读");
+  }
+
+  #[test]
+  fn prepare_submission_flushes_pending_first_ascii_char() {
+    let mut composer = ChatComposer::new();
+    let now = Instant::now();
+
+    assert!(matches!(
+      composer.paste_burst.on_plain_char('a', now),
+      CharDecision::RetainFirstChar
+    ));
+
+    let submission = composer.prepare_submission().expect("submission");
+
+    assert_eq!(submission.text, "a");
+  }
+
+  #[test]
+  fn handle_paste_normalizes_crlf_and_cr_to_lf() {
+    let mut composer = ChatComposer::new();
+    composer.handle_paste("one\r\ntwo\rthree\r\nfour".to_string());
+
+    let submission = composer.prepare_submission().expect("submission");
+    assert_eq!(submission.text, "one\ntwo\nthree\nfour");
+    assert!(!submission.text.contains('\r'));
+  }
+}
+
 impl Renderable for ChatComposer {
   // 1:1 codex: render_with_mask.
-  // Layout: [composer_rect (background fill + › prefix + textarea)] then [popup_rect (popup OR footer)].
+  // Layout: [composer_rect (horizontal rules + prompt + textarea)] then [popup_rect (popup OR footer)].
   // Popup and footer share the SAME slot below the composer.
   fn render(&self, area: Rect, buf: &mut Buffer) {
     if area.height == 0 || area.width == 0 {
@@ -840,22 +887,45 @@ impl Renderable for ChatComposer {
     // 1:1 codex: Insets(top=1, left=LIVE_PREFIX_COLS, bottom=1, right=1) — no border, just spacing.
     let textarea_rect = composer_rect.inset(Insets::tlbr(1, LIVE_PREFIX_COLS, 1, 1));
 
-    // 1:1 codex: fill composer_rect with user_message_style (subtle background tint, no border).
-    let style = user_message_style();
-    Block::default().style(style).render(composer_rect, buf);
+    // Clear the composer rect so the horizontal rules match the chat surface.
+    Block::default()
+      .style(Style::default())
+      .render(composer_rect, buf);
 
-    // 1:1 codex: render the › prompt at the left gutter.
+    // Tint only the input surface between the horizontal rules.
+    let input_surface = composer_rect.inset(Insets::tlbr(1, 0, 1, 0));
+    let input_style = user_message_style();
+    Block::default()
+      .style(input_style)
+      .render(input_surface, buf);
+
+    // Claude Code-style horizontal rules above/below the input surface.
+    if composer_rect.height >= 2 {
+      let rule = Span::from("─".repeat(composer_rect.width as usize)).dim();
+      buf.set_span(composer_rect.x, composer_rect.y, &rule, composer_rect.width);
+      buf.set_span(
+        composer_rect.x,
+        composer_rect
+          .y
+          .saturating_add(composer_rect.height.saturating_sub(1)),
+        &rule,
+        composer_rect.width,
+      );
+    }
+
+    // Render the prompt at the left gutter.
     if !textarea_rect.is_empty() {
-      let prompt = if self.input_enabled {
-        "›".bold()
+      let prompt_style = if self.input_enabled {
+        input_style.add_modifier(Modifier::BOLD)
       } else {
-        "›".dim()
+        input_style.add_modifier(Modifier::DIM)
       };
+      let prompt = Span::styled("> ", prompt_style);
       buf.set_span(
         textarea_rect.x.saturating_sub(LIVE_PREFIX_COLS),
         textarea_rect.y,
         &prompt,
-        textarea_rect.width,
+        LIVE_PREFIX_COLS.min(textarea_rect.width),
       );
     }
 
@@ -867,17 +937,6 @@ impl Renderable for ChatComposer {
         buf,
         &mut self.textarea_state.borrow_mut(),
       );
-    }
-
-    // 1:1 codex: render placeholder text when textarea is empty.
-    if self.textarea.text().is_empty() && !textarea_rect.is_empty() {
-      let text = if self.input_enabled {
-        self.placeholder_text.as_str()
-      } else {
-        "Input disabled."
-      };
-      let placeholder = Span::from(text.to_string()).dim();
-      Line::from(vec![placeholder]).render(textarea_rect, buf);
     }
 
     // Render popup OR footer in the shared bottom slot.
@@ -893,10 +952,14 @@ impl Renderable for ChatComposer {
         && footer_props.is_task_running
         && footer_props.steer_enabled;
 
-      let right_line = Some(footer::context_window_line(
-        footer_props.context_window_percent,
-        footer_props.context_window_used_tokens,
-      ));
+      let right_line = if footer_props.status_line_enabled {
+        Some(footer::context_window_line(
+          footer_props.context_window_percent,
+          footer_props.context_window_used_tokens,
+        ))
+      } else {
+        Some(Line::from(vec![Span::from(CLAUDE_EFFORT_HINT).dim()]))
+      };
       let right_width = right_line
         .as_ref()
         .map(|line| line.width() as u16)

@@ -69,9 +69,10 @@ pub async fn build_explicit_prompt_injections(
             result.skills.push(skill);
           }
         } else {
-          result
-            .warnings
-            .push(format!("explicit skill mention `{}` could not be resolved", mention.name));
+          result.warnings.push(format!(
+            "explicit skill mention `{}` could not be resolved",
+            mention.name
+          ));
         }
       }
       PromptAssetKind::Persona => {
@@ -80,9 +81,10 @@ pub async fn build_explicit_prompt_injections(
             result.personas.push(persona);
           }
         } else {
-          result
-            .warnings
-            .push(format!("explicit persona mention `{}` could not be resolved", mention.name));
+          result.warnings.push(format!(
+            "explicit persona mention `{}` could not be resolved",
+            mention.name
+          ));
         }
       }
     }
@@ -91,9 +93,7 @@ pub async fn build_explicit_prompt_injections(
   result
 }
 
-pub fn render_explicit_prompt_injections(
-  injections: &ExplicitPromptInjections,
-) -> Option<String> {
+pub fn render_explicit_prompt_injections(injections: &ExplicitPromptInjections) -> Option<String> {
   if injections.skills.is_empty() && injections.personas.is_empty() {
     return None;
   }
@@ -211,7 +211,12 @@ async fn discover_prompt_assets(cwd: &Path, kind: PromptAssetKind) -> Vec<Prompt
 fn prompt_asset_generated_rank(path: &Path) -> u8 {
   path
     .components()
-    .any(|component| component.as_os_str().to_string_lossy().eq_ignore_ascii_case("generated"))
+    .any(|component| {
+      component
+        .as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case("generated")
+    })
     .then_some(0)
     .unwrap_or(1)
 }
@@ -323,7 +328,9 @@ fn extract_plain_mentions(text: &str) -> Vec<Mention> {
       continue;
     }
 
-    let previous = position.checked_sub(1).and_then(|idx| chars.get(idx).copied());
+    let previous = position
+      .checked_sub(1)
+      .and_then(|idx| chars.get(idx).copied());
     if previous
       .map(|(_, prev)| is_mention_name_char(prev))
       .unwrap_or(false)
@@ -407,7 +414,9 @@ fn is_mention_name_char(ch: char) -> bool {
 
 fn resolve_skill_mention(mention: &Mention, skills: &[SkillDocument]) -> Option<SkillDocument> {
   if let Some(target) = mention.linked_target.as_deref()
-    && let Some(skill) = skills.iter().find(|skill| skill_target_matches(target, skill))
+    && let Some(skill) = skills
+      .iter()
+      .find(|skill| skill_target_matches(target, skill))
   {
     return Some(skill.clone());
   }
@@ -419,7 +428,10 @@ fn resolve_skill_mention(mention: &Mention, skills: &[SkillDocument]) -> Option<
 }
 
 fn skill_target_matches(target: &str, skill: &SkillDocument) -> bool {
-  target.strip_prefix("skill://").map(|value| value == skill.name).unwrap_or(false)
+  target
+    .strip_prefix("skill://")
+    .map(|value| value == skill.name)
+    .unwrap_or(false)
     || PathBuf::from(target) == skill.location
 }
 
@@ -428,12 +440,17 @@ fn resolve_asset_mention(
   assets: &[PromptAssetDocument],
 ) -> Option<PromptAssetDocument> {
   if let Some(target) = mention.linked_target.as_deref()
-    && let Some(asset) = assets.iter().find(|asset| asset_target_matches(target, asset))
+    && let Some(asset) = assets
+      .iter()
+      .find(|asset| asset_target_matches(target, asset))
   {
     return Some(asset.clone());
   }
 
-  assets.iter().find(|asset| asset.name == mention.name).cloned()
+  assets
+    .iter()
+    .find(|asset| asset.name == mention.name)
+    .cloned()
 }
 
 fn asset_target_matches(target: &str, asset: &PromptAssetDocument) -> bool {
@@ -441,7 +458,10 @@ fn asset_target_matches(target: &str, asset: &PromptAssetDocument) -> bool {
     PromptAssetKind::Skill => "skill://",
     PromptAssetKind::Persona => "persona://",
   };
-  target.strip_prefix(prefix).map(|value| value == asset.name).unwrap_or(false)
+  target
+    .strip_prefix(prefix)
+    .map(|value| value == asset.name)
+    .unwrap_or(false)
     || PathBuf::from(target) == asset.location
 }
 
@@ -459,7 +479,8 @@ mod tests {
 
   #[test]
   fn extract_explicit_mentions_supports_linked_markers() {
-    let mentions = extract_explicit_mentions("Use [$rust-expert](/tmp/SKILL.md) and [@ops](persona://ops)");
+    let mentions =
+      extract_explicit_mentions("Use [$rust-expert](/tmp/SKILL.md) and [@ops](persona://ops)");
     assert_eq!(mentions.len(), 2);
     assert_eq!(mentions[0].linked_target.as_deref(), Some("/tmp/SKILL.md"));
     assert_eq!(mentions[1].linked_target.as_deref(), Some("persona://ops"));
@@ -467,10 +488,14 @@ mod tests {
 
   #[test]
   fn extract_explicit_mentions_prefers_linked_variant_over_plain_duplicate() {
-    let mentions =
-      extract_explicit_mentions("Use [$rust-expert](skill://rust-expert) and then $rust-expert again");
+    let mentions = extract_explicit_mentions(
+      "Use [$rust-expert](skill://rust-expert) and then $rust-expert again",
+    );
     assert_eq!(mentions.len(), 1);
-    assert_eq!(mentions[0].linked_target.as_deref(), Some("skill://rust-expert"));
+    assert_eq!(
+      mentions[0].linked_target.as_deref(),
+      Some("skill://rust-expert")
+    );
   }
 
   #[test]

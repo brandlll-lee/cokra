@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::skills::loader::ordered_cokra_roots;
 use crate::skills::loader::SkillScope;
+use crate::skills::loader::ordered_cokra_roots;
 
 use super::manifest::IntegrationManifest;
 
@@ -42,14 +42,20 @@ pub async fn discover_integrations(cwd: &Path) -> IntegrationCatalog {
         Ok(loaded) => {
           manifests_by_name.insert(loaded.manifest.name.clone(), loaded);
         }
-        Err(err) => warnings.push(format!("failed to load integration {}: {err}", path.display())),
+        Err(err) => warnings.push(format!(
+          "failed to load integration {}: {err}",
+          path.display()
+        )),
       }
     }
   }
 
   let mut manifests = manifests_by_name.into_values().collect::<Vec<_>>();
   manifests.sort_by(|left, right| left.manifest.name.cmp(&right.manifest.name));
-  IntegrationCatalog { manifests, warnings }
+  IntegrationCatalog {
+    manifests,
+    warnings,
+  }
 }
 
 fn map_scope(scope: SkillScope) -> Option<IntegrationScope> {

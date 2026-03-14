@@ -65,7 +65,10 @@ fn filtered_templates(
 ) -> Result<Vec<McpResourceTemplateDescriptor>, FunctionCallError> {
   let server = server.map(str::trim).filter(|value| !value.is_empty());
   if let Some(server_name) = server
-    && !manager.server_names().iter().any(|name| name == server_name)
+    && !manager
+      .server_names()
+      .iter()
+      .any(|name| name == server_name)
   {
     return Err(FunctionCallError::RespondToModel(format!(
       "unknown MCP server `{server_name}`"
@@ -78,4 +81,3 @@ fn filtered_templates(
   }
   Ok(templates)
 }
-

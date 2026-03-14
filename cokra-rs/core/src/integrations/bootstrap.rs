@@ -121,7 +121,12 @@ pub async fn evaluate_bootstrap(
     .unwrap_or_default();
   let missing_auth_env = auth_env
     .iter()
-    .filter(|key| std::env::var(key.as_str()).unwrap_or_default().trim().is_empty())
+    .filter(|key| {
+      std::env::var(key.as_str())
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    })
     .cloned()
     .collect::<Vec<_>>();
   let install_command = manifest

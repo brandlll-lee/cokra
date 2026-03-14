@@ -62,6 +62,9 @@ The current runtime tool space is the source of truth for what tools are actuall
 - If the user asks to run a declared integration install/bootstrap command, use `install_integration`.
 - Do not begin by searching repository source code, tests, or project docs when the question is about runtime availability.
 - Only search the repository or docs after checking the runtime tool space, and only when the user is asking about implementation or registration details.
+- Prefer `lsp` over `grep_files` when the task needs semantic code navigation such as definitions, references, implementations, symbols, or call hierarchy.
+- Prefer `code_search` for ranked workspace discovery or external code/documentation context, and use `grep_files` only for exact text matching.
+- Prefer `web_search` for current external information; when runtime summary says provider-native web search is available, treat that as the primary backend and use local page tools as fallback.
 
 You MUST adhere to the following criteria when solving queries:
 

@@ -12,6 +12,7 @@ use crate::tools::spec::ToolSpec;
 
 use super::ApprovalMode;
 use super::ToolApproval;
+use super::ToolCapabilityFacets;
 use super::ToolDefinition;
 use super::ToolRiskLevel;
 use super::ToolSource;
@@ -295,6 +296,7 @@ fn tool_definition_from_spec(
     supports_parallel: spec.supports_parallel,
     mutates_state: spec.mutates_state,
     input_keys: collect_input_keys(&spec.input_schema),
+    capabilities: ToolCapabilityFacets::for_tool_name(&spec.name, spec.permissions.allow_network),
     provider_id,
     source_kind: Some(source_kind_tag(&spec.source_kind)),
     server_name,

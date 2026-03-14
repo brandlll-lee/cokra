@@ -11,10 +11,23 @@ mod executor;
 mod provider;
 mod types;
 
-pub use approval::{ApprovalMode, ToolApproval, ToolRiskLevel};
-pub use events::{ToolExecutionEvent, ToolExecutionStage, ToolExecutionStatus};
-pub use executor::{ToolCatalogMatch, ToolRuntimeCatalog, UnifiedToolRuntime};
-pub use provider::{
-  ApiToolProvider, BuiltinToolProvider, CliToolProvider, McpToolProvider, ToolProvider,
-};
-pub use types::{ToolCall, ToolDefinition, ToolResult, ToolResultMetadata, ToolSource};
+pub use approval::ApprovalMode;
+pub use approval::ToolApproval;
+pub use approval::ToolRiskLevel;
+pub use events::ToolExecutionEvent;
+pub use events::ToolExecutionStage;
+pub use events::ToolExecutionStatus;
+pub use executor::ToolCatalogMatch;
+pub use executor::ToolRuntimeCatalog;
+pub use executor::UnifiedToolRuntime;
+pub use provider::ApiToolProvider;
+pub use provider::BuiltinToolProvider;
+pub use provider::CliToolProvider;
+pub use provider::McpToolProvider;
+pub use provider::ToolProvider;
+pub use types::ToolCall;
+pub use types::ToolCapabilityFacets;
+pub use types::ToolDefinition;
+pub use types::ToolResult;
+pub use types::ToolResultMetadata;
+pub use types::ToolSource;

@@ -13,9 +13,11 @@ use uuid::Uuid;
 
 use crate::model::Message as ModelMessage;
 use crate::model::ModelClient;
+use crate::model::transform::ProviderRuntimeKind;
 use crate::session::Session;
 use crate::skills::injection::build_explicit_prompt_injections;
 use crate::skills::injection::render_explicit_prompt_injections;
+use crate::tool_runtime::ToolCapabilityFacets;
 use crate::tool_runtime::ToolDefinition;
 use crate::tool_runtime::ToolSource;
 use crate::tool_runtime::UnifiedToolRuntime;
@@ -286,7 +288,7 @@ impl TurnExecutor {
     );
     prefix_messages.push(ModelMessage::User(env_context));
 
-    if let Some(summary) = self.build_runtime_tool_summary() {
+    if let Some(summary) = self.build_runtime_tool_summary().await? {
       prefix_messages.push(ModelMessage::User(summary));
     }
 
@@ -294,7 +296,8 @@ impl TurnExecutor {
       prefix_messages.push(ModelMessage::User(ctx));
     }
 
-    let explicit_injections = build_explicit_prompt_injections(&self.config.cwd, &input.content).await;
+    let explicit_injections =
+      build_explicit_prompt_injections(&self.config.cwd, &input.content).await;
     if let Some(rendered) = render_explicit_prompt_injections(&explicit_injections) {
       prefix_messages.push(ModelMessage::User(rendered));
     }
@@ -377,14 +380,26 @@ impl TurnExecutor {
     self.cancellation_token.cancel();
   }
 
-  fn build_runtime_tool_summary(&self) -> Option<String> {
+  async fn build_runtime_tool_summary(&self) -> Result<Option<String>, TurnError> {
+    let runtime_info = self
+      .model_client
+      .runtime_info_for_model(&self.config.model)
+      .await
+      .map_err(TurnError::ModelError)?;
+    let lsp_status = crate::lsp::manager().status().await;
     if let Some(runtime) = &self.tool_runtime {
       let definitions = runtime.catalog().definitions();
-      return render_runtime_tool_summary(
-        definitions.into_iter().filter(|tool| tool.enabled).collect(),
+      return Ok(render_runtime_tool_summary(
+        definitions
+          .into_iter()
+          .filter(|tool| tool.enabled)
+          .collect(),
         self.tool_registry.as_ref(),
         &self.config,
-      );
+        &runtime_info.provider_id,
+        runtime_info.runtime_kind,
+        &lsp_status,
+      ));
     }
 
     let fallback = self
@@ -421,6 +436,10 @@ impl TurnExecutor {
           }
           _ => Vec::new(),
         },
+        capabilities: ToolCapabilityFacets::for_tool_name(
+          &spec.name,
+          spec.permissions.allow_network,
+        ),
         provider_id: None,
         source_kind: Some(
           match spec.source_kind {
@@ -438,7 +457,14 @@ impl TurnExecutor {
       })
       .collect::<Vec<_>>();
 
-    render_runtime_tool_summary(fallback, self.tool_registry.as_ref(), &self.config)
+    Ok(render_runtime_tool_summary(
+      fallback,
+      self.tool_registry.as_ref(),
+      &self.config,
+      &runtime_info.provider_id,
+      runtime_info.runtime_kind,
+      &lsp_status,
+    ))
   }
 }
 
@@ -446,6 +472,9 @@ fn render_runtime_tool_summary(
   mut tools: Vec<ToolDefinition>,
   registry: &ToolRegistry,
   config: &TurnConfig,
+  provider_id: &str,
+  runtime_kind: ProviderRuntimeKind,
+  lsp_status: &crate::lsp::LspManagerStatus,
 ) -> Option<String> {
   if tools.is_empty() {
     return None;
@@ -489,7 +518,10 @@ When the user asks about the current tool space, available tools, or connected i
 
   rendered.push_str("Active tool counts by source:\n");
   for source in source_order {
-    let count = active_tools.iter().filter(|tool| tool.source == source).count();
+    let count = active_tools
+      .iter()
+      .filter(|tool| tool.source == source)
+      .count();
     if count > 0 {
       rendered.push_str(&format!("- {}: {}\n", source_name(source), count));
     }
@@ -531,7 +563,13 @@ When the user asks about the current tool space, available tools, or connected i
         .collect::<Vec<_>>();
       providers.sort();
       providers.dedup();
-      (!providers.is_empty()).then(|| format!("- {} providers: {}\n", source_name(source), providers.join(", ")))
+      (!providers.is_empty()).then(|| {
+        format!(
+          "- {} providers: {}\n",
+          source_name(source),
+          providers.join(", ")
+        )
+      })
     })
     .collect::<Vec<_>>();
 
@@ -541,6 +579,83 @@ When the user asks about the current tool space, available tools, or connected i
       rendered.push_str(&line);
     }
   }
+
+  rendered.push_str("Model runtime:\n");
+  rendered.push_str(&format!("- provider: {provider_id}\n"));
+  rendered.push_str(&format!(
+    "- runtime_kind: {}\n",
+    match runtime_kind {
+      ProviderRuntimeKind::Standard => "standard",
+      ProviderRuntimeKind::OpenAICodex => "openai_codex",
+      ProviderRuntimeKind::GitHubCopilot => "github_copilot",
+    }
+  ));
+  rendered.push_str(&format!(
+    "- provider_native_web_search: {}\n",
+    matches!(runtime_kind, ProviderRuntimeKind::OpenAICodex)
+  ));
+
+  let mut network_capabilities = active_tools
+    .iter()
+    .flat_map(|tool| tool.capabilities.network_backends.iter().cloned())
+    .collect::<Vec<_>>();
+  if matches!(runtime_kind, ProviderRuntimeKind::OpenAICodex) {
+    network_capabilities.push("provider_native_openai_codex".to_string());
+  }
+  network_capabilities.sort();
+  network_capabilities.dedup();
+  if !network_capabilities.is_empty() {
+    rendered.push_str("Network backends:\n");
+    rendered.push_str(&format!(
+      "- available: {}\n",
+      network_capabilities.join(", ")
+    ));
+  }
+
+  let interactive_exec_supported = active_tools
+    .iter()
+    .any(|tool| tool.capabilities.interactive_exec);
+  let exec_tools = active_tools
+    .iter()
+    .filter(|tool| matches!(tool.name.as_str(), "shell" | "unified_exec"))
+    .map(|tool| tool.name.as_str())
+    .collect::<Vec<_>>();
+  rendered.push_str("Command execution:\n");
+  rendered.push_str(&format!(
+    "- interactive_exec_supported: {}\n",
+    interactive_exec_supported
+  ));
+  if !exec_tools.is_empty() {
+    rendered.push_str(&format!("- available_tools: {}\n", exec_tools.join(", ")));
+  }
+
+  rendered.push_str("Code navigation policy:\n");
+  rendered.push_str("- prefer `lsp` for definitions, references, hover, symbols, implementations, and call hierarchy\n");
+  rendered.push_str("- use `code_search` for semantic workspace discovery or external code/doc context when LSP is unavailable\n");
+  rendered.push_str(
+    "- use `grep_files` for exact text/pattern scans when you already know the string to match\n",
+  );
+  rendered.push_str("- use `web_search` for current external information; provider-native web search may replace the local fallback when available\n");
+
+  rendered.push_str("LSP service:\n");
+  rendered.push_str(&format!("- enabled: {}\n", lsp_status.enabled));
+  rendered.push_str(&format!("- auto_install: {}\n", lsp_status.auto_install));
+  rendered.push_str(&format!(
+    "- connected_clients: {}\n",
+    lsp_status
+      .clients
+      .iter()
+      .filter(|client| client.status == "connected")
+      .count()
+  ));
+  rendered.push_str(&format!(
+    "- broken_clients: {}\n",
+    lsp_status
+      .clients
+      .iter()
+      .filter(|client| client.status == "broken")
+      .count()
+  ));
 
   if config.has_managed_network_requirements
     || !config.allowed_domains.is_empty()
@@ -1014,14 +1129,20 @@ mod tests {
         supports_parallel: true,
         mutates_state: false,
         input_keys: vec!["text".to_string()],
+        capabilities: crate::tool_runtime::ToolCapabilityFacets::for_tool_name("echo_demo", false),
         provider_id: Some("demo-cli".to_string()),
         source_kind: Some("cli".to_string()),
         server_name: None,
         remote_name: None,
       }],
     ));
-    let catalog = Arc::new(ToolRuntimeCatalog::from_providers(&[builtin_provider, cli_provider]).await?);
-    let runtime = Arc::new(UnifiedToolRuntime::new(catalog, Vec::new(), tool_router.clone()));
+    let catalog =
+      Arc::new(ToolRuntimeCatalog::from_providers(&[builtin_provider, cli_provider]).await?);
+    let runtime = Arc::new(UnifiedToolRuntime::new(
+      catalog,
+      Vec::new(),
+      tool_router.clone(),
+    ));
 
     let executor = TurnExecutor::new(
       model_client,
@@ -1147,6 +1268,10 @@ mod tests {
           supports_parallel: true,
           mutates_state: false,
           input_keys: Vec::new(),
+          capabilities: crate::tool_runtime::ToolCapabilityFacets::for_tool_name(
+            "search_tool",
+            false,
+          ),
           provider_id: Some("builtin".to_string()),
           source_kind: Some("builtin_primitive".to_string()),
           server_name: None,
@@ -1172,6 +1297,10 @@ mod tests {
           supports_parallel: true,
           mutates_state: false,
           input_keys: Vec::new(),
+          capabilities: crate::tool_runtime::ToolCapabilityFacets::for_tool_name(
+            "inspect_tool",
+            false,
+          ),
           provider_id: Some("builtin".to_string()),
           source_kind: Some("builtin_primitive".to_string()),
           server_name: None,
@@ -1197,6 +1326,10 @@ mod tests {
           supports_parallel: true,
           mutates_state: false,
           input_keys: Vec::new(),
+          capabilities: crate::tool_runtime::ToolCapabilityFacets::for_tool_name(
+            "echo_demo",
+            false,
+          ),
           provider_id: Some("demo-cli".to_string()),
           source_kind: Some("cli".to_string()),
           server_name: None,
@@ -1222,6 +1355,7 @@ mod tests {
           supports_parallel: true,
           mutates_state: false,
           input_keys: Vec::new(),
+          capabilities: crate::tool_runtime::ToolCapabilityFacets::for_tool_name("ping_api", false),
           provider_id: Some("demo-api".to_string()),
           source_kind: Some("api".to_string()),
           server_name: None,
@@ -1230,6 +1364,15 @@ mod tests {
       ],
       &registry,
       &config,
+      "openai",
+      crate::model::transform::ProviderRuntimeKind::OpenAICodex,
+      &crate::lsp::LspManagerStatus {
+        enabled: true,
+        auto_install: true,
+        request_timeout_ms: 15_000,
+        diagnostics_timeout_ms: 5_000,
+        clients: Vec::new(),
+      },
     )
     .expect("runtime summary");
 
@@ -1253,6 +1396,24 @@ Sample active tools by source:
 - api: ping_api
 Current integration sources:
 - api providers: demo-api
+Model runtime:
+- provider: openai
+- runtime_kind: openai_codex
+- provider_native_web_search: true
+Network backends:
+- available: provider_native_openai_codex
+Command execution:
+- interactive_exec_supported: false
+Code navigation policy:
+- prefer `lsp` for definitions, references, hover, symbols, implementations, and call hierarchy
+- use `code_search` for semantic workspace discovery or external code/doc context when LSP is unavailable
+- use `grep_files` for exact text/pattern scans when you already know the string to match
+- use `web_search` for current external information; provider-native web search may replace the local fallback when available
+LSP service:
+- enabled: true
+- auto_install: true
+- connected_clients: 0
+- broken_clients: 0
 Network policy:
 - managed_network_requirements: true
 - allowed_domains: docs.rs, api.openai.com

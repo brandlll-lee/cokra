@@ -64,6 +64,7 @@ pub(crate) enum BottomPaneAction {
   Interrupt,
   RequestQuit,
   ApprovalDecision(ApprovalChoice),
+  UserInputDismissed,
   /// A slash command was selected from the command popup.
   SlashCommand(crate::slash_command::SlashCommand),
 }
@@ -86,6 +87,30 @@ pub(crate) struct BottomPane {
   app_event_tx: AppEventSender,
   frame_requester: FrameRequester,
   animations_enabled: bool,
+}
+
+fn normalize_pasted_newlines(text: String) -> String {
+  // Windows terminals frequently deliver pasted newlines as CR or CRLF. If we keep raw `\r`,
+  // writing history back into inline scrollback will interpret it as a carriage return and
+  // overwrite previously printed content on the same row.
+  if !text.contains('\r') {
+    return text;
+  }
+
+  let mut out = String::with_capacity(text.len());
+  let mut chars = text.chars().peekable();
+  while let Some(ch) = chars.next() {
+    if ch == '\r' {
+      // Normalize CRLF to LF (consume the LF if present), and normalize lone CR to LF.
+      if matches!(chars.peek(), Some('\n')) {
+        let _ = chars.next();
+      }
+      out.push('\n');
+    } else {
+      out.push(ch);
+    }
+  }
+  out
 }
 
 impl BottomPane {
@@ -294,11 +319,20 @@ impl BottomPane {
           return BottomPaneAction::ApprovalDecision(choice);
         }
       }
+
+      if view
+        .as_any_mut()
+        .downcast_mut::<RequestUserInputView>()
+        .is_some()
+      {
+        return BottomPaneAction::UserInputDismissed;
+      }
     }
     BottomPaneAction::None
   }
 
   pub(crate) fn handle_paste(&mut self, text: String) {
+    let text = normalize_pasted_newlines(text);
     if let Some(view) = self.view_stack.last_mut()
       && view.handle_paste(text.clone())
     {

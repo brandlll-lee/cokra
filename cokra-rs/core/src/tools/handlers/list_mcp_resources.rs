@@ -51,7 +51,9 @@ impl ToolHandler for ListMcpResourcesHandler {
       resources,
     })
     .map_err(|err| {
-      FunctionCallError::Fatal(format!("failed to serialize list_mcp_resources result: {err}"))
+      FunctionCallError::Fatal(format!(
+        "failed to serialize list_mcp_resources result: {err}"
+      ))
     })?;
     Ok(ToolOutput::success(content).with_id(invocation.id))
   }
@@ -63,7 +65,10 @@ fn filtered_resources(
 ) -> Result<Vec<McpResourceDescriptor>, FunctionCallError> {
   let server = server.map(str::trim).filter(|value| !value.is_empty());
   if let Some(server_name) = server
-    && !manager.server_names().iter().any(|name| name == server_name)
+    && !manager
+      .server_names()
+      .iter()
+      .any(|name| name == server_name)
   {
     return Err(FunctionCallError::RespondToModel(format!(
       "unknown MCP server `{server_name}`"
@@ -76,4 +81,3 @@ fn filtered_resources(
   }
   Ok(resources)
 }
-

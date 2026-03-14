@@ -22,6 +22,7 @@ use crate::model::ToolCall as ModelToolCall;
 use crate::model::ToolCallFunction;
 use crate::model::ToolCallProviderMeta;
 use crate::model::Usage;
+use crate::model::transform::ProviderRuntimeKind;
 use crate::session::Session;
 use crate::tools::context::ToolOutput;
 use crate::tools::parallel::ToolCallRuntime;
@@ -110,13 +111,22 @@ impl SseTurnExecutor {
     item_id: &str,
     cancellation_token: CancellationToken,
   ) -> Result<SamplingRequestResult, TurnError> {
+    let runtime_info = self
+      .model_client
+      .runtime_info_for_model(&self.config.model)
+      .await
+      .map_err(TurnError::ModelError)?;
     let request = ChatRequest {
       model: self.config.model.clone(),
       messages,
       temperature: self.config.temperature,
       max_tokens: self.config.max_tokens,
       tools: if self.config.enable_tools {
-        Some(self.tool_registry.model_tools())
+        Some(
+          self
+            .tool_registry
+            .model_tools_for_runtime(runtime_info.runtime_kind, &self.config.allowed_domains),
+        )
       } else {
         None
       },
@@ -523,6 +533,11 @@ impl SseTurnExecutor {
       }
     };
 
+    let runtime_info = self
+      .model_client
+      .runtime_info_for_model(&self.config.model)
+      .await
+      .map_err(TurnError::ModelError)?;
     let tool_call = ToolCall {
       tool_name: call.function.name.clone(),
       call_id: call.id.clone(),
@@ -540,6 +555,17 @@ impl SseTurnExecutor {
     run_ctx.has_managed_network_requirements = self.config.has_managed_network_requirements;
     run_ctx.allowed_domains = self.config.allowed_domains.clone();
     run_ctx.denied_domains = self.config.denied_domains.clone();
+    run_ctx.model_provider_id = Some(runtime_info.provider_id);
+    run_ctx.model_runtime_kind = Some(
+      match runtime_info.runtime_kind {
+        ProviderRuntimeKind::Standard => "standard",
+        ProviderRuntimeKind::OpenAICodex => "openai_codex",
+        ProviderRuntimeKind::GitHubCopilot => "github_copilot",
+      }
+      .to_string(),
+    );
+    run_ctx.supports_native_web_search =
+      matches!(runtime_info.runtime_kind, ProviderRuntimeKind::OpenAICodex);
     run_ctx.tx_event = Some(self.tx_event.clone());
     // Begin events are pre-emitted in run_sse_interaction before tool
     // execution starts, so tell dispatch_tool_call to skip the duplicate.
