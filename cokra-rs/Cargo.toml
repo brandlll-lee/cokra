@@ -85,7 +85,7 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3"
 
 # UI
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
 supports-color = "3"
 textwrap = { version = "0.16", features = ["unicode-width"] }
