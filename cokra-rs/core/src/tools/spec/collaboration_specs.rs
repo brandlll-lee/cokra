@@ -253,7 +253,7 @@ fn approve_team_plan_tool() -> ToolSpec {
 fn team_status_tool() -> ToolSpec {
   collaboration_tool(
     "team_status",
-    "Return the shared team snapshot, including members, tasks, plans, unread mailbox counts, and workflow runtime state.",
+    "Return the shared team snapshot, including members, tasks, plans, unread mailbox counts, approvals, artifacts, and resumable run state.",
     obj(BTreeMap::new(), &[]),
   )
   .with_supports_parallel(true)
@@ -301,11 +301,11 @@ fn create_team_task_tool() -> ToolSpec {
   );
   props.insert(
     "workflow_run_id".to_string(),
-    str_field("Optional workflow run id to link this task back to a resumable workflow."),
+    str_field("Optional run id to link this task back to a resumable team activity."),
   );
   collaboration_tool(
     "create_team_task",
-    "Create a shared team task on the common task board, optionally linked to a workflow run.",
+    "Create a shared team task on the common task board, optionally linked to a resumable team run.",
     obj(props, &["title"]),
   )
 }

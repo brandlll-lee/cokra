@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::hash::Hash;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -139,11 +138,13 @@ pub struct ToolTurnContext {
   pub approval_policy: AskForApproval,
   pub sandbox_policy: SandboxPolicy,
   pub has_managed_network_requirements: bool,
+  pub allowed_domains: Vec<String>,
+  pub denied_domains: Vec<String>,
 }
 
 #[async_trait]
 pub trait Approvable<Req> {
-  type ApprovalKey: Hash + Eq + Clone + Debug + Serialize + Send + Sync;
+  type ApprovalKey: Eq + Clone + Debug + Serialize + Send + Sync;
 
   fn approval_keys(&self, req: &Req) -> Vec<Self::ApprovalKey>;
 

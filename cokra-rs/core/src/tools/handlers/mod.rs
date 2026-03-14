@@ -1,3 +1,5 @@
+pub mod active_tool_status;
+pub mod activate_tools;
 pub mod apply_patch;
 pub mod approve_team_plan;
 pub mod assign_team_task;
@@ -7,13 +9,17 @@ pub mod claim_team_task;
 pub mod cleanup_team;
 pub mod close_agent;
 pub mod code_search;
+pub mod connect_integration;
 pub mod create_team_task;
+pub mod deactivate_tools;
 pub mod diagnostics;
 pub mod dynamic;
 pub mod edit_file;
 pub mod glob;
 pub mod grep_files;
 pub mod handoff_team_task;
+pub mod install_integration;
+pub mod integration_status;
 pub mod inspect_tool;
 pub mod list_dir;
 pub mod list_mcp_resource_templates;
@@ -25,6 +31,7 @@ pub mod read_mcp_resource;
 pub mod read_many_files;
 pub mod read_team_messages;
 pub mod request_user_input;
+pub mod reset_active_tools;
 pub mod save_memory;
 pub mod send_input;
 pub mod send_team_message;
@@ -33,6 +40,7 @@ pub mod skill;
 pub mod spawn_agent;
 pub mod submit_team_plan;
 pub mod team_status;
+pub mod tool_audit_log;
 pub mod todo;
 pub mod update_team_task;
 pub mod view_image;
@@ -77,6 +85,32 @@ pub fn register_builtin_handlers(
   );
   registry.register_handler("grep_files", Arc::new(grep_files::GrepFilesHandler));
   registry.register_handler("code_search", Arc::new(code_search::CodeSearchHandler));
+  registry.register_handler(
+    "active_tool_status",
+    Arc::new(active_tool_status::ActiveToolStatusHandler),
+  );
+  registry.register_handler("activate_tools", Arc::new(activate_tools::ActivateToolsHandler));
+  registry.register_handler(
+    "deactivate_tools",
+    Arc::new(deactivate_tools::DeactivateToolsHandler),
+  );
+  registry.register_handler(
+    "reset_active_tools",
+    Arc::new(reset_active_tools::ResetActiveToolsHandler),
+  );
+  registry.register_handler(
+    "integration_status",
+    Arc::new(integration_status::IntegrationStatusHandler),
+  );
+  registry.register_handler(
+    "connect_integration",
+    Arc::new(connect_integration::ConnectIntegrationHandler),
+  );
+  registry.register_handler(
+    "install_integration",
+    Arc::new(install_integration::InstallIntegrationHandler),
+  );
+  registry.register_handler("tool_audit_log", Arc::new(tool_audit_log::ToolAuditLogHandler));
   for tool_name in mcp_manager.tool_names() {
     registry.register_handler(
       tool_name,

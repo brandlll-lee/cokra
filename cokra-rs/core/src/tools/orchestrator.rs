@@ -409,6 +409,8 @@ mod tests {
         exclude_slash_tmp: false,
       },
       has_managed_network_requirements: false,
+      allowed_domains: Vec::new(),
+      denied_domains: Vec::new(),
     };
     (session, turn)
   }
@@ -559,6 +561,8 @@ mod tests {
         exclude_slash_tmp: false,
       },
       has_managed_network_requirements: true,
+      allowed_domains: Vec::new(),
+      denied_domains: Vec::new(),
     };
 
     let req = MockReq {
@@ -602,6 +606,8 @@ mod tests {
         exclude_slash_tmp: false,
       },
       has_managed_network_requirements: true,
+      allowed_domains: Vec::new(),
+      denied_domains: Vec::new(),
     };
     let req = MockReq {
       command: "echo".to_string(),

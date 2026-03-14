@@ -130,8 +130,15 @@ impl FrameScheduler {
 mod tests {
   use super::super::frame_rate_limiter::MIN_FRAME_INTERVAL;
   use super::*;
+  use tokio::task;
   use tokio::time;
   use tokio_util::time::FutureExt;
+
+  async fn settle_scheduler() {
+    for _ in 0..3 {
+      task::yield_now().await;
+    }
+  }
 
   #[tokio::test(flavor = "current_thread", start_paused = true)]
   async fn test_schedule_frame_immediate_triggers_once() {
@@ -139,9 +146,11 @@ mod tests {
     let requester = FrameRequester::new(draw_tx);
 
     requester.schedule_frame();
+    settle_scheduler().await;
 
     // Advance time minimally to let the scheduler process and hit the deadline == now.
     time::advance(Duration::from_millis(1)).await;
+    settle_scheduler().await;
 
     // First draw should arrive.
     let first = draw_rx
@@ -162,14 +171,17 @@ mod tests {
     let requester = FrameRequester::new(draw_tx);
 
     requester.schedule_frame_in(Duration::from_millis(50));
+    settle_scheduler().await;
 
     // Advance less than the delay: no draw yet.
     time::advance(Duration::from_millis(30)).await;
+    settle_scheduler().await;
     let early = draw_rx.recv().timeout(Duration::from_millis(10)).await;
     assert!(early.is_err(), "draw fired too early");
 
     // Advance past the deadline: one draw should fire.
     time::advance(Duration::from_millis(25)).await;
+    settle_scheduler().await;
     let first = draw_rx
       .recv()
       .timeout(Duration::from_millis(50))
@@ -191,9 +203,11 @@ mod tests {
     requester.schedule_frame();
     requester.schedule_frame();
     requester.schedule_frame();
+    settle_scheduler().await;
 
     // Allow the scheduler to process and hit the coalesced deadline.
     time::advance(Duration::from_millis(1)).await;
+    settle_scheduler().await;
 
     // Expect only a single draw notification despite three requests.
     let first = draw_rx
@@ -216,8 +230,10 @@ mod tests {
     // Schedule a delayed draw and then an immediate one; should coalesce and fire at the earliest (immediate).
     requester.schedule_frame_in(Duration::from_millis(100));
     requester.schedule_frame();
+    settle_scheduler().await;
 
     time::advance(Duration::from_millis(1)).await;
+    settle_scheduler().await;
 
     let first = draw_rx
       .recv()
@@ -237,7 +253,9 @@ mod tests {
     let requester = FrameRequester::new(draw_tx);
 
     requester.schedule_frame();
+    settle_scheduler().await;
     time::advance(Duration::from_millis(1)).await;
+    settle_scheduler().await;
     let first = draw_rx
       .recv()
       .timeout(Duration::from_millis(50))
@@ -246,7 +264,9 @@ mod tests {
     assert!(first.is_ok(), "broadcast closed unexpectedly");
 
     requester.schedule_frame();
+    settle_scheduler().await;
     time::advance(Duration::from_millis(1)).await;
+    settle_scheduler().await;
     let early = draw_rx.recv().timeout(Duration::from_millis(1)).await;
     assert!(
       early.is_err(),
@@ -254,6 +274,7 @@ mod tests {
     );
 
     time::advance(MIN_FRAME_INTERVAL).await;
+    settle_scheduler().await;
     let second = draw_rx
       .recv()
       .timeout(Duration::from_millis(50))
@@ -268,7 +289,9 @@ mod tests {
     let requester = FrameRequester::new(draw_tx);
 
     requester.schedule_frame();
+    settle_scheduler().await;
     time::advance(Duration::from_millis(1)).await;
+    settle_scheduler().await;
     let first = draw_rx
       .recv()
       .timeout(Duration::from_millis(50))
@@ -277,8 +300,10 @@ mod tests {
     assert!(first.is_ok(), "broadcast closed unexpectedly");
 
     requester.schedule_frame_in(Duration::from_millis(1));
+    settle_scheduler().await;
 
     time::advance(MIN_FRAME_INTERVAL / 2).await;
+    settle_scheduler().await;
     let too_early = draw_rx.recv().timeout(Duration::from_millis(1)).await;
     assert!(
       too_early.is_err(),
@@ -286,6 +311,7 @@ mod tests {
     );
 
     time::advance(MIN_FRAME_INTERVAL).await;
+    settle_scheduler().await;
     let second = draw_rx
       .recv()
       .timeout(Duration::from_millis(50))
@@ -300,7 +326,9 @@ mod tests {
     let requester = FrameRequester::new(draw_tx);
 
     requester.schedule_frame();
+    settle_scheduler().await;
     time::advance(Duration::from_millis(1)).await;
+    settle_scheduler().await;
     let first = draw_rx
       .recv()
       .timeout(Duration::from_millis(50))
@@ -309,12 +337,15 @@ mod tests {
     assert!(first.is_ok(), "broadcast closed unexpectedly");
 
     requester.schedule_frame_in(Duration::from_millis(50));
+    settle_scheduler().await;
 
     time::advance(Duration::from_millis(49)).await;
+    settle_scheduler().await;
     let early = draw_rx.recv().timeout(Duration::from_millis(1)).await;
     assert!(early.is_err(), "draw fired too early");
 
     time::advance(Duration::from_millis(1)).await;
+    settle_scheduler().await;
     let second = draw_rx
       .recv()
       .timeout(Duration::from_millis(50))
@@ -332,14 +363,17 @@ mod tests {
     requester.schedule_frame_in(Duration::from_millis(100));
     requester.schedule_frame_in(Duration::from_millis(20));
     requester.schedule_frame_in(Duration::from_millis(120));
+    settle_scheduler().await;
 
     // Advance to just before the earliest deadline: no draw yet.
     time::advance(Duration::from_millis(10)).await;
+    settle_scheduler().await;
     let early = draw_rx.recv().timeout(Duration::from_millis(10)).await;
     assert!(early.is_err(), "draw fired too early");
 
     // Advance past the earliest deadline: one draw should fire.
     time::advance(Duration::from_millis(20)).await;
+    settle_scheduler().await;
     let first = draw_rx
       .recv()
       .timeout(Duration::from_millis(50))

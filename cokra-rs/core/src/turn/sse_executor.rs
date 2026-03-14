@@ -538,6 +538,8 @@ impl SseTurnExecutor {
       self.config.sandbox_policy.clone(),
     );
     run_ctx.has_managed_network_requirements = self.config.has_managed_network_requirements;
+    run_ctx.allowed_domains = self.config.allowed_domains.clone();
+    run_ctx.denied_domains = self.config.denied_domains.clone();
     run_ctx.tx_event = Some(self.tx_event.clone());
     // Begin events are pre-emitted in run_sse_interaction before tool
     // execution starts, so tell dispatch_tool_call to skip the duplicate.

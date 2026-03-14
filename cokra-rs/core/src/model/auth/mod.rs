@@ -7,20 +7,14 @@ pub mod oauth;
 pub mod resolver;
 
 pub use manager::AuthManager;
-pub use oauth::DeviceCodeResponse;
 pub use oauth::OAuthConfig;
-pub use oauth::OAuthManager;
-pub use oauth::OAuthToken;
 pub use resolver::AuthResolver;
-pub use resolver::EnvAuthResolver;
 
 pub use crate::model::auth_store::CredentialStorage;
 pub use crate::model::auth_store::Credentials;
 pub use crate::model::auth_store::FileCredentialStorage;
 pub use crate::model::auth_store::MemoryCredentialStorage;
 pub use crate::model::auth_store::StoredCredentials;
-pub use crate::model::provider_catalog::OAuthClientEnv;
-pub use crate::model::provider_catalog::RuntimeRegistrationKind;
 
 use serde::Deserialize;
 use serde::Serialize;

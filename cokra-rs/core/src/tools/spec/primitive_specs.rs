@@ -27,6 +27,14 @@ pub(crate) fn build_specs() -> Vec<ToolSpec> {
     code_search_tool(),
     search_tool(),
     inspect_tool(),
+    active_tool_status_tool(),
+    activate_tools_tool(),
+    deactivate_tools_tool(),
+    reset_active_tools_tool(),
+    integration_status_tool(),
+    connect_integration_tool(),
+    install_integration_tool(),
+    tool_audit_log_tool(),
     list_mcp_resources_tool(),
     list_mcp_resource_templates_tool(),
     read_mcp_resource_tool(),
@@ -372,7 +380,7 @@ fn search_tool() -> ToolSpec {
   );
   primitive_tool(
     "search_tool",
-    "Search the active capability catalog by tool name, alias, description, resource URI, and input schema keys.",
+    "Search the current runtime tool space by tool name, alias, description, source metadata, and input schema keys.",
     obj(props, &["query"]),
     default_permissions(),
   )
@@ -387,11 +395,136 @@ fn inspect_tool() -> ToolSpec {
   );
   primitive_tool(
     "inspect_tool",
-    "Inspect a tool or MCP capability definition, including aliases, permissions, input keys, adapter metadata, and resource locators.",
+    "Inspect a runtime tool definition, including aliases, permissions, input keys, source metadata, and resource locators.",
     obj(props, &["name"]),
     default_permissions(),
   )
   .with_permission_key("tool_catalog")
+}
+
+fn active_tool_status_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "limit".to_string(),
+    int_field("Maximum number of active/inactive external tool names to include."),
+  );
+  primitive_tool(
+    "active_tool_status",
+    "Summarize the current runtime tool space, including active and inactive external tools by source.",
+    obj(props, &[]),
+    default_permissions(),
+  )
+  .with_permission_key("read")
+}
+
+fn activate_tools_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "names".to_string(),
+    JsonSchema::Array {
+      items: Box::new(str_field("Tool name, id, or alias to activate.")),
+      description: Some("External tool names to activate for the current runtime.".to_string()),
+    },
+  );
+  primitive_tool(
+    "activate_tools",
+    "Activate external tools in the current runtime so the model can call them directly in subsequent steps.",
+    obj(props, &["names"]),
+    default_permissions(),
+  )
+  .with_permission_key("tool_space")
+}
+
+fn deactivate_tools_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "names".to_string(),
+    JsonSchema::Array {
+      items: Box::new(str_field("Tool name, id, or alias to deactivate.")),
+      description: Some("External tool names to hide from the active runtime surface.".to_string()),
+    },
+  );
+  primitive_tool(
+    "deactivate_tools",
+    "Deactivate external tools in the current runtime without removing their integrations.",
+    obj(props, &["names"]),
+    default_permissions(),
+  )
+  .with_permission_key("tool_space")
+}
+
+fn reset_active_tools_tool() -> ToolSpec {
+  primitive_tool(
+    "reset_active_tools",
+    "Reset external tool activation so all discovered integrations return to their default active state.",
+    obj(BTreeMap::new(), &[]),
+    default_permissions(),
+  )
+  .with_permission_key("tool_space")
+}
+
+fn integration_status_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "name".to_string(),
+    str_field("Optional integration name to inspect. Omit to list all discovered integrations."),
+  );
+  primitive_tool(
+    "integration_status",
+    "List discovered MCP, CLI, and API integrations with bootstrap state, declared tools, and active tool coverage.",
+    obj(props, &[]),
+    default_permissions(),
+  )
+  .with_permission_key("read")
+}
+
+fn connect_integration_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "name".to_string(),
+    str_field("Integration name to connect and activate in the current runtime."),
+  );
+  primitive_tool(
+    "connect_integration",
+    "Validate an integration's prerequisites and activate its tools in the current runtime.",
+    obj(props, &["name"]),
+    default_permissions(),
+  )
+  .with_permission_key("tool_space")
+}
+
+fn install_integration_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "name".to_string(),
+    str_field("Integration name whose declared install command should be executed."),
+  );
+  primitive_tool(
+    "install_integration",
+    "Run the declared install/bootstrap command for an integration and report the resulting readiness.",
+    obj(props, &["name"]),
+    mutating_permissions(),
+  )
+  .with_permission_key("exec")
+}
+
+fn tool_audit_log_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "limit".to_string(),
+    int_field("Maximum number of recent tool calls to return. Default 20."),
+  );
+  props.insert(
+    "tool_name".to_string(),
+    str_field("Optional tool name filter."),
+  );
+  primitive_tool(
+    "tool_audit_log",
+    "Return a recent audit log of tool calls, outputs, source kinds, and approval modes across builtin, MCP, CLI, and API tools.",
+    obj(props, &[]),
+    default_permissions(),
+  )
+  .with_permission_key("read")
 }
 
 fn list_mcp_resources_tool() -> ToolSpec {

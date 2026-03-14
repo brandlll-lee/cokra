@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::tools::catalog::ToolCatalog;
+use crate::tool_runtime::ToolCatalogMatch;
+use crate::tool_runtime::ToolRuntimeCatalog;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -12,7 +13,7 @@ use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 
 pub struct DynamicToolHandler {
-  catalog: Arc<ToolCatalog>,
+  catalog: Arc<ToolRuntimeCatalog>,
 }
 
 const DEFAULT_LIMIT: usize = 8;
@@ -28,7 +29,7 @@ struct SearchArgs {
 struct SearchToolResponse {
   query: String,
   total_matches: usize,
-  results: Vec<crate::tools::catalog::ToolCatalogMatch>,
+  results: Vec<ToolCatalogMatch>,
 }
 
 fn default_limit() -> usize {
@@ -36,7 +37,7 @@ fn default_limit() -> usize {
 }
 
 impl DynamicToolHandler {
-  pub fn new(catalog: Arc<ToolCatalog>) -> Self {
+  pub fn new(catalog: Arc<ToolRuntimeCatalog>) -> Self {
     Self { catalog }
   }
 }
@@ -87,9 +88,9 @@ mod tests {
   use std::sync::Arc;
 
   use async_trait::async_trait;
-  use cokra_config::McpConfig;
-
   use super::*;
+  use crate::tool_runtime::BuiltinToolProvider;
+  use crate::tool_runtime::ToolProvider;
   use crate::tools::context::ToolPayload;
   use crate::tools::registry::ToolRegistry;
   use crate::tools::spec::JsonSchema;
@@ -113,7 +114,7 @@ mod tests {
     }
   }
 
-  fn make_catalog() -> ToolCatalog {
+  async fn make_catalog() -> ToolRuntimeCatalog {
     let mut registry = ToolRegistry::new();
     registry.register_tool(
       ToolSpec::new(
@@ -155,12 +156,15 @@ mod tests {
       Arc::new(DummyHandler),
     );
     registry.register_alias("container.exec", "unified_exec");
-    ToolCatalog::from_registry(&registry, &McpConfig::default())
+    let provider: Arc<dyn ToolProvider> = Arc::new(BuiltinToolProvider::from_registry(&registry));
+    ToolRuntimeCatalog::from_providers(&[provider])
+      .await
+      .expect("catalog builds")
   }
 
   #[tokio::test]
   async fn search_tool_returns_structured_matches() {
-    let handler = DynamicToolHandler::new(Arc::new(make_catalog()));
+    let handler = DynamicToolHandler::new(Arc::new(make_catalog().await));
     let invocation = ToolInvocation {
       id: "search-1".to_string(),
       name: "search_tool".to_string(),
@@ -182,6 +186,6 @@ mod tests {
     let parsed: serde_json::Value =
       serde_json::from_str(&output.text_content()).expect("valid json");
     assert_eq!(parsed["query"], "container exec command");
-    assert_eq!(parsed["results"][0]["entry"]["canonical_name"], "unified_exec");
+    assert_eq!(parsed["results"][0]["tool"]["id"], "unified_exec");
   }
 }

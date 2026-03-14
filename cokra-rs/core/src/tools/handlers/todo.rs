@@ -417,8 +417,6 @@ mod tests {
 
   #[tokio::test]
   async fn todo_write_and_read_roundtrip() {
-    use serde_json::json;
-
     // 临时重定向 home 到 tempdir（通过 invocation cwd）
     // 我们直接测试 load/save 内部逻辑（使用实际 home）
     // 注意：这只验证序列化/反序列化，不验证真实文件系统副作用

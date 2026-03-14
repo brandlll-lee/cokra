@@ -51,7 +51,7 @@ impl TeamState {
     root_thread_id: String,
     threads: Vec<ThreadInfo>,
     statuses: HashMap<String, AgentStatus>,
-    workflow: Option<WorkflowRuntimeSnapshot>,
+    run_state: Option<WorkflowRuntimeSnapshot>,
   ) -> TeamSnapshot {
     let members = threads
       .into_iter()
@@ -86,7 +86,7 @@ impl TeamState {
       tasks,
       plans,
       unread_counts,
-      workflow,
+      workflow: run_state,
     }
   }
 

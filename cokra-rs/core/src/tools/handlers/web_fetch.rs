@@ -63,6 +63,17 @@ impl ToolHandler for WebFetchHandler {
       ));
     }
 
+    if let Some(runtime) = invocation.runtime.as_ref() {
+      crate::tools::network_approval::authorize_http_url(
+        runtime.as_ref(),
+        &invocation.cwd,
+        &args.url,
+        &[],
+      )
+      .await
+      .map_err(FunctionCallError::RespondToModel)?;
+    }
+
     let timeout_secs = args
       .timeout
       .unwrap_or(DEFAULT_TIMEOUT_SECS)

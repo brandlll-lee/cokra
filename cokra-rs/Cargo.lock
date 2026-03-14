@@ -602,6 +602,7 @@ dependencies = [
  "futures",
  "glob",
  "headless_chrome",
+ "insta",
  "libc",
  "pin-project",
  "pretty_assertions",
@@ -612,6 +613,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "shlex",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
@@ -2207,6 +2209,7 @@ checksum = "e82db8c87c7f1ccecb34ce0c24399b8a73081427f3c7c50a5d597925356115e4"
 dependencies = [
  "console",
  "once_cell",
+ "serde",
  "similar",
  "tempfile",
 ]

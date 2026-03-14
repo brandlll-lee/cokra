@@ -13,6 +13,7 @@ use cokra_protocol::ThreadId;
 
 use crate::model::ModelClient;
 use crate::session::Session;
+use crate::tool_runtime::UnifiedToolRuntime;
 use crate::thread_manager::ThreadManagerState;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
@@ -39,6 +40,7 @@ pub struct AgentControl {
   model_client: Arc<ModelClient>,
   tool_registry: Arc<ToolRegistry>,
   tool_router: Arc<ToolRouter>,
+  tool_runtime: Arc<UnifiedToolRuntime>,
   session: Arc<Session>,
   turn_config: Arc<RwLock<TurnConfig>>,
   tx_event: mpsc::Sender<EventMsg>,
@@ -56,6 +58,7 @@ impl AgentControl {
     model_client: Arc<ModelClient>,
     tool_registry: Arc<ToolRegistry>,
     tool_router: Arc<ToolRouter>,
+    tool_runtime: Arc<UnifiedToolRuntime>,
     session: Arc<Session>,
     turn_config: TurnConfig,
     tx_event: mpsc::Sender<EventMsg>,
@@ -70,6 +73,7 @@ impl AgentControl {
       model_client,
       tool_registry,
       tool_router,
+      tool_runtime,
       session,
       turn_config: Arc::new(RwLock::new(turn_config)),
       tx_event,
@@ -107,7 +111,8 @@ impl AgentControl {
       self.session.clone(),
       self.tx_event.clone(),
       turn_config,
-    );
+    )
+    .with_tool_runtime(self.tool_runtime.clone());
 
     let result = executor
       .run_turn_with_id(

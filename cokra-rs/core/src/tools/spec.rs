@@ -81,13 +81,15 @@ pub enum ToolHandlerType {
   Mcp,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolSourceKind {
   #[default]
   BuiltinPrimitive,
   BuiltinCollaboration,
   BuiltinWorkflow,
+  Cli,
+  Api,
   Mcp,
 }
 
@@ -195,6 +197,14 @@ pub fn build_specs() -> Vec<ToolSpec> {
     "code_search",
     "search_tool",
     "inspect_tool",
+    "active_tool_status",
+    "activate_tools",
+    "deactivate_tools",
+    "reset_active_tools",
+    "integration_status",
+    "connect_integration",
+    "install_integration",
+    "tool_audit_log",
     "list_mcp_resources",
     "list_mcp_resource_templates",
     "read_mcp_resource",

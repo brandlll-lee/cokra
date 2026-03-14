@@ -1,18 +1,27 @@
-pub mod catalog;
-pub mod context;
-pub mod diff_tracker;
-pub mod events;
-pub mod handlers;
-pub mod hooks;
-pub mod network_approval;
-pub mod orchestrator;
-pub mod parallel;
+//! The Cokra tool kernel.
+//!
+//! This module is the main kernel entry for tool execution:
+//! - [`registry`] stores tool definitions and handlers
+//! - [`router`] validates and executes calls
+//! - [`spec`] defines the built-in tool contracts
+//!
+//! The remaining submodules are crate-internal implementation details.
+
+pub(crate) mod context;
+pub(crate) mod command_intent;
+pub(crate) mod diff_tracker;
+pub(crate) mod events;
+pub(crate) mod handlers;
+pub(crate) mod hooks;
+pub(crate) mod network_approval;
+pub(crate) mod orchestrator;
+pub(crate) mod parallel;
 pub mod registry;
 pub mod router;
-pub mod runtimes;
-pub mod sandboxing;
+pub(crate) mod runtimes;
+pub(crate) mod sandboxing;
 pub mod spec;
-pub mod validation;
+pub(crate) mod validation;
 
 use std::sync::Arc;
 
@@ -20,14 +29,36 @@ use cokra_config::Config;
 use cokra_config::ExecBackend;
 use cokra_config::ExecPublicSurface;
 
+use crate::integrations::discover_integrations;
+use crate::integrations::manifest::IntegrationKind;
+use crate::integrations::project_integrations;
+use crate::integrations::projected_tool_definitions;
 use crate::mcp::McpConnectionManager;
 use crate::skills::loader::build_skill_tool_description;
-use crate::tools::catalog::ToolCatalog;
-use crate::tools::registry::ToolRegistry;
-use crate::tools::router::ToolRouter;
+use crate::tool_runtime::ApiToolProvider;
+use crate::tool_runtime::BuiltinToolProvider;
+use crate::tool_runtime::CliToolProvider;
+use crate::tool_runtime::McpToolProvider;
+use crate::tool_runtime::ToolProvider;
+use crate::tool_runtime::ToolRuntimeCatalog;
+use crate::tool_runtime::UnifiedToolRuntime;
 use crate::tools::spec::build_specs;
 use crate::tools::spec::skill_tool_with_description;
-use crate::tools::validation::ToolValidator;
+
+pub use registry::ToolHandler;
+pub use registry::ToolKind;
+pub use registry::ToolRegistry;
+pub use router::ToolRouter;
+pub use router::ToolRunContext;
+pub use context::FunctionCallError;
+pub use context::ToolInvocation;
+pub use context::ToolOutput;
+pub use spec::JsonSchema;
+pub use spec::ToolHandlerType;
+pub use spec::ToolPermissions;
+pub use spec::ToolSourceKind;
+pub use spec::ToolSpec;
+pub use validation::ToolValidator;
 
 pub const SHELL_TOOL_NAME: &str = "shell";
 pub const UNIFIED_EXEC_TOOL_NAME: &str = "unified_exec";
@@ -46,11 +77,11 @@ pub struct ResolvedExecToolConfig {
   pub backend: ResolvedExecBackend,
 }
 
-pub struct DefaultToolingBundle {
+pub(crate) struct DefaultToolingBundle {
   pub registry: Arc<ToolRegistry>,
   pub router: Arc<ToolRouter>,
-  pub tool_catalog: Arc<ToolCatalog>,
   pub mcp_manager: Arc<McpConnectionManager>,
+  pub runtime: Arc<UnifiedToolRuntime>,
 }
 
 pub fn canonical_exec_tool_name(name: &str) -> Option<&'static str> {
@@ -107,11 +138,11 @@ fn model_prefers_apply_patch(config: &Config) -> bool {
   model.contains("gpt-") && !model.contains("-oss") && !model.contains("gpt-4")
 }
 
-/// Build a default tool registry and router from configuration.
+/// Build the tool kernel from configuration.
 ///
 /// Automatically selects either `edit_file` or `apply_patch` based on the
-/// configured model, following the OpenCode pattern where GPT-codex models
-/// use `apply_patch` and all other models use `edit_file` + `write_file`.
+/// configured model, following the OpenCode pattern where GPT-style models use
+/// `apply_patch` and other models use `edit_file` + `write_file`.
 pub async fn build_default_tools(
   config: &Config,
 ) -> anyhow::Result<(Arc<ToolRegistry>, Arc<ToolRouter>)> {
@@ -120,8 +151,8 @@ pub async fn build_default_tools(
   Ok((bundle.registry, bundle.router))
 }
 
-/// Internal variant that accepts an explicit cwd for tests and generators.
-pub async fn build_default_tools_with_cwd(
+/// Internal variant that accepts an explicit cwd for tests and runtime bootstrapping.
+pub(crate) async fn build_default_tools_with_cwd(
   config: &Config,
   cwd: &std::path::Path,
 ) -> anyhow::Result<(Arc<ToolRegistry>, Arc<ToolRouter>)> {
@@ -129,12 +160,17 @@ pub async fn build_default_tools_with_cwd(
   Ok((bundle.registry, bundle.router))
 }
 
-pub async fn build_default_tooling_with_cwd(
+pub(crate) async fn build_default_tooling_with_cwd(
   config: &Config,
   cwd: &std::path::Path,
 ) -> anyhow::Result<DefaultToolingBundle> {
   let mut registry = ToolRegistry::new();
-  let mcp_manager = Arc::new(McpConnectionManager::new(&config.mcp).await?);
+  let integration_catalog = discover_integrations(cwd).await;
+  for warning in &integration_catalog.warnings {
+    tracing::warn!("{warning}");
+  }
+  let projected_integrations = project_integrations(&config.mcp, &integration_catalog)?;
+  let mcp_manager = Arc::new(McpConnectionManager::new(&projected_integrations.effective_mcp).await?);
   let exec_config = resolve_exec_tool_config(config);
 
   // Mirrors OpenCode's skill-tool pattern: compute the cwd-aware skill
@@ -152,6 +188,16 @@ pub async fn build_default_tooling_with_cwd(
   }
   for spec in mcp_manager.tool_specs() {
     registry.register_spec(spec);
+  }
+  for tool in projected_integrations
+    .cli_tools
+    .iter()
+    .chain(projected_integrations.api_tools.iter())
+  {
+    registry.register_tool(tool.spec.clone(), Arc::clone(&tool.handler));
+    for alias in &tool.definition.aliases {
+      registry.register_alias(alias.clone(), tool.spec.name.clone());
+    }
   }
 
   register_default_aliases(&mut registry);
@@ -172,7 +218,15 @@ pub async fn build_default_tooling_with_cwd(
     registry.exclude_tool(SHELL_TOOL_NAME);
   }
 
-  let tool_catalog = Arc::new(ToolCatalog::from_registry(&registry, &config.mcp));
+  let cli_definitions = projected_tool_definitions(&projected_integrations, IntegrationKind::Cli);
+  let api_definitions = projected_tool_definitions(&projected_integrations, IntegrationKind::Api);
+  let providers: Vec<Arc<dyn ToolProvider>> = vec![
+    Arc::new(BuiltinToolProvider::from_registry(&registry)),
+    Arc::new(McpToolProvider::from_manager(Arc::clone(&mcp_manager))),
+    Arc::new(CliToolProvider::new("cli_integrations", cli_definitions)),
+    Arc::new(ApiToolProvider::new("api_integrations", api_definitions)),
+  ];
+  let tool_catalog = Arc::new(ToolRuntimeCatalog::from_providers(&providers).await?);
   registry.register_handler(
     "search_tool",
     Arc::new(handlers::dynamic::DynamicToolHandler::new(Arc::clone(&tool_catalog))),
@@ -192,12 +246,17 @@ pub async fn build_default_tooling_with_cwd(
     validator,
     exec_config,
   ));
+  let runtime = Arc::new(UnifiedToolRuntime::new(
+    Arc::clone(&tool_catalog),
+    providers,
+    Arc::clone(&router),
+  ));
 
   Ok(DefaultToolingBundle {
     registry,
     router,
-    tool_catalog,
     mcp_manager,
+    runtime,
   })
 }
 

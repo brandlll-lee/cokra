@@ -1,3 +1,8 @@
+//! Minimal MCP bridge for the kernel.
+//!
+//! MCP stays a dynamic tool source: connect configured servers, mirror their
+//! tool/resource surface, and expose that surface through the tool kernel.
+
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::ffi::OsString;

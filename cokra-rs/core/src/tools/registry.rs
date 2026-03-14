@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use async_trait::async_trait;
 
@@ -47,12 +48,16 @@ pub trait ToolHandler: Send + Sync {
 pub struct ToolRegistry {
   handlers: HashMap<String, Arc<dyn ToolHandler>>,
   specs: HashMap<String, ToolSpec>,
-  /// Tool name aliases: legacy_name → current_name.
+  /// Tool name aliases: legacy_name -> current_name.
   /// When dispatching or looking up a tool, aliases are resolved transparently.
   aliases: HashMap<String, String>,
   /// Excluded tool names. Tools in this set are hidden from `model_tools()`
   /// and `active_specs()` but remain registered for potential re-inclusion.
-  excluded: HashSet<String>,
+  excluded: RwLock<HashSet<String>>,
+  /// External tools can be temporarily deactivated without removing the
+  /// underlying integration. Builtins stay always-on unless explicitly
+  /// excluded through the existing config-driven exclusion path.
+  inactive_external: RwLock<HashSet<String>>,
 }
 
 impl ToolRegistry {
@@ -114,24 +119,164 @@ impl ToolRegistry {
 
   /// Exclude a tool by name. Excluded tools are not sent to the model
   /// but remain registered for re-inclusion.
-  pub fn exclude_tool(&mut self, name: impl Into<String>) {
-    self.excluded.insert(name.into());
+  pub fn exclude_tool(&self, name: impl Into<String>) {
+    self
+      .excluded
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .insert(name.into());
   }
 
   /// Re-include a previously excluded tool.
-  pub fn include_tool(&mut self, name: &str) {
-    self.excluded.remove(name);
+  pub fn include_tool(&self, name: &str) {
+    self
+      .excluded
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(name);
   }
 
   /// Bulk-set excluded tools from a set of names.
-  pub fn set_excluded(&mut self, names: HashSet<String>) {
-    self.excluded = names;
+  pub fn set_excluded(&self, names: HashSet<String>) {
+    *self
+      .excluded
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = names;
   }
 
   /// Returns true if the tool is currently excluded.
   pub fn is_excluded(&self, name: &str) -> bool {
     let resolved = self.resolve_name(name);
-    self.excluded.contains(resolved) || self.excluded.contains(name)
+    let excluded = self
+      .excluded
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    excluded.contains(resolved) || excluded.contains(name)
+  }
+
+  fn is_gateable(spec: &ToolSpec) -> bool {
+    matches!(
+      spec.source_kind,
+      crate::tools::spec::ToolSourceKind::Mcp
+        | crate::tools::spec::ToolSourceKind::Cli
+        | crate::tools::spec::ToolSourceKind::Api
+    )
+  }
+
+  pub fn is_active(&self, name: &str) -> bool {
+    if self.is_excluded(name) {
+      return false;
+    }
+    let Some(spec) = self.get_spec(name) else {
+      return false;
+    };
+    if !Self::is_gateable(spec) {
+      return true;
+    }
+    let resolved = self.resolve_name(name).to_string();
+    !self
+      .inactive_external
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .contains(&resolved)
+  }
+
+  pub fn activate_tool(&self, name: &str) -> bool {
+    let Some(spec) = self.get_spec(name) else {
+      return false;
+    };
+    if !Self::is_gateable(spec) {
+      return false;
+    }
+    let resolved = self.resolve_name(name).to_string();
+    self
+      .inactive_external
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(&resolved)
+  }
+
+  pub fn deactivate_tool(&self, name: &str) -> bool {
+    let Some(spec) = self.get_spec(name) else {
+      return false;
+    };
+    if !Self::is_gateable(spec) {
+      return false;
+    }
+    let resolved = self.resolve_name(name).to_string();
+    self
+      .inactive_external
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .insert(resolved)
+  }
+
+  pub fn activate_tools<I>(&self, names: I) -> Vec<String>
+  where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+  {
+    names
+      .into_iter()
+      .filter_map(|name| {
+        let name = name.as_ref();
+        if self.activate_tool(name) {
+          Some(self.resolve_name(name).to_string())
+        } else {
+          None
+        }
+      })
+      .collect()
+  }
+
+  pub fn deactivate_tools<I>(&self, names: I) -> Vec<String>
+  where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+  {
+    names
+      .into_iter()
+      .filter_map(|name| {
+        let name = name.as_ref();
+        if self.deactivate_tool(name) {
+          Some(self.resolve_name(name).to_string())
+        } else {
+          None
+        }
+      })
+      .collect()
+  }
+
+  pub fn reset_active_external_tools(&self) {
+    self
+      .inactive_external
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clear();
+  }
+
+  pub fn active_external_tool_names(&self) -> Vec<String> {
+    let mut names = self
+      .specs
+      .values()
+      .filter(|spec| Self::is_gateable(spec))
+      .filter(|spec| self.is_active(&spec.name))
+      .map(|spec| spec.name.clone())
+      .collect::<Vec<_>>();
+    names.sort();
+    names
+  }
+
+  pub fn inactive_external_tool_names(&self) -> Vec<String> {
+    let mut names = self
+      .specs
+      .values()
+      .filter(|spec| Self::is_gateable(spec))
+      .filter(|spec| !self.is_active(&spec.name))
+      .map(|spec| spec.name.clone())
+      .collect::<Vec<_>>();
+    names.sort();
+    names
   }
 
   // ── Lookup (alias-aware, exclude-aware) ───────────────────────────
@@ -159,7 +304,7 @@ impl ToolRegistry {
     self
       .specs
       .values()
-      .filter(|s| !self.is_excluded(&s.name))
+      .filter(|s| self.is_active(&s.name))
       .cloned()
       .collect()
   }
@@ -195,8 +340,6 @@ impl ToolRegistry {
       .ok_or_else(|| FunctionCallError::ToolNotFound(invocation.name.clone()))?;
     Ok(handler.is_mutating(invocation))
   }
-
-  // ── Model tool list (exclude-aware) ───────────────────────────────
 
   /// Returns tool definitions for the model, excluding tools in the excluded set.
   pub fn model_tools(&self) -> Vec<crate::model::Tool> {
@@ -317,5 +460,24 @@ mod tests {
     reg.set_excluded(HashSet::from(["x".to_string(), "y".to_string()]));
     assert_eq!(reg.model_tools().len(), 0);
     assert_eq!(reg.active_specs().len(), 0);
+  }
+
+  #[test]
+  fn deactivate_external_hides_only_gateable_tools() {
+    let mut reg = ToolRegistry::new();
+    let builtin = dummy_spec("read_file");
+    let external = dummy_spec("echo_demo").with_source_kind(crate::tools::spec::ToolSourceKind::Cli);
+    reg.register_tool(builtin, Arc::new(DummyHandler));
+    reg.register_tool(external, Arc::new(DummyHandler));
+
+    assert!(reg.deactivate_tool("echo_demo"));
+    assert!(!reg.is_active("echo_demo"));
+    assert!(reg.is_active("read_file"));
+    assert!(reg.model_tools().iter().all(|tool| {
+      tool
+        .function
+        .as_ref()
+        .is_some_and(|function| function.name != "echo_demo")
+    }));
   }
 }

@@ -1,4 +1,4 @@
-use ratatui::style::Stylize;
+﻿use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
 
@@ -210,6 +210,7 @@ pub(crate) fn message_posted(ev: CollabMessagePostedEvent) -> PlainHistoryCell {
   let recipient = ev
     .recipient_thread_id
     .as_deref()
+    .filter(|value| !value.trim().is_empty())
     .map(|thread_id| {
       agent_label_line(AgentLabel {
         thread_id,
@@ -332,6 +333,28 @@ pub(crate) fn team_snapshot(ev: CollabTeamSnapshotEvent) -> PlainHistoryCell {
     details.push(Line::from(format!(
       "{pending_plan_count} plan(s) pending review"
     )));
+  }
+
+  if let Some(run_snapshot) = &ev.snapshot.workflow {
+    let open_runs = run_snapshot
+      .runs
+      .iter()
+      .filter(|run| {
+        matches!(
+          run.status,
+          cokra_protocol::WorkflowRunStatus::Pending
+            | cokra_protocol::WorkflowRunStatus::Active
+            | cokra_protocol::WorkflowRunStatus::WaitingApproval
+        )
+      })
+      .count();
+    if !run_snapshot.runs.is_empty() {
+      details.push(Line::from(format!(
+        "{} resumable run(s), {} currently open",
+        run_snapshot.runs.len(),
+        open_runs
+      )));
+    }
   }
 
   if !ev.snapshot.tasks.is_empty() {
@@ -907,3 +930,4 @@ mod tests {
     assert!(rendered.contains("⎿ Completed"));
   }
 }
+

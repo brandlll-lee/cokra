@@ -171,10 +171,41 @@ impl ToolHandler for WebSearchHandler {
       .map_err(|e| FunctionCallError::Execution(format!("failed to build HTTP client: {e}")))?;
 
     let output = if let Ok(api_key) = std::env::var("BRAVE_SEARCH_API_KEY") {
+      if let Some(runtime) = invocation.runtime.as_ref() {
+        crate::tools::network_approval::authorize_http_url(
+          runtime.as_ref(),
+          &invocation.cwd,
+          BRAVE_SEARCH_URL,
+          &["api.search.brave.com"],
+        )
+        .await
+        .map_err(FunctionCallError::RespondToModel)?;
+      }
       search_brave(&client, &args, &api_key).await?
     } else if let Ok(base_url) = std::env::var("SEARXNG_BASE_URL") {
+      let search_url = format!("{}/search", base_url.trim_end_matches('/'));
+      if let Some(runtime) = invocation.runtime.as_ref() {
+        crate::tools::network_approval::authorize_http_url(
+          runtime.as_ref(),
+          &invocation.cwd,
+          &search_url,
+          &[],
+        )
+        .await
+        .map_err(FunctionCallError::RespondToModel)?;
+      }
       search_searxng(&client, &args, &base_url).await?
     } else {
+      if let Some(runtime) = invocation.runtime.as_ref() {
+        crate::tools::network_approval::authorize_http_url(
+          runtime.as_ref(),
+          &invocation.cwd,
+          EXA_MCP_URL,
+          &["mcp.exa.ai"],
+        )
+        .await
+        .map_err(FunctionCallError::RespondToModel)?;
+      }
       search_exa(&client, &args).await?
     };
 

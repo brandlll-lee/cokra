@@ -1,17 +1,16 @@
-pub mod control;
-pub mod guards;
-pub mod role;
-pub mod status;
-pub mod team_runtime;
-pub mod team_state;
+//! Internal agent and team coordination state.
+//!
+//! The only collaboration state center is [`team_runtime`]. Other modules here
+//! support turn execution and guardrails, but are not part of the public kernel.
+
+pub(crate) mod control;
+pub(crate) mod guards;
+pub(crate) mod role;
+pub(crate) mod status;
+pub(crate) mod team_runtime;
+pub(crate) mod team_state;
 
 pub use control::AgentControl;
 pub use control::Turn;
 pub use guards::Guards;
-pub use guards::MAX_THREAD_SPAWN_DEPTH;
-pub use guards::exceeds_thread_spawn_depth_limit;
-pub use role::AgentRole;
-pub use role::ROLE_CODING;
-pub use role::ROLE_PLANNING;
-pub use role::ROLE_REVIEW;
 pub use status::AgentStatus;

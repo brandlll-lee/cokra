@@ -14,6 +14,7 @@ use cokra_protocol::AskForApproval;
 use cokra_protocol::SandboxPolicy;
 
 use crate::exec::SandboxPermissions;
+use crate::tools::command_intent::CommandIntent;
 use crate::tools::sandboxing::ExecApprovalRequirement;
 
 // ---------------------------------------------------------------------------
@@ -27,6 +28,38 @@ use crate::tools::sandboxing::ExecApprovalRequirement;
 /// are guaranteed to not modify state, write files, or execute external code.
 pub fn is_known_safe_command(command: &[String]) -> bool {
   is_safe_to_call_with_exec(command)
+}
+
+#[cfg(test)]
+mod shell_string_tests {
+  use super::eval_shell_command_approval;
+  use crate::exec::SandboxPermissions;
+  use crate::tools::sandboxing::ExecApprovalRequirement;
+  use cokra_protocol::AskForApproval;
+  use cokra_protocol::ReadOnlyAccess;
+  use cokra_protocol::SandboxPolicy;
+
+  fn ws_policy() -> SandboxPolicy {
+    SandboxPolicy::WorkspaceWrite {
+      writable_roots: vec![".".to_string()],
+      read_only_access: ReadOnlyAccess::FullAccess,
+      network_access: false,
+      exclude_tmpdir_env_var: false,
+      exclude_slash_tmp: false,
+    }
+  }
+
+  #[test]
+  fn shell_string_safe_command_uses_canonical_command() {
+    let req = eval_shell_command_approval(
+      "git status",
+      std::path::Path::new("."),
+      &ws_policy(),
+      AskForApproval::UnlessTrusted,
+      SandboxPermissions::UseDefault,
+    );
+    assert!(matches!(req, ExecApprovalRequirement::Skip { .. }));
+  }
 }
 
 /// 1:1 codex `is_safe_command.rs::is_safe_to_call_with_exec`.
@@ -392,6 +425,27 @@ pub fn eval_exec_approval(
       }
     }
   }
+}
+
+pub fn eval_shell_command_approval(
+  command: &str,
+  cwd: &std::path::Path,
+  sandbox_policy: &SandboxPolicy,
+  approval_policy: AskForApproval,
+  sandbox_permissions: SandboxPermissions,
+) -> ExecApprovalRequirement {
+  let intent = CommandIntent::from_command(command, cwd);
+  let approval_command = if intent.canonical_command.is_empty() {
+    vec![command.to_string()]
+  } else {
+    intent.canonical_command
+  };
+  eval_exec_approval(
+    &approval_command,
+    sandbox_policy,
+    approval_policy,
+    sandbox_permissions,
+  )
 }
 
 /// Build the display string for the approval prompt.

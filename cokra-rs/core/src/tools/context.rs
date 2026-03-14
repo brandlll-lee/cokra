@@ -10,6 +10,8 @@ use tokio::sync::mpsc;
 use crate::exec::PermissionProfile;
 use crate::exec::SandboxPermissions;
 use crate::session::Session;
+use crate::tools::registry::ToolRegistry;
+use cokra_protocol::AskForApproval;
 use cokra_protocol::EventMsg;
 
 /// Invocation payload passed to a tool handler.
@@ -32,9 +34,15 @@ pub struct ToolInvocation {
 #[derive(Clone)]
 pub struct ToolRuntimeContext {
   pub session: Arc<Session>,
+  pub tool_registry: Arc<ToolRegistry>,
   pub tx_event: Option<mpsc::Sender<EventMsg>>,
   pub thread_id: String,
   pub turn_id: String,
+  pub approval_policy: AskForApproval,
+  pub has_managed_network_requirements: bool,
+  pub allowed_domains: Vec<String>,
+  pub denied_domains: Vec<String>,
+  pub network_attempt_id: Option<String>,
 }
 
 impl fmt::Debug for ToolRuntimeContext {

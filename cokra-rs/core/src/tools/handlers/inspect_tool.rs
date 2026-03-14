@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::tools::catalog::ToolCatalog;
+use crate::tool_runtime::ToolRuntimeCatalog;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -11,7 +11,7 @@ use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 
 pub struct InspectToolHandler {
-  catalog: Arc<ToolCatalog>,
+  catalog: Arc<ToolRuntimeCatalog>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -20,7 +20,7 @@ struct InspectToolArgs {
 }
 
 impl InspectToolHandler {
-  pub fn new(catalog: Arc<ToolCatalog>) -> Self {
+  pub fn new(catalog: Arc<ToolRuntimeCatalog>) -> Self {
     Self { catalog }
   }
 }

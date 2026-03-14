@@ -110,7 +110,7 @@ tokio-util = "0.7"
 libc = "0.2"
 
 # Testing
-insta = "1.46"
+insta = { version = "1.46", features = ["json"] }
 wiremock = "0.6"
 pretty_assertions = "1"
 tempfile = "3.26.0"

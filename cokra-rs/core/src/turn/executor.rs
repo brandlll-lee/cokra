@@ -16,8 +16,12 @@ use crate::model::ModelClient;
 use crate::session::Session;
 use crate::skills::injection::build_explicit_prompt_injections;
 use crate::skills::injection::render_explicit_prompt_injections;
+use crate::tool_runtime::ToolDefinition;
+use crate::tool_runtime::ToolSource;
+use crate::tool_runtime::UnifiedToolRuntime;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
+use crate::tools::spec::ToolSourceKind;
 use crate::truncate::DEFAULT_TOOL_OUTPUT_TOKENS;
 use crate::truncate::TruncationPolicy;
 use cokra_protocol::AskForApproval;
@@ -98,6 +102,8 @@ pub struct TurnConfig {
   pub sandbox_policy: SandboxPolicy,
   pub cwd: PathBuf,
   pub has_managed_network_requirements: bool,
+  pub allowed_domains: Vec<String>,
+  pub denied_domains: Vec<String>,
   pub tool_output_truncation: TruncationPolicy,
   pub context_window_limit: Option<usize>,
   pub auto_compact_token_limit: Option<usize>,
@@ -117,6 +123,8 @@ impl Default for TurnConfig {
       },
       cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
       has_managed_network_requirements: false,
+      allowed_domains: Vec::new(),
+      denied_domains: Vec::new(),
       tool_output_truncation: TruncationPolicy::Tokens(DEFAULT_TOOL_OUTPUT_TOKENS),
       context_window_limit: Some(128_000),
       auto_compact_token_limit: Some(96_000),
@@ -129,6 +137,7 @@ pub struct TurnExecutor {
   model_client: Arc<ModelClient>,
   tool_registry: Arc<ToolRegistry>,
   tool_router: Arc<ToolRouter>,
+  tool_runtime: Option<Arc<UnifiedToolRuntime>>,
   session: Arc<Session>,
   tx_event: mpsc::Sender<Event>,
   config: TurnConfig,
@@ -148,11 +157,17 @@ impl TurnExecutor {
       model_client,
       tool_registry,
       tool_router,
+      tool_runtime: None,
       session,
       tx_event,
       config,
       cancellation_token: CancellationToken::new(),
     }
+  }
+
+  pub fn with_tool_runtime(mut self, tool_runtime: Arc<UnifiedToolRuntime>) -> Self {
+    self.tool_runtime = Some(tool_runtime);
+    self
   }
 
   pub async fn run_turn(&self, input: UserInput) -> Result<TurnResult, TurnError> {
@@ -271,6 +286,10 @@ impl TurnExecutor {
     );
     prefix_messages.push(ModelMessage::User(env_context));
 
+    if let Some(summary) = self.build_runtime_tool_summary() {
+      prefix_messages.push(ModelMessage::User(summary));
+    }
+
     if let Some(ctx) = self.build_auto_context(&input.content).await? {
       prefix_messages.push(ModelMessage::User(ctx));
     }
@@ -357,6 +376,197 @@ impl TurnExecutor {
   pub fn cancel_current_turn(&self) {
     self.cancellation_token.cancel();
   }
+
+  fn build_runtime_tool_summary(&self) -> Option<String> {
+    if let Some(runtime) = &self.tool_runtime {
+      let definitions = runtime.catalog().definitions();
+      return render_runtime_tool_summary(
+        definitions.into_iter().filter(|tool| tool.enabled).collect(),
+        self.tool_registry.as_ref(),
+        &self.config,
+      );
+    }
+
+    let fallback = self
+      .tool_registry
+      .active_specs()
+      .into_iter()
+      .map(|spec| ToolDefinition {
+        id: spec.name.clone(),
+        name: spec.name.clone(),
+        description: spec.description.clone(),
+        input_schema: spec.input_schema.to_value(),
+        output_schema: spec.output_schema.as_ref().map(|schema| schema.to_value()),
+        source: match spec.source_kind {
+          ToolSourceKind::BuiltinPrimitive
+          | ToolSourceKind::BuiltinCollaboration
+          | ToolSourceKind::BuiltinWorkflow => ToolSource::Builtin,
+          ToolSourceKind::Mcp => ToolSource::Mcp,
+          ToolSourceKind::Cli => ToolSource::Cli,
+          ToolSourceKind::Api => ToolSource::Api,
+        },
+        aliases: self.tool_registry.aliases_for(&spec.name),
+        tags: Vec::new(),
+        approval: crate::tool_runtime::ToolApproval::from_permissions(
+          &spec.permissions,
+          spec.permission_key.clone(),
+          spec.mutates_state,
+        ),
+        enabled: true,
+        supports_parallel: spec.supports_parallel,
+        mutates_state: spec.mutates_state,
+        input_keys: match &spec.input_schema {
+          crate::tools::spec::JsonSchema::Object { properties, .. } => {
+            properties.keys().cloned().collect()
+          }
+          _ => Vec::new(),
+        },
+        provider_id: None,
+        source_kind: Some(
+          match spec.source_kind {
+            ToolSourceKind::BuiltinPrimitive => "builtin_primitive",
+            ToolSourceKind::BuiltinCollaboration => "builtin_collaboration",
+            ToolSourceKind::BuiltinWorkflow => "builtin_workflow",
+            ToolSourceKind::Mcp => "mcp",
+            ToolSourceKind::Cli => "cli",
+            ToolSourceKind::Api => "api",
+          }
+          .to_string(),
+        ),
+        server_name: None,
+        remote_name: None,
+      })
+      .collect::<Vec<_>>();
+
+    render_runtime_tool_summary(fallback, self.tool_registry.as_ref(), &self.config)
+  }
+}
+
+fn render_runtime_tool_summary(
+  mut tools: Vec<ToolDefinition>,
+  registry: &ToolRegistry,
+  config: &TurnConfig,
+) -> Option<String> {
+  if tools.is_empty() {
+    return None;
+  }
+
+  tools.sort_by(|left, right| left.name.cmp(&right.name));
+  let active_tools = tools
+    .iter()
+    .filter(|tool| {
+      tool.enabled
+        && registry
+          .get_spec(&tool.name)
+          .is_none_or(|_| registry.is_active(&tool.name))
+    })
+    .cloned()
+    .collect::<Vec<_>>();
+
+  let source_order = [
+    ToolSource::Builtin,
+    ToolSource::Mcp,
+    ToolSource::Cli,
+    ToolSource::Api,
+  ];
+  let source_name = |source: ToolSource| match source {
+    ToolSource::Builtin => "builtin",
+    ToolSource::Mcp => "mcp",
+    ToolSource::Cli => "cli",
+    ToolSource::Api => "api",
+  };
+
+  let mut rendered = String::from(
+    "<runtime_tool_summary>\n\
+Use this block as the first source of truth for what tools are active in this session.\n\
+When the user asks about the current tool space, available tools, or connected integrations:\n\
+- use `search_tool` first\n\
+- use `inspect_tool` when the user names a specific tool\n\
+- use `active_tool_status` when you need a grouped active/inactive runtime summary\n\
+- use `integration_status`, `connect_integration`, and `install_integration` for integration lifecycle work\n\
+- do not start with repo search or project docs unless the user asks about implementation details\n",
+  );
+
+  rendered.push_str("Active tool counts by source:\n");
+  for source in source_order {
+    let count = active_tools.iter().filter(|tool| tool.source == source).count();
+    if count > 0 {
+      rendered.push_str(&format!("- {}: {}\n", source_name(source), count));
+    }
+  }
+
+  let inactive_external = registry.inactive_external_tool_names();
+  if !inactive_external.is_empty() {
+    rendered.push_str(&format!(
+      "Inactive external tools: {} (activate them before direct use when needed)\n",
+      inactive_external.len()
+    ));
+  }
+
+  rendered.push_str("Sample active tools by source:\n");
+  for source in source_order {
+    let names = active_tools
+      .iter()
+      .filter(|tool| tool.source == source)
+      .map(|tool| tool.name.as_str())
+      .take(8)
+      .collect::<Vec<_>>();
+    if !names.is_empty() {
+      rendered.push_str(&format!(
+        "- {}: {}\n",
+        source_name(source),
+        names.join(", ")
+      ));
+    }
+  }
+
+  let mut integration_sources = source_order
+    .into_iter()
+    .filter(|source| *source != ToolSource::Builtin)
+    .filter_map(|source| {
+      let mut providers = active_tools
+        .iter()
+        .filter(|tool| tool.source == source)
+        .filter_map(|tool| tool.provider_id.clone())
+        .collect::<Vec<_>>();
+      providers.sort();
+      providers.dedup();
+      (!providers.is_empty()).then(|| format!("- {} providers: {}\n", source_name(source), providers.join(", ")))
+    })
+    .collect::<Vec<_>>();
+
+  if !integration_sources.is_empty() {
+    rendered.push_str("Current integration sources:\n");
+    for line in integration_sources.drain(..) {
+      rendered.push_str(&line);
+    }
+  }
+
+  if config.has_managed_network_requirements
+    || !config.allowed_domains.is_empty()
+    || !config.denied_domains.is_empty()
+  {
+    rendered.push_str("Network policy:\n");
+    rendered.push_str(&format!(
+      "- managed_network_requirements: {}\n",
+      config.has_managed_network_requirements
+    ));
+    if !config.allowed_domains.is_empty() {
+      rendered.push_str(&format!(
+        "- allowed_domains: {}\n",
+        config.allowed_domains.join(", ")
+      ));
+    }
+    if !config.denied_domains.is_empty() {
+      rendered.push_str(&format!(
+        "- denied_domains: {}\n",
+        config.denied_domains.join(", ")
+      ));
+    }
+  }
+
+  rendered.push_str("</runtime_tool_summary>");
+  Some(rendered)
 }
 
 fn map_auto_context_join_error(err: JoinError) -> TurnError {
@@ -386,6 +596,7 @@ pub enum AttachmentKind {
 
 #[cfg(test)]
 mod tests {
+  use std::collections::BTreeMap;
   use std::pin::Pin;
   use std::sync::Arc;
 
@@ -414,8 +625,18 @@ mod tests {
   use crate::model::ProviderRegistry;
   use crate::model::provider::ModelProvider;
   use crate::session::Session;
+  use crate::tool_runtime::BuiltinToolProvider;
+  use crate::tool_runtime::CliToolProvider;
+  use crate::tool_runtime::ToolProvider;
+  use crate::tool_runtime::ToolRuntimeCatalog;
+  use crate::tool_runtime::ToolSource;
+  use crate::tool_runtime::UnifiedToolRuntime;
   use crate::tools::registry::ToolRegistry;
   use crate::tools::router::ToolRouter;
+  use crate::tools::spec::JsonSchema;
+  use crate::tools::spec::ToolHandlerType;
+  use crate::tools::spec::ToolPermissions;
+  use crate::tools::spec::ToolSpec;
   use crate::tools::validation::ToolValidator;
   use cokra_config::ApprovalMode;
   use cokra_config::ApprovalPolicy;
@@ -723,6 +944,322 @@ mod tests {
     assert!(rendered.contains("rust-expert"));
     assert!(rendered.contains("Prefer ownership-safe refactors."));
     Ok(())
+  }
+
+  #[tokio::test]
+  async fn build_messages_includes_runtime_tool_summary() -> anyhow::Result<()> {
+    let model_client = build_client(OrderedProvider::new(vec![vec![ResponseEvent::EndTurn]])).await;
+    let mut registry = ToolRegistry::new();
+    registry.register_spec(ToolSpec::new(
+      "search_tool",
+      "Search the current runtime tool space.",
+      JsonSchema::Object {
+        properties: BTreeMap::from([(
+          "query".to_string(),
+          JsonSchema::String { description: None },
+        )]),
+        required: Some(vec!["query".to_string()]),
+        additional_properties: Some(false.into()),
+      },
+      None,
+      ToolHandlerType::Function,
+      ToolPermissions::default(),
+    ));
+    registry.register_spec(ToolSpec::new(
+      "inspect_tool",
+      "Inspect a specific tool definition.",
+      JsonSchema::Object {
+        properties: BTreeMap::from([(
+          "name".to_string(),
+          JsonSchema::String { description: None },
+        )]),
+        required: Some(vec!["name".to_string()]),
+        additional_properties: Some(false.into()),
+      },
+      None,
+      ToolHandlerType::Function,
+      ToolPermissions::default(),
+    ));
+
+    let tool_registry = Arc::new(registry);
+    let tool_router = build_router(tool_registry.clone());
+    let session = Arc::new(Session::new());
+    let (tx_event, _rx_event) = mpsc::channel(64);
+
+    let builtin_provider: Arc<dyn ToolProvider> =
+      Arc::new(BuiltinToolProvider::from_registry(&tool_registry));
+    let cli_provider: Arc<dyn ToolProvider> = Arc::new(CliToolProvider::new(
+      "demo-cli",
+      vec![crate::tool_runtime::ToolDefinition {
+        id: "echo_demo".to_string(),
+        name: "echo_demo".to_string(),
+        description: "Echo text through a CLI integration".to_string(),
+        input_schema: serde_json::json!({
+          "type": "object",
+          "properties": { "text": { "type": "string" } },
+          "required": ["text"]
+        }),
+        output_schema: None,
+        source: ToolSource::Cli,
+        aliases: Vec::new(),
+        tags: vec!["cli".to_string(), "demo-cli".to_string()],
+        approval: crate::tool_runtime::ToolApproval {
+          risk_level: crate::tool_runtime::ToolRiskLevel::Low,
+          approval_mode: crate::tool_runtime::ApprovalMode::Auto,
+          permission_key: Some("echo_demo".to_string()),
+          allow_network: false,
+          allow_fs_write: false,
+        },
+        enabled: true,
+        supports_parallel: true,
+        mutates_state: false,
+        input_keys: vec!["text".to_string()],
+        provider_id: Some("demo-cli".to_string()),
+        source_kind: Some("cli".to_string()),
+        server_name: None,
+        remote_name: None,
+      }],
+    ));
+    let catalog = Arc::new(ToolRuntimeCatalog::from_providers(&[builtin_provider, cli_provider]).await?);
+    let runtime = Arc::new(UnifiedToolRuntime::new(catalog, Vec::new(), tool_router.clone()));
+
+    let executor = TurnExecutor::new(
+      model_client,
+      tool_registry,
+      tool_router,
+      session,
+      tx_event,
+      test_config(),
+    )
+    .with_tool_runtime(runtime);
+
+    let prompt = executor
+      .build_messages(&UserInput {
+        content: "What tools are available right now?".to_string(),
+        attachments: Vec::new(),
+      })
+      .await?;
+
+    let rendered = prompt
+      .messages
+      .iter()
+      .filter_map(|msg| match msg {
+        crate::model::Message::User(text) if text.contains("<runtime_tool_summary>") => Some(text),
+        _ => None,
+      })
+      .map(String::as_str)
+      .collect::<Vec<_>>()
+      .join("\n");
+
+    assert!(rendered.contains("search_tool"));
+    assert!(rendered.contains("inspect_tool"));
+    assert!(rendered.contains("echo_demo"));
+    assert!(rendered.contains("demo-cli"));
+    assert!(rendered.contains("use `search_tool` first"));
+    Ok(())
+  }
+
+  #[test]
+  fn runtime_tool_summary_snapshot() {
+    let mut registry = ToolRegistry::new();
+    registry.register_spec(ToolSpec::new(
+      "search_tool",
+      "Search the current runtime tool space.",
+      JsonSchema::Object {
+        properties: BTreeMap::new(),
+        required: Some(Vec::new()),
+        additional_properties: Some(false.into()),
+      },
+      None,
+      ToolHandlerType::Function,
+      ToolPermissions::default(),
+    ));
+    registry.register_spec(ToolSpec::new(
+      "inspect_tool",
+      "Inspect a specific tool definition.",
+      JsonSchema::Object {
+        properties: BTreeMap::new(),
+        required: Some(Vec::new()),
+        additional_properties: Some(false.into()),
+      },
+      None,
+      ToolHandlerType::Function,
+      ToolPermissions::default(),
+    ));
+    registry.register_spec(
+      ToolSpec::new(
+        "echo_demo",
+        "CLI demo tool",
+        JsonSchema::Object {
+          properties: BTreeMap::new(),
+          required: Some(Vec::new()),
+          additional_properties: Some(false.into()),
+        },
+        None,
+        ToolHandlerType::Function,
+        ToolPermissions::default(),
+      )
+      .with_source_kind(crate::tools::spec::ToolSourceKind::Cli),
+    );
+    registry.register_spec(
+      ToolSpec::new(
+        "ping_api",
+        "API demo tool",
+        JsonSchema::Object {
+          properties: BTreeMap::new(),
+          required: Some(Vec::new()),
+          additional_properties: Some(false.into()),
+        },
+        None,
+        ToolHandlerType::Function,
+        ToolPermissions::default(),
+      )
+      .with_source_kind(crate::tools::spec::ToolSourceKind::Api),
+    );
+    registry.deactivate_tool("echo_demo");
+
+    let config = TurnConfig {
+      has_managed_network_requirements: true,
+      allowed_domains: vec!["docs.rs".to_string(), "api.openai.com".to_string()],
+      denied_domains: vec!["example.com".to_string()],
+      ..test_config()
+    };
+
+    let summary = super::render_runtime_tool_summary(
+      vec![
+        crate::tool_runtime::ToolDefinition {
+          id: "search_tool".to_string(),
+          name: "search_tool".to_string(),
+          description: "Search the current runtime tool space.".to_string(),
+          input_schema: serde_json::json!({"type": "object", "properties": {}}),
+          output_schema: None,
+          source: ToolSource::Builtin,
+          aliases: Vec::new(),
+          tags: Vec::new(),
+          approval: crate::tool_runtime::ToolApproval {
+            risk_level: crate::tool_runtime::ToolRiskLevel::Low,
+            approval_mode: crate::tool_runtime::ApprovalMode::Auto,
+            permission_key: Some("tool_catalog".to_string()),
+            allow_network: false,
+            allow_fs_write: false,
+          },
+          enabled: true,
+          supports_parallel: true,
+          mutates_state: false,
+          input_keys: Vec::new(),
+          provider_id: Some("builtin".to_string()),
+          source_kind: Some("builtin_primitive".to_string()),
+          server_name: None,
+          remote_name: None,
+        },
+        crate::tool_runtime::ToolDefinition {
+          id: "inspect_tool".to_string(),
+          name: "inspect_tool".to_string(),
+          description: "Inspect a specific tool definition.".to_string(),
+          input_schema: serde_json::json!({"type": "object", "properties": {}}),
+          output_schema: None,
+          source: ToolSource::Builtin,
+          aliases: Vec::new(),
+          tags: Vec::new(),
+          approval: crate::tool_runtime::ToolApproval {
+            risk_level: crate::tool_runtime::ToolRiskLevel::Low,
+            approval_mode: crate::tool_runtime::ApprovalMode::Auto,
+            permission_key: Some("tool_catalog".to_string()),
+            allow_network: false,
+            allow_fs_write: false,
+          },
+          enabled: true,
+          supports_parallel: true,
+          mutates_state: false,
+          input_keys: Vec::new(),
+          provider_id: Some("builtin".to_string()),
+          source_kind: Some("builtin_primitive".to_string()),
+          server_name: None,
+          remote_name: None,
+        },
+        crate::tool_runtime::ToolDefinition {
+          id: "echo_demo".to_string(),
+          name: "echo_demo".to_string(),
+          description: "CLI demo tool".to_string(),
+          input_schema: serde_json::json!({"type": "object", "properties": {}}),
+          output_schema: None,
+          source: ToolSource::Cli,
+          aliases: Vec::new(),
+          tags: Vec::new(),
+          approval: crate::tool_runtime::ToolApproval {
+            risk_level: crate::tool_runtime::ToolRiskLevel::Low,
+            approval_mode: crate::tool_runtime::ApprovalMode::Auto,
+            permission_key: Some("echo_demo".to_string()),
+            allow_network: false,
+            allow_fs_write: false,
+          },
+          enabled: true,
+          supports_parallel: true,
+          mutates_state: false,
+          input_keys: Vec::new(),
+          provider_id: Some("demo-cli".to_string()),
+          source_kind: Some("cli".to_string()),
+          server_name: None,
+          remote_name: None,
+        },
+        crate::tool_runtime::ToolDefinition {
+          id: "ping_api".to_string(),
+          name: "ping_api".to_string(),
+          description: "API demo tool".to_string(),
+          input_schema: serde_json::json!({"type": "object", "properties": {}}),
+          output_schema: None,
+          source: ToolSource::Api,
+          aliases: Vec::new(),
+          tags: Vec::new(),
+          approval: crate::tool_runtime::ToolApproval {
+            risk_level: crate::tool_runtime::ToolRiskLevel::Low,
+            approval_mode: crate::tool_runtime::ApprovalMode::Auto,
+            permission_key: Some("ping_api".to_string()),
+            allow_network: false,
+            allow_fs_write: false,
+          },
+          enabled: true,
+          supports_parallel: true,
+          mutates_state: false,
+          input_keys: Vec::new(),
+          provider_id: Some("demo-api".to_string()),
+          source_kind: Some("api".to_string()),
+          server_name: None,
+          remote_name: None,
+        },
+      ],
+      &registry,
+      &config,
+    )
+    .expect("runtime summary");
+
+    insta::assert_snapshot!(
+      summary,
+      @r###"
+<runtime_tool_summary>
+Use this block as the first source of truth for what tools are active in this session.
+When the user asks about the current tool space, available tools, or connected integrations:
+- use `search_tool` first
+- use `inspect_tool` when the user names a specific tool
+- use `active_tool_status` when you need a grouped active/inactive runtime summary
+- use `integration_status`, `connect_integration`, and `install_integration` for integration lifecycle work
+- do not start with repo search or project docs unless the user asks about implementation details
+Active tool counts by source:
+- builtin: 2
+- api: 1
+Inactive external tools: 1 (activate them before direct use when needed)
+Sample active tools by source:
+- builtin: inspect_tool, search_tool
+- api: ping_api
+Current integration sources:
+- api providers: demo-api
+Network policy:
+- managed_network_requirements: true
+- allowed_domains: docs.rs, api.openai.com
+- denied_domains: example.com
+</runtime_tool_summary>
+"###
+    );
   }
 
   #[tokio::test]

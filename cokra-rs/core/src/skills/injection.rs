@@ -12,13 +12,11 @@ use super::loader::ordered_cokra_roots;
 use super::loader::split_frontmatter;
 
 const PERSONAS_DIR: &str = "personas";
-const WORKFLOWS_DIR: &str = "workflows";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PromptAssetKind {
   Skill,
   Persona,
-  Workflow,
 }
 
 #[derive(Debug, Clone)]
@@ -34,7 +32,6 @@ pub struct PromptAssetDocument {
 pub struct ExplicitPromptInjections {
   pub skills: Vec<SkillDocument>,
   pub personas: Vec<PromptAssetDocument>,
-  pub workflows: Vec<PromptAssetDocument>,
   pub warnings: Vec<String>,
 }
 
@@ -56,10 +53,8 @@ pub async fn build_explicit_prompt_injections(
 
   let skill_catalog = discover_skills(cwd).await;
   let personas = discover_prompt_assets(cwd, PromptAssetKind::Persona).await;
-  let workflows = discover_prompt_assets(cwd, PromptAssetKind::Workflow).await;
   let mut seen_skills = HashSet::new();
   let mut seen_personas = HashSet::new();
-  let mut seen_workflows = HashSet::new();
 
   let mut result = ExplicitPromptInjections {
     warnings: skill_catalog.warnings.clone(),
@@ -90,18 +85,6 @@ pub async fn build_explicit_prompt_injections(
             .push(format!("explicit persona mention `{}` could not be resolved", mention.name));
         }
       }
-      PromptAssetKind::Workflow => {
-        if let Some(workflow) = resolve_asset_mention(&mention, &workflows) {
-          if seen_workflows.insert(workflow.name.clone()) {
-            result.workflows.push(workflow);
-          }
-        } else {
-          result.warnings.push(format!(
-            "explicit workflow mention `{}` could not be resolved",
-            mention.name
-          ));
-        }
-      }
     }
   }
 
@@ -111,10 +94,7 @@ pub async fn build_explicit_prompt_injections(
 pub fn render_explicit_prompt_injections(
   injections: &ExplicitPromptInjections,
 ) -> Option<String> {
-  if injections.skills.is_empty()
-    && injections.personas.is_empty()
-    && injections.workflows.is_empty()
-  {
+  if injections.skills.is_empty() && injections.personas.is_empty() {
     return None;
   }
 
@@ -139,15 +119,6 @@ pub fn render_explicit_prompt_injections(
       rendered.push('\n');
     }
     rendered.push_str("</personas>\n\n");
-  }
-
-  if !injections.workflows.is_empty() {
-    rendered.push_str("<workflows>\n");
-    for workflow in &injections.workflows {
-      rendered.push_str(&render_prompt_asset_block(workflow, "workflow_content"));
-      rendered.push('\n');
-    }
-    rendered.push_str("</workflows>\n\n");
   }
 
   rendered.push_str("</explicit_injections>");
@@ -218,7 +189,6 @@ async fn discover_prompt_assets(cwd: &Path, kind: PromptAssetKind) -> Vec<Prompt
     let directory_name = match kind {
       PromptAssetKind::Skill => continue,
       PromptAssetKind::Persona => PERSONAS_DIR,
-      PromptAssetKind::Workflow => WORKFLOWS_DIR,
     };
     let asset_dir = root.config_dir.join(directory_name);
     let mut paths = collect_markdown_files(&asset_dir).await;
@@ -422,7 +392,6 @@ fn mention_from_label(label: &str, linked_target: Option<String>) -> Option<Ment
   let kind = match marker {
     '$' => PromptAssetKind::Skill,
     '@' => PromptAssetKind::Persona,
-    '#' => PromptAssetKind::Workflow,
     _ => return None,
   };
   Some(Mention {
@@ -471,7 +440,6 @@ fn asset_target_matches(target: &str, asset: &PromptAssetDocument) -> bool {
   let prefix = match asset.kind {
     PromptAssetKind::Skill => "skill://",
     PromptAssetKind::Persona => "persona://",
-    PromptAssetKind::Workflow => "workflow://",
   };
   target.strip_prefix(prefix).map(|value| value == asset.name).unwrap_or(false)
     || PathBuf::from(target) == asset.location
@@ -483,11 +451,10 @@ mod tests {
 
   #[test]
   fn extract_explicit_mentions_supports_plain_markers() {
-    let mentions = extract_explicit_mentions("Use $rust-expert with @backend and #release_preflight");
-    assert_eq!(mentions.len(), 3);
+    let mentions = extract_explicit_mentions("Use $rust-expert with @backend");
+    assert_eq!(mentions.len(), 2);
     assert_eq!(mentions[0].name, "rust-expert");
     assert_eq!(mentions[1].name, "backend");
-    assert_eq!(mentions[2].name, "release_preflight");
   }
 
   #[test]
@@ -523,22 +490,13 @@ mod tests {
         location: PathBuf::from("/tmp/backend.md"),
         content: "Focus on service safety.".to_string(),
       }],
-      workflows: vec![PromptAssetDocument {
-        kind: PromptAssetKind::Workflow,
-        name: "release_preflight".to_string(),
-        description: "Release checks".to_string(),
-        location: PathBuf::from("/tmp/release.md"),
-        content: "Check migrations first.".to_string(),
-      }],
       warnings: Vec::new(),
     })
     .expect("rendered");
 
     assert!(rendered.contains("<skills>"));
     assert!(rendered.contains("<personas>"));
-    assert!(rendered.contains("<workflows>"));
     assert!(rendered.contains("rust-expert"));
     assert!(rendered.contains("backend"));
-    assert!(rendered.contains("release_preflight"));
   }
 }

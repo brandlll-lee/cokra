@@ -43,10 +43,11 @@ use crate::model::Usage;
 use crate::model::init_model_layer;
 use crate::session::Session;
 use crate::thread_manager::ThreadManager;
-use crate::tools::build_default_tools;
+use crate::tool_runtime::UnifiedToolRuntime;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolContext;
 use crate::tools::context::ToolOutput;
+use crate::tools::build_default_tooling_with_cwd;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
 use crate::tools::router::ToolRunContext;
@@ -100,6 +101,8 @@ pub struct Cokra {
   #[allow(dead_code)]
   pub(crate) tool_registry: Arc<ToolRegistry>,
   pub(crate) tool_router: Arc<ToolRouter>,
+  #[allow(dead_code)]
+  pub(crate) tool_runtime: Arc<UnifiedToolRuntime>,
   pub(crate) agent_control: Arc<AgentControl>,
   pub(crate) thread_manager: Arc<ThreadManager>,
 }
@@ -161,12 +164,16 @@ impl Cokra {
       );
     }
 
-    let (tool_registry, tool_router) = build_default_tools(&config).await?;
+    let tooling = build_default_tooling_with_cwd(&config, &config.cwd).await?;
+    let tool_registry = tooling.registry.clone();
+    let tool_router = tooling.router.clone();
+    let tool_runtime = tooling.runtime.clone();
     let agent_control = Arc::new(AgentControl::new(
       Uuid::new_v4().to_string(),
       model_client.clone(),
       tool_registry.clone(),
       tool_router.clone(),
+      tool_runtime.clone(),
       session.clone(),
       turn_config,
       tx_raw_event.clone(),
@@ -235,6 +242,7 @@ impl Cokra {
       event_bus,
       tool_registry,
       tool_router,
+      tool_runtime,
       agent_control,
       thread_manager,
     };
@@ -372,6 +380,8 @@ impl Cokra {
       map_sandbox_policy(&self.config),
     );
     run_ctx.has_managed_network_requirements = self.config.sandbox.network_access;
+    run_ctx.allowed_domains = Vec::new();
+    run_ctx.denied_domains = Vec::new();
 
     self
       .tool_router
@@ -528,6 +538,8 @@ fn build_turn_config(config: &Config) -> TurnConfig {
     sandbox_policy: map_sandbox_policy(config),
     cwd: config.cwd.clone(),
     has_managed_network_requirements: config.sandbox.network_access,
+    allowed_domains: Vec::new(),
+    denied_domains: Vec::new(),
     ..TurnConfig::default()
   }
 }

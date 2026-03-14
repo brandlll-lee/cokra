@@ -5,6 +5,8 @@ use cokra_config::SandboxConfig;
 
 use crate::exec::PermissionProfile;
 use crate::exec::SandboxPermissions;
+use crate::tools::command_intent::CommandIntent;
+use crate::tools::command_intent::CommandMutationClass;
 use crate::tools::SHELL_TOOL_NAME;
 use crate::tools::UNIFIED_EXEC_TOOL_NAME;
 use crate::tools::canonical_exec_tool_name;
@@ -86,7 +88,7 @@ impl ToolValidator {
   }
 
   pub fn validate_shell_command(&self, cmd: &str) -> Result<ValidationResult, ValidationError> {
-    if contains_dangerous_patterns(cmd) {
+    if command_is_dangerous(cmd) {
       return Err(ValidationError::DangerousCommand);
     }
 
@@ -101,16 +103,29 @@ impl ToolValidator {
   }
 }
 
-fn contains_dangerous_patterns(cmd: &str) -> bool {
-  let patterns = [
-    "rm -rf /",
-    "mkfs",
-    "dd if=",
-    "shutdown",
-    "reboot",
-    ":(){:|:&};:",
-  ];
-  patterns.iter().any(|pattern| cmd.contains(pattern))
+fn command_is_dangerous(cmd: &str) -> bool {
+  let trimmed = cmd.trim();
+  if trimmed.contains(":(){:|:&};:") {
+    return true;
+  }
+
+  let intent = CommandIntent::from_command(trimmed, std::path::Path::new("."));
+  if intent.mutation_class == CommandMutationClass::Destructive {
+    return true;
+  }
+
+  let Some(cmd0) = intent.canonical_command.first().map(String::as_str) else {
+    return false;
+  };
+  match cmd0 {
+    "mkfs" | "shutdown" | "reboot" => true,
+    "dd" => intent
+      .canonical_command
+      .iter()
+      .skip(1)
+      .any(|arg| arg.starts_with("if=")),
+    _ => false,
+  }
 }
 
 fn has_path_traversal(value: &Value) -> bool {

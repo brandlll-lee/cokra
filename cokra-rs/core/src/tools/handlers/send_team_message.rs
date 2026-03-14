@@ -39,7 +39,10 @@ impl ToolHandler for SendTeamMessageHandler {
     let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
       FunctionCallError::Execution("send_team_message runtime is not configured".to_string())
     })?;
-    let direct = args.recipient_thread_id.clone();
+    let direct = args
+      .recipient_thread_id
+      .clone()
+      .filter(|value| !value.trim().is_empty());
     let channel = args
       .channel
       .clone()
@@ -65,7 +68,7 @@ impl ToolHandler for SendTeamMessageHandler {
     let message = team_runtime
       .post_message(
         runtime.thread_id.clone(),
-        direct,
+        direct.clone(),
         kind,
         route_key,
         args.message.clone(),
@@ -78,7 +81,7 @@ impl ToolHandler for SendTeamMessageHandler {
           sender_thread_id: runtime.thread_id.clone(),
           sender_nickname: None,
           sender_role: None,
-          recipient_thread_id: args.recipient_thread_id,
+          recipient_thread_id: direct.clone(),
           recipient_nickname: None,
           recipient_role: None,
           message: args.message,

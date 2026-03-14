@@ -7,11 +7,13 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::exec::PermissionProfile;
 use crate::exec::SandboxPermissions;
 use crate::exec::format_exec_output_for_model_structured;
 use crate::exec_policy::eval_exec_approval;
+use crate::exec_policy::eval_shell_command_approval;
 use crate::session::Session;
-use crate::shell::default_user_shell;
+use crate::tools::command_intent::CommandIntent;
 use crate::tools::events::ToolEmitter;
 use crate::tools::events::ToolEventCtx;
 use crate::tools::events::ToolEventStage;
@@ -73,6 +75,8 @@ pub struct ToolRunContext {
   pub approval_policy: AskForApproval,
   pub sandbox_policy: SandboxPolicy,
   pub has_managed_network_requirements: bool,
+  pub allowed_domains: Vec<String>,
+  pub denied_domains: Vec<String>,
   /// When `true`, `dispatch_tool_call` will skip emitting `ExecCommandBegin`
   /// because the caller already emitted it ahead of time (e.g. to guarantee
   /// the TUI sees all Begin events before any End events arrive).
@@ -97,6 +101,8 @@ impl ToolRunContext {
       approval_policy,
       sandbox_policy,
       has_managed_network_requirements: false,
+      allowed_domains: Vec::new(),
+      denied_domains: Vec::new(),
       begin_already_emitted: false,
     }
   }
@@ -105,6 +111,7 @@ impl ToolRunContext {
 #[derive(Clone)]
 struct InvocationRuntimeState {
   session: Arc<Session>,
+  tool_registry: Arc<ToolRegistry>,
   tx_event: Option<mpsc::Sender<EventMsg>>,
   thread_id: String,
   turn_id: String,
@@ -171,6 +178,7 @@ impl ToolRouter {
       self.exec_config,
       Some(InvocationRuntimeState {
         session: Arc::clone(&run_ctx.session),
+        tool_registry: Arc::clone(&self.registry),
         tx_event: run_ctx.tx_event.clone(),
         thread_id: run_ctx.thread_id.clone(),
         turn_id: run_ctx.turn_id.clone(),
@@ -184,6 +192,8 @@ impl ToolRouter {
       approval_policy: run_ctx.approval_policy,
       sandbox_policy: run_ctx.sandbox_policy.clone(),
       has_managed_network_requirements: run_ctx.has_managed_network_requirements,
+      allowed_domains: run_ctx.allowed_domains.clone(),
+      denied_domains: run_ctx.denied_domains.clone(),
     };
     let tool_ctx = ToolCtx {
       session: run_ctx.session.as_ref(),
@@ -301,12 +311,7 @@ fn tool_emitter_for_call(call: &ToolCall, cwd: &Path) -> ToolEmitter {
 }
 
 pub(crate) fn should_emit_exec_events(tool_name: &str) -> bool {
-  // MCP tools emit McpToolCallBegin/End through McpHandler directly; they render through
-  // the exec cell path via those events. Emitting ExecCommandBegin/End on top produces
   // duplicate "Running" + "● Calling" / "● completed" rows for every MCP call.
-  if tool_name.starts_with("mcp__") {
-    return false;
-  }
   // Tradeoff: team/collab tools now render through dedicated notice cells instead of the
   // generic exec transcript, because duplicating both views produced the exact UX noise the
   // user reported: Running/✓ rows plus raw JSON outputs for the same action.
@@ -364,6 +369,31 @@ pub(crate) fn summarize_tool_display_command(call: &ToolCall, cwd: &Path) -> Opt
       .get("name")
       .and_then(Value::as_str)
       .map(ToString::to_string),
+    "active_tool_status" => Some("runtime_tool_space".to_string()),
+    "reset_active_tools" => Some("all_external_tools".to_string()),
+    "activate_tools" | "deactivate_tools" => call
+      .args
+      .get("names")
+      .and_then(Value::as_array)
+      .map(|items| {
+        items
+          .iter()
+          .filter_map(Value::as_str)
+          .collect::<Vec<_>>()
+          .join(", ")
+      }),
+    "integration_status" | "connect_integration" | "install_integration" => call
+      .args
+      .get("name")
+      .and_then(Value::as_str)
+      .map(ToString::to_string)
+      .or_else(|| Some("all_integrations".to_string())),
+    "tool_audit_log" => call
+      .args
+      .get("tool_name")
+      .and_then(Value::as_str)
+      .map(|value| format!("filter={value}"))
+      .or_else(|| Some("recent_tool_calls".to_string())),
     "list_mcp_resources" | "list_mcp_resource_templates" => call
       .args
       .get("server")
@@ -428,12 +458,110 @@ impl RegistryToolRuntime {
   }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+enum RegistryApprovalKey {
+  Tool {
+    tool_name: String,
+    args: String,
+  },
+  Exec(ExecApprovalKey),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+struct ExecApprovalKey {
+  tool_name: String,
+  canonical_command: Vec<String>,
+  command_prefix: Vec<String>,
+  cwd: String,
+  sandbox_permissions: SandboxPermissions,
+  additional_permissions: Option<PermissionProfile>,
+  path_intents: Vec<crate::tools::command_intent::PathIntent>,
+  network_hint: bool,
+  external_paths: Vec<String>,
+}
+
+fn exec_approval_key(req: &ToolCall) -> Option<ExecApprovalKey> {
+  if canonical_exec_tool_name(&req.tool_name) == Some(SHELL_TOOL_NAME) {
+    let command = req.args.get("command").and_then(Value::as_str)?;
+    let cwd = req
+      .args
+      .get("workdir")
+      .and_then(Value::as_str)
+      .unwrap_or("<turn_cwd>")
+      .to_string();
+    let sandbox_permissions = req
+      .args
+      .get("sandbox_permissions")
+      .map(|value| serde_json::from_value::<SandboxPermissions>(value.clone()))
+      .transpose()
+      .ok()
+      .flatten()
+      .unwrap_or(SandboxPermissions::UseDefault);
+    let additional_permissions = req
+      .args
+      .get("additional_permissions")
+      .map(|value| serde_json::from_value::<PermissionProfile>(value.clone()))
+      .transpose()
+      .ok()
+      .flatten();
+    let intent = CommandIntent::from_command(command, Path::new(&cwd));
+    return Some(ExecApprovalKey {
+      tool_name: req.tool_name.clone(),
+      canonical_command: command_approval_argv(command, Path::new(&cwd)),
+      command_prefix: intent.command_prefix,
+      cwd,
+      sandbox_permissions,
+      additional_permissions,
+      path_intents: intent.path_intents,
+      network_hint: intent.network_hint,
+      external_paths: intent.external_paths,
+    });
+  }
+
+  if canonical_exec_tool_name(&req.tool_name) == Some(UNIFIED_EXEC_TOOL_NAME)
+    && let Ok(params) = serde_json::from_value::<ShellToolCallParams>(req.args.clone())
+  {
+    let cwd = params.workdir.unwrap_or_else(|| "<turn_cwd>".to_string());
+    let intent = CommandIntent::from_argv(&params.command, Path::new(&cwd));
+    return Some(ExecApprovalKey {
+      tool_name: req.tool_name.clone(),
+      canonical_command: intent.canonical_command.clone(),
+      command_prefix: intent.command_prefix,
+      cwd,
+      sandbox_permissions: params
+        .sandbox_permissions
+        .unwrap_or(SandboxPermissions::UseDefault),
+      additional_permissions: params.additional_permissions,
+      path_intents: intent.path_intents,
+      network_hint: intent.network_hint,
+      external_paths: intent.external_paths,
+    });
+  }
+
+  None
+}
+
+fn command_approval_argv(command: &str, cwd: &Path) -> Vec<String> {
+  let intent = CommandIntent::from_command(command, cwd);
+  if intent.canonical_command.is_empty() {
+    return vec![command.to_string()];
+  }
+  intent.canonical_command
+}
+
 #[async_trait]
 impl Approvable<ToolCall> for RegistryToolRuntime {
-  type ApprovalKey = String;
+  type ApprovalKey = RegistryApprovalKey;
 
   fn approval_keys(&self, req: &ToolCall) -> Vec<Self::ApprovalKey> {
-    vec![format!("{}:{}", req.tool_name, req.args)]
+    let mut keys = vec![RegistryApprovalKey::Tool {
+      tool_name: req.tool_name.clone(),
+      args: req.args.to_string(),
+    }];
+    if let Some(exec_key) = exec_approval_key(req) {
+      keys.push(RegistryApprovalKey::Exec(exec_key));
+    }
+    keys
   }
 
   fn exec_approval_requirement(&self, req: &ToolCall) -> Option<ExecApprovalRequirement> {
@@ -455,13 +583,26 @@ impl Approvable<ToolCall> for RegistryToolRuntime {
       if exec_tool_name == SHELL_TOOL_NAME
         && let Some(command_str) = req.args.get("command").and_then(|v| v.as_str())
       {
-        let shell = default_user_shell();
-        let argv = shell.derive_exec_args(command_str, true);
-        return Some(eval_exec_approval(
-          &argv,
+        let cwd = req
+          .args
+          .get("workdir")
+          .and_then(Value::as_str)
+          .map(PathBuf::from)
+          .unwrap_or_else(|| PathBuf::from("."));
+        let sandbox_permissions = req
+          .args
+          .get("sandbox_permissions")
+          .map(|value| serde_json::from_value::<SandboxPermissions>(value.clone()))
+          .transpose()
+          .ok()
+          .flatten()
+          .unwrap_or(SandboxPermissions::UseDefault);
+        return Some(eval_shell_command_approval(
+          command_str,
+          &cwd,
           &self.sandbox_policy,
           self.approval_policy.clone(),
-          SandboxPermissions::UseDefault,
+          sandbox_permissions,
         ));
       }
 
@@ -536,6 +677,12 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
         "immediate" => Some(NetworkApprovalMode::Immediate),
         "deferred" => Some(NetworkApprovalMode::Deferred),
         _ => None,
+      })
+      .or_else(|| {
+        self
+          .spec
+          .as_ref()
+          .and_then(|spec| spec.permissions.allow_network.then_some(NetworkApprovalMode::Immediate))
       })?;
 
     Some(NetworkApprovalSpec { mode })
@@ -568,9 +715,15 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
       runtime: self.runtime.as_ref().map(|runtime| {
         Arc::new(ToolRuntimeContext {
           session: Arc::clone(&runtime.session),
+          tool_registry: Arc::clone(&runtime.tool_registry),
           tx_event: runtime.tx_event.clone(),
           thread_id: runtime.thread_id.clone(),
           turn_id: runtime.turn_id.clone(),
+          approval_policy: ctx.turn.approval_policy.clone(),
+          has_managed_network_requirements: ctx.turn.has_managed_network_requirements,
+          allowed_domains: ctx.turn.allowed_domains.clone(),
+          denied_domains: ctx.turn.denied_domains.clone(),
+          network_attempt_id: ctx.network_attempt_id.clone(),
         })
       }),
     };
@@ -797,12 +950,39 @@ fn exec_display_command(call: &ToolCall, exec_tool_name: &str) -> Option<String>
 #[cfg(test)]
 mod tests {
   use std::path::Path;
+  use std::sync::Arc;
 
   use serde_json::json;
+  use serde_json::Value;
 
   use super::ToolCall;
+  use super::exec_approval_key;
+  use super::RegistryToolRuntime;
   use super::should_emit_exec_events;
   use super::summarize_tool_display_command;
+  use crate::tools::registry::ToolRegistry;
+  use crate::tools::sandboxing::Approvable;
+  use crate::tools::spec::build_specs;
+  use cokra_protocol::AskForApproval;
+  use cokra_protocol::ReadOnlyAccess;
+  use cokra_protocol::SandboxPolicy;
+
+  fn canonicalize_json(value: Value) -> Value {
+    match value {
+      Value::Array(items) => Value::Array(items.into_iter().map(canonicalize_json).collect()),
+      Value::Object(map) => {
+        let mut entries = map.into_iter().collect::<Vec<_>>();
+        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+        Value::Object(
+          entries
+            .into_iter()
+            .map(|(key, value)| (key, canonicalize_json(value)))
+            .collect(),
+        )
+      }
+      other => other,
+    }
+  }
 
   #[test]
   fn collab_tools_skip_exec_transcript_events() {
@@ -826,6 +1006,112 @@ mod tests {
     assert_eq!(
       summarize_tool_display_command(&call, Path::new("/tmp/project")),
       Some("spawn_agent".to_string())
+    );
+  }
+
+  #[test]
+  fn exec_approval_key_snapshot() {
+    let mut registry = ToolRegistry::new();
+    for spec in build_specs() {
+      registry.register_spec(spec);
+    }
+    let registry = Arc::new(registry);
+    let runtime = RegistryToolRuntime::new(
+      registry.clone(),
+      registry.get_spec("shell").cloned(),
+      AskForApproval::OnRequest,
+      SandboxPolicy::ReadOnly {
+        access: ReadOnlyAccess::FullAccess,
+      },
+      crate::tools::ResolvedExecToolConfig {
+        public_surface: crate::tools::SHELL_TOOL_NAME,
+        backend: crate::tools::ResolvedExecBackend::ShellCommand,
+      },
+      None,
+    );
+
+    let shell_call = ToolCall {
+      tool_name: "shell".to_string(),
+      call_id: "call-shell".to_string(),
+      args: json!({
+        "command": "mkdir ../shared",
+        "workdir": "/repo/app",
+        "sandbox_permissions": "require_escalated"
+      }),
+    };
+    let unified_exec_call = ToolCall {
+      tool_name: "unified_exec".to_string(),
+      call_id: "call-exec".to_string(),
+      args: json!({
+        "command": ["rm", "-rf", "/tmp/demo"],
+        "workdir": "/repo/app"
+      }),
+    };
+
+    let snapshot = canonicalize_json(json!({
+      "shell_key": exec_approval_key(&shell_call),
+      "shell_requirement": format!("{:?}", runtime.exec_approval_requirement(&shell_call)),
+      "unified_exec_key": exec_approval_key(&unified_exec_call),
+      "unified_exec_requirement": format!("{:?}", runtime.exec_approval_requirement(&unified_exec_call)),
+    }));
+
+    insta::assert_json_snapshot!(
+      snapshot,
+      @r###"
+{
+  "shell_key": {
+    "additional_permissions": null,
+    "canonical_command": [
+      "mkdir",
+      "../shared"
+    ],
+    "command_prefix": [
+      "mkdir"
+    ],
+    "cwd": "/repo/app",
+    "external_paths": [
+      "/repo/shared"
+    ],
+    "network_hint": false,
+    "path_intents": [
+      {
+        "external_to_cwd": true,
+        "operation": "mkdir",
+        "path": "/repo/shared"
+      }
+    ],
+    "sandbox_permissions": "require_escalated",
+    "tool_name": "shell"
+  },
+  "shell_requirement": "Some(NeedsApproval { reason: Some(\"mkdir ../shared\") })",
+  "unified_exec_key": {
+    "additional_permissions": null,
+    "canonical_command": [
+      "rm",
+      "-rf",
+      "/tmp/demo"
+    ],
+    "command_prefix": [
+      "rm"
+    ],
+    "cwd": "/repo/app",
+    "external_paths": [
+      "/tmp/demo"
+    ],
+    "network_hint": false,
+    "path_intents": [
+      {
+        "external_to_cwd": true,
+        "operation": "rm",
+        "path": "/tmp/demo"
+      }
+    ],
+    "sandbox_permissions": "use_default",
+    "tool_name": "unified_exec"
+  },
+  "unified_exec_requirement": "Some(NeedsApproval { reason: Some(\"rm -rf /tmp/demo\") })"
+}
+"###
     );
   }
 }
