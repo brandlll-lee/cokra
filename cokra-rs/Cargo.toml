@@ -74,7 +74,7 @@ tokio-tungstenite = "0.28"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 
 # MCP
-rmcp = { version = "0.15", features = ["client"] }
+rmcp = { version = "1.2", features = ["client"] }
 
 # Error handling
 anyhow = "1.0"
