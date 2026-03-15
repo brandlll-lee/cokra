@@ -334,6 +334,11 @@ impl ModelsDevClient {
     results.sort_by(|a, b| a.name.cmp(&b.name));
     results
   }
+
+  #[cfg(test)]
+  pub(crate) async fn replace_cached_database_for_tests(&self, db: ModelsDevDatabase) {
+    *self.data.write().await = Some(db);
+  }
 }
 
 /// Summary of a provider from models.dev with its model list

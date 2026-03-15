@@ -14,6 +14,18 @@ use super::error::Result;
 use super::model_catalog;
 use super::models_dev::ModelsDevClient;
 use super::provider::ProviderInfo;
+use super::provider_catalog::find_connect_provider_by_runtime_id;
+use super::provider_catalog::find_provider_catalog_entry;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelCatalogEntry {
+  pub provider_id: String,
+  pub provider_name: String,
+  pub model_id: String,
+  pub model_name: String,
+  pub context_window: Option<u64>,
+  pub reasoning: bool,
+}
 
 /// Provider Registry
 ///
@@ -364,6 +376,67 @@ impl ProviderRegistry {
     model_catalog::build_connected_models_catalog(&models_dev_db, connected)
   }
 
+  pub async fn lookup_model_catalog(
+    &self,
+    provider_id: &str,
+    model_id: &str,
+  ) -> Option<ModelCatalogEntry> {
+    let runtime_config = self.get_config(provider_id).await;
+    let connect_source = runtime_config
+      .as_ref()
+      .and_then(|config| config.headers.get("x-cokra-connect-source").cloned());
+    let connect_provider = connect_source
+      .as_deref()
+      .and_then(find_provider_catalog_entry)
+      .or_else(|| find_connect_provider_by_runtime_id(provider_id));
+    let display_provider_id = connect_source.unwrap_or_else(|| {
+      connect_provider
+        .map(|provider| provider.id.to_string())
+        .unwrap_or_else(|| provider_id.to_string())
+    });
+    let display_provider_name = connect_provider.map(|provider| provider.name.to_string());
+
+    let models_dev_db = self
+      .models_dev
+      .get_cached_or_refresh()
+      .await
+      .unwrap_or_default();
+
+    if let Some(provider) = models_dev_db.get(provider_id)
+      && let Some(model) = provider.models.get(model_id)
+    {
+      return Some(ModelCatalogEntry {
+        provider_id: display_provider_id.clone(),
+        provider_name: display_provider_name.unwrap_or_else(|| provider.name.clone()),
+        model_id: model_id.to_string(),
+        model_name: if model.name.is_empty() {
+          model_id.to_string()
+        } else {
+          model.name.clone()
+        },
+        context_window: model
+          .limit
+          .as_ref()
+          .map(|limit| limit.context)
+          .filter(|limit| *limit > 0),
+        reasoning: model.reasoning,
+      });
+    }
+
+    self
+      .get(provider_id)
+      .await
+      .map(|provider| ModelCatalogEntry {
+        provider_id: display_provider_id,
+        provider_name: display_provider_name
+          .unwrap_or_else(|| provider.provider_name().to_string()),
+        model_id: model_id.to_string(),
+        model_name: model_id.to_string(),
+        context_window: None,
+        reasoning: false,
+      })
+  }
+
   pub async fn post_connect_probe(
     &self,
     connect_provider_id: &str,
@@ -455,8 +528,10 @@ pub fn new_registry() -> ProviderRegistryRef {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::model::models_dev;
   use async_trait::async_trait;
   use futures::Stream;
+  use pretty_assertions::assert_eq;
   use std::pin::Pin;
 
   #[derive(Debug)]
@@ -681,5 +756,153 @@ mod tests {
       "stored credentials should mark openai as connected"
     );
     assert!(!anthropic.authenticated, "no credentials for anthropic");
+  }
+
+  #[tokio::test]
+  async fn lookup_model_catalog_prefers_models_dev_limits() {
+    let registry = ProviderRegistry::new();
+    registry
+      .register(TestProvider {
+        id: "openai",
+        name: "OpenAI",
+      })
+      .await;
+
+    let mut models = HashMap::new();
+    models.insert(
+      "gpt-5.3-codex".to_string(),
+      models_dev::ModelsDevModel {
+        id: "gpt-5.3-codex".to_string(),
+        name: "GPT-5.3 Codex".to_string(),
+        family: None,
+        release_date: "2025-01-01".to_string(),
+        attachment: true,
+        reasoning: true,
+        temperature: false,
+        tool_call: true,
+        cost: None,
+        limit: Some(models_dev::ModelsDevLimit {
+          context: 272_000,
+          input: Some(272_000),
+          output: 128_000,
+        }),
+        modalities: None,
+        status: None,
+        options: None,
+        headers: None,
+        provider: None,
+      },
+    );
+
+    registry
+      .models_dev
+      .replace_cached_database_for_tests(HashMap::from([(
+        "openai".to_string(),
+        models_dev::ModelsDevProvider {
+          id: "openai".to_string(),
+          name: "OpenAI".to_string(),
+          api: None,
+          env: Vec::new(),
+          npm: None,
+          models,
+        },
+      )]))
+      .await;
+
+    let entry = registry
+      .lookup_model_catalog("openai", "gpt-5.3-codex")
+      .await
+      .expect("catalog entry");
+
+    assert_eq!(
+      entry,
+      ModelCatalogEntry {
+        provider_id: "openai".to_string(),
+        provider_name: "OpenAI".to_string(),
+        model_id: "gpt-5.3-codex".to_string(),
+        model_name: "GPT-5.3 Codex".to_string(),
+        context_window: Some(272_000),
+        reasoning: true,
+      }
+    );
+  }
+
+  #[tokio::test]
+  async fn lookup_model_catalog_prefers_connect_source_for_display_identity() {
+    let registry = ProviderRegistry::new();
+    registry
+      .register_with_config(
+        TestProvider {
+          id: "openai",
+          name: "OpenAI",
+        },
+        ProviderConfig {
+          provider_id: "openai".to_string(),
+          headers: HashMap::from([(
+            "x-cokra-connect-source".to_string(),
+            "openai-codex".to_string(),
+          )]),
+          ..Default::default()
+        },
+      )
+      .await;
+
+    let mut models = HashMap::new();
+    models.insert(
+      "gpt-5.3-codex".to_string(),
+      models_dev::ModelsDevModel {
+        id: "gpt-5.3-codex".to_string(),
+        name: "GPT-5.3 Codex".to_string(),
+        family: None,
+        release_date: "2025-01-01".to_string(),
+        attachment: true,
+        reasoning: true,
+        temperature: false,
+        tool_call: true,
+        cost: None,
+        limit: Some(models_dev::ModelsDevLimit {
+          context: 272_000,
+          input: Some(272_000),
+          output: 128_000,
+        }),
+        modalities: None,
+        status: None,
+        options: None,
+        headers: None,
+        provider: None,
+      },
+    );
+
+    registry
+      .models_dev
+      .replace_cached_database_for_tests(HashMap::from([(
+        "openai".to_string(),
+        models_dev::ModelsDevProvider {
+          id: "openai".to_string(),
+          name: "OpenAI".to_string(),
+          api: None,
+          env: Vec::new(),
+          npm: None,
+          models,
+        },
+      )]))
+      .await;
+
+    let entry = registry
+      .lookup_model_catalog("openai", "gpt-5.3-codex")
+      .await
+      .expect("catalog entry");
+
+    assert_eq!(
+      entry,
+      ModelCatalogEntry {
+        provider_id: "openai-codex".to_string(),
+        provider_name: "ChatGPT Plus/Pro (Codex Subscription)".to_string(),
+        model_id: "gpt-5.3-codex".to_string(),
+        model_name: "GPT-5.3 Codex".to_string(),
+        context_window: Some(272_000),
+        reasoning: true,
+      }
+    );
   }
 }

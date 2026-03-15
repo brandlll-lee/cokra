@@ -23,6 +23,7 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use cokra_core::Cokra;
+use cokra_core::model::ModelCatalogEntry;
 use cokra_core::model::ProviderAuth;
 use cokra_core::model::auth_orchestrator::uses_local_callback;
 use cokra_core::model::oauth_connect::OAuthConnectStart;
@@ -45,6 +46,7 @@ use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPaneAction;
 use crate::bottom_pane::approval_overlay::ApprovalRequest;
 use crate::bottom_pane::chat_composer::ComposerSubmission;
+use crate::bottom_pane::footer::InlineFooterStatus;
 use crate::chatwidget::ActiveCellTranscriptKey;
 use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ChatWidgetAction;
@@ -53,6 +55,7 @@ use crate::chatwidget::TokenUsage;
 use crate::custom_terminal::Frame;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
+use crate::path_utils::get_git_branch;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::tui::FrameRequester;
@@ -94,8 +97,12 @@ pub struct App {
   backtrack_render_pending: bool,
   status_line_mode: StatusLineMode,
   queued_submissions: VecDeque<ComposerSubmission>,
+  footer_effort_label: String,
+  footer_model_catalog: HashMap<String, ModelCatalogEntry>,
+  footer_context_window_limit: HashMap<String, Option<i64>>,
   primary_thread_id: String,
   active_thread_id: String,
+  primary_active_turn_id: Option<String>,
   status_line_agent_selector_active: bool,
   thread_event_stores: HashMap<String, ThreadEventStore>,
   agent_picker_threads: HashMap<String, crate::multi_agents::AgentPickerThreadEntry>,
@@ -228,6 +235,21 @@ fn status_line_agent_tabs(
   spans
 }
 
+fn footer_effort_label(effort: Option<&cokra_protocol::ReasoningEffortConfig>) -> Option<String> {
+  let effort = effort?;
+  let label = match effort.effort {
+    cokra_protocol::ReasoningEffort::Minimal => "minimal",
+    cokra_protocol::ReasoningEffort::Low => "low",
+    cokra_protocol::ReasoningEffort::Medium => "medium",
+    cokra_protocol::ReasoningEffort::High => "high",
+  };
+  Some(label.to_string())
+}
+
+fn configured_footer_effort_label(_config: &cokra_config::Config) -> String {
+  "medium".to_string()
+}
+
 #[derive(Debug, Clone)]
 pub struct AppExitInfo {
   pub token_usage: TokenUsage,
@@ -245,6 +267,7 @@ impl App {
   pub fn new(cokra: Cokra, frame_requester: FrameRequester, ui_mode: UiMode) -> Self {
     let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
     let app_event_sender = AppEventSender::new(app_event_tx);
+    let footer_effort_label = configured_footer_effort_label(cokra.config());
     let primary_thread_id = cokra
       .thread_id()
       .map(ToString::to_string)
@@ -287,8 +310,12 @@ impl App {
       backtrack_render_pending: false,
       status_line_mode: StatusLineMode::Off,
       queued_submissions: VecDeque::new(),
+      footer_effort_label,
+      footer_model_catalog: HashMap::new(),
+      footer_context_window_limit: HashMap::new(),
       primary_thread_id: primary_thread_id.clone(),
       active_thread_id: primary_thread_id,
+      primary_active_turn_id: None,
       status_line_agent_selector_active: false,
       thread_event_stores,
       agent_picker_threads: HashMap::new(),
@@ -425,6 +452,10 @@ impl App {
     let provider_id = model_id.split('/').next().unwrap_or("").to_string();
     if provider_id.is_empty() {
       self.apply_model_selection(model_id).await?;
+      if let Some(label) = footer_effort_label(effort.as_ref()) {
+        self.footer_effort_label = label;
+      }
+      self.refresh_status_line();
       return Ok(());
     }
 
@@ -436,6 +467,10 @@ impl App {
       .await;
     if has_provider {
       self.apply_model_selection(model_id).await?;
+      if let Some(label) = footer_effort_label(effort.as_ref()) {
+        self.footer_effort_label = label;
+      }
+      self.refresh_status_line();
       return Ok(());
     }
 
@@ -450,6 +485,10 @@ impl App {
     {
       Ok(true) => {
         self.apply_model_selection(model_id).await?;
+        if let Some(label) = footer_effort_label(effort.as_ref()) {
+          self.footer_effort_label = label;
+        }
+        self.refresh_status_line();
         return Ok(());
       }
       Ok(false) => {}
@@ -491,6 +530,32 @@ impl App {
 
     self.open_api_key_entry(provider_id, model_id, effort);
     Ok(())
+  }
+
+  async fn cache_footer_model_catalog(&mut self, thread_id: &str, model_id: &str) {
+    let Some(entry) = self
+      .cokra
+      .model_client()
+      .resolve_model_catalog(model_id)
+      .await
+    else {
+      return;
+    };
+
+    self
+      .footer_model_catalog
+      .insert(thread_id.to_string(), entry);
+  }
+
+  fn active_footer_model_catalog_entry(&self) -> Option<&ModelCatalogEntry> {
+    self.footer_model_catalog.get(&self.active_thread_id)
+  }
+
+  fn active_footer_context_window_limit(&self) -> Option<i64> {
+    self
+      .footer_context_window_limit
+      .get(&self.active_thread_id)
+      .and_then(|limit| *limit)
   }
 
   fn open_api_key_entry(
@@ -1389,13 +1454,14 @@ impl App {
         self.exit_info = Some(self.build_exit_info(ExitReason::UserRequested));
       }
       BottomPaneAction::Submit(submission) => {
-        self
-          .submit_user_input(submission.text, submission.text_elements)
-          .await?;
+        self.submit_user_input(submission).await?;
       }
       BottomPaneAction::Queue(submission) => {
-        self.queued_submissions.push_back(submission);
-        self.sync_bottom_pane_context();
+        if self.active_thread_id != self.primary_thread_id {
+          self.show_switch_to_main_warning();
+        } else {
+          self.submit_steer_input(submission).await?;
+        }
       }
       BottomPaneAction::ApprovalDecision(choice) => {
         if let Some(pending) = self.pending_approval.take() {
@@ -1431,21 +1497,21 @@ impl App {
     Ok(())
   }
 
-  async fn submit_user_input(
-    &mut self,
-    text: String,
-    text_elements: Vec<cokra_protocol::TextElement>,
-  ) -> Result<()> {
+  fn show_switch_to_main_warning(&mut self) {
+    self
+      .chat_widget
+      .add_to_history(PlainHistoryCell::new(vec![Line::from(
+        "You are currently viewing a member workspace. Switch back to @main before sending team-level instructions.".dim(),
+      )]));
+  }
+
+  async fn submit_user_input(&mut self, submission: ComposerSubmission) -> Result<()> {
     if self.active_thread_id != self.primary_thread_id {
-      self
-        .chat_widget
-        .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "You are currently viewing a member workspace. Switch back to @main before sending team-level instructions.".dim(),
-        )]));
+      self.show_switch_to_main_warning();
       return Ok(());
     }
 
-    if text.trim().is_empty() {
+    if submission.text.trim().is_empty() {
       return Ok(());
     }
 
@@ -1455,8 +1521,8 @@ impl App {
       .cokra
       .submit(Op::UserInput {
         items: vec![UserInput::Text {
-          text,
-          text_elements,
+          text: submission.text,
+          text_elements: submission.text_elements,
         }],
         final_output_json_schema: None,
       })
@@ -1465,6 +1531,47 @@ impl App {
     self.task_running = true;
     self.chat_widget.set_agent_turn_running(true);
 
+    Ok(())
+  }
+
+  async fn submit_steer_input(&mut self, submission: ComposerSubmission) -> Result<()> {
+    if submission.text.trim().is_empty() {
+      return Ok(());
+    }
+
+    let Some(expected_turn_id) = self.primary_active_turn_id.clone() else {
+      self.queued_submissions.push_back(submission);
+      self.sync_bottom_pane_context();
+      return Ok(());
+    };
+
+    self.scroll_offset = 0;
+
+    let _ = self
+      .cokra
+      .submit(Op::SteerInput {
+        expected_turn_id: Some(expected_turn_id),
+        items: vec![UserInput::Text {
+          text: submission.text,
+          text_elements: submission.text_elements,
+        }],
+      })
+      .await?;
+
+    Ok(())
+  }
+
+  async fn flush_buffered_steer_inputs(&mut self) -> Result<()> {
+    if self.primary_active_turn_id.is_none() {
+      self.sync_bottom_pane_context();
+      return Ok(());
+    }
+
+    while let Some(submission) = self.queued_submissions.pop_front() {
+      self.sync_bottom_pane_context();
+      self.submit_steer_input(submission).await?;
+    }
+    self.sync_bottom_pane_context();
     Ok(())
   }
 
@@ -1824,6 +1931,32 @@ impl App {
       EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)
     );
 
+    match &event.msg {
+      EventMsg::SessionConfigured(e) => {
+        self
+          .cache_footer_model_catalog(&e.thread_id, &e.model)
+          .await;
+        self.footer_context_window_limit.insert(
+          e.thread_id.clone(),
+          e.context_window_limit.and_then(|limit| i64::try_from(limit).ok()),
+        );
+      }
+      EventMsg::TurnStarted(e) if e.thread_id == self.primary_thread_id => {
+        self.primary_active_turn_id = Some(e.turn_id.clone());
+      }
+      EventMsg::TurnComplete(e) if e.thread_id == self.primary_thread_id => {
+        if self.primary_active_turn_id.as_deref() == Some(e.turn_id.as_str()) {
+          self.primary_active_turn_id = None;
+        }
+      }
+      EventMsg::TurnAborted(e) if e.thread_id == self.primary_thread_id => {
+        if self.primary_active_turn_id.as_deref() == Some(e.turn_id.as_str()) {
+          self.primary_active_turn_id = None;
+        }
+      }
+      _ => {}
+    }
+
     if !is_active_thread {
       match &event.msg {
         EventMsg::ExecApprovalRequest(req) => {
@@ -1860,6 +1993,13 @@ impl App {
         self.background_approval_requests.remove(&owner_thread_id);
         self.background_user_input_requests.remove(&owner_thread_id);
         self.remove_queued_prompts_for_thread(&owner_thread_id);
+        if owner_thread_id == self.primary_thread_id {
+          self.queued_submissions.clear();
+        }
+      }
+
+      if turn_started && owner_thread_id == self.primary_thread_id {
+        self.flush_buffered_steer_inputs().await?;
       }
 
       self.sync_bottom_pane_context();
@@ -1885,12 +2025,19 @@ impl App {
 
     self.sync_bottom_pane_context();
 
+    if turn_started && owner_thread_id == self.primary_thread_id {
+      self.flush_buffered_steer_inputs().await?;
+    }
+
     if turn_finished {
       self.background_pending_threads.remove(&owner_thread_id);
       self.background_approval_requests.remove(&owner_thread_id);
       self.background_user_input_requests.remove(&owner_thread_id);
       self.task_running = false;
       self.chat_widget.set_agent_turn_running(false);
+      if owner_thread_id == self.primary_thread_id {
+        self.queued_submissions.clear();
+      }
       if self
         .pending_approval_request
         .as_ref()
@@ -1908,26 +2055,10 @@ impl App {
       }
       self.remove_queued_prompts_for_thread(&owner_thread_id);
       self.maybe_open_next_prompt();
-      if self.active_thread_id == self.primary_thread_id {
-        self.submit_next_queued_submission().await?;
-      }
+      self.sync_bottom_pane_context();
     }
 
     Ok(())
-  }
-
-  async fn submit_next_queued_submission(&mut self) -> Result<()> {
-    if self.task_running {
-      return Ok(());
-    }
-    let Some(submission) = self.queued_submissions.pop_front() else {
-      self.sync_bottom_pane_context();
-      return Ok(());
-    };
-    self.sync_bottom_pane_context();
-    self
-      .submit_user_input(submission.text, submission.text_elements)
-      .await
   }
 
   // 1:1 codex: dispatch_command handles all slash commands at the app layer.
@@ -1958,12 +2089,7 @@ impl App {
         self.app_event_tx.send(AppEvent::ForkCurrentSession);
       }
       SlashCommand::Compact => {
-        let _ = self.cokra.submit(Op::Interrupt).await?;
-        self
-          .chat_widget
-          .add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
-            Line::from("● Context compacted".dim()),
-          ]));
+        let _ = self.cokra.submit(Op::Compact).await?;
       }
       SlashCommand::Quit | SlashCommand::Exit => {
         self.exit_info = Some(self.build_exit_info(ExitReason::UserRequested));
@@ -2535,7 +2661,11 @@ impl App {
     }
 
     // 3) Update local model name so the UI reflects the change immediately.
+    let thread_id = self.active_thread_id.clone();
+    self.cache_footer_model_catalog(&thread_id, &model_id).await;
+    self.footer_context_window_limit.insert(thread_id, None);
     self.chat_widget.set_model_name(model_id.clone());
+    self.refresh_status_line();
 
     // 4) Show confirmation in chat history.
     self
@@ -2547,18 +2677,25 @@ impl App {
   }
 
   fn sync_bottom_pane_context(&mut self) {
-    let usage = self.chat_widget.token_usage();
-    let used_tokens = if usage.total_tokens > 0 {
-      Some(usage.total_tokens)
-    } else if usage.is_zero() {
-      None
-    } else {
-      Some(usage.input_tokens.saturating_add(usage.output_tokens))
-    };
+    let used_tokens = self.chat_widget.context_used_tokens();
+    let context_percent = self
+      .active_footer_context_window_limit()
+      .zip(used_tokens)
+      .and_then(|(limit, used)| {
+        (limit > 0).then_some(
+          (100.0 - ((used.max(0) as f64 / limit as f64) * 100.0))
+            .clamp(0.0, 100.0)
+            .round() as i64,
+        )
+      });
     self
       .chat_widget
       .bottom_pane
-      .set_context_window(None, used_tokens);
+      .set_context_window(context_percent, used_tokens);
+    self.chat_widget.bottom_pane.set_steer_enabled(
+      self.active_thread_id == self.primary_thread_id
+        && (self.task_running || self.primary_active_turn_id.is_some()),
+    );
     self.chat_widget.bottom_pane.set_queued_user_messages(
       if self.active_thread_id == self.primary_thread_id {
         self
@@ -2598,6 +2735,47 @@ impl App {
   }
 
   fn refresh_status_line(&mut self) {
+    let cwd = self
+      .chat_widget
+      .cwd()
+      .cloned()
+      .unwrap_or_else(|| self.cokra.cwd());
+    let model = self.chat_widget.model_name().to_string();
+    let usage = self.chat_widget.token_usage();
+    let context_used_tokens = self.chat_widget.context_used_tokens();
+    let catalog_entry = self.active_footer_model_catalog_entry();
+    let context_window_limit = self.active_footer_context_window_limit();
+
+    let (provider_id, model_name) = if let Some(entry) = catalog_entry {
+      (
+        Some(entry.provider_id.clone()),
+        entry.model_id.clone(),
+      )
+    } else if let Some((provider_id, model_name)) = model.split_once('/') {
+      (Some(provider_id.to_string()), model_name.to_string())
+    } else {
+      let provider_id = self.cokra.config().models.provider.trim();
+      let provider_id = (!provider_id.is_empty()).then(|| provider_id.to_string());
+      (provider_id, model.clone())
+    };
+
+    self
+      .chat_widget
+      .bottom_pane
+      .set_inline_footer_status(Some(InlineFooterStatus {
+        cwd: cwd.display().to_string(),
+        git_branch: get_git_branch(&cwd),
+        input_tokens: usage.input_tokens.max(0),
+        cached_input_tokens: usage.cached_input_tokens.max(0),
+        output_tokens: usage.output_tokens.max(0),
+        context_window_used_tokens: context_used_tokens.map(|tokens| tokens.max(0)),
+        context_window_limit,
+        compaction_mode: Some("auto".to_string()),
+        provider_id,
+        model_name,
+        effort_label: self.footer_effort_label.clone(),
+      }));
+
     let enabled = !matches!(self.status_line_mode, StatusLineMode::Off);
     self
       .chat_widget
@@ -2607,14 +2785,6 @@ impl App {
       self.chat_widget.bottom_pane.set_status_line(None);
       return;
     }
-
-    let cwd = self
-      .chat_widget
-      .cwd()
-      .cloned()
-      .unwrap_or_else(|| self.cokra.cwd());
-    let model = self.chat_widget.model_name().to_string();
-    let usage = self.chat_widget.token_usage();
     let team_snapshot = self.cokra.team_snapshot();
     let agent_switcher_threads = self.agent_switcher_threads();
     let has_team_switcher = agent_switcher_threads.len() > 1;
@@ -2954,7 +3124,11 @@ impl App {
 
   fn format_exec_approval_command(&self, req: &ExecApprovalRequestEvent) -> String {
     let thread_label = self.thread_label_for(&req.thread_id);
-    format!("{thread_label} | {} (cwd: {})", req.command, req.cwd.display())
+    format!(
+      "{thread_label} | {} (cwd: {})",
+      req.command,
+      req.cwd.display()
+    )
   }
 
   fn remove_queued_exec_approval(&mut self, id: &str) {

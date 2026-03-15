@@ -1,6 +1,7 @@
 mod approvals;
 mod user_input;
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,6 +10,9 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
+use crate::compaction::estimate_message_tokens;
+use crate::compaction::find_safe_tail_start_index;
+use crate::compaction::first_non_system_index;
 use crate::model::Message;
 use crate::model::Usage;
 use crate::shell::Shell;
@@ -18,6 +22,8 @@ use cokra_protocol::EventMsg;
 use cokra_protocol::ExecApprovalRequestEvent;
 use cokra_protocol::RequestUserInputEvent;
 use cokra_protocol::ReviewDecision;
+use cokra_protocol::TurnId;
+use cokra_protocol::UserInput;
 use cokra_protocol::user_input::RequestUserInputResponse;
 use user_input::PendingUserInputs;
 
@@ -33,9 +39,11 @@ pub struct Session {
   event_tx: broadcast::Sender<cokra_protocol::EventMsg>,
   pending_approvals: Arc<PendingApprovals>,
   pending_user_inputs: Arc<PendingUserInputs>,
+  active_turn_state: Arc<RwLock<ActiveTurnState>>,
   /// Spec 3.2: cached user shell, resolved once at session creation.
   cached_shell: Arc<RwLock<Shell>>,
   token_usage: Arc<RwLock<TokenUsageState>>,
+  model_switch_state: Arc<RwLock<ModelSwitchState>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,6 +51,28 @@ pub struct TokenUsageState {
   pub input_tokens: u64,
   pub output_tokens: u64,
   pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelSwitchState {
+  pub current_model: Option<String>,
+  pub previous_model: Option<String>,
+  pub switched_at: Option<i64>,
+}
+
+#[derive(Debug, Default)]
+struct ActiveTurnState {
+  turn_id: Option<TurnId>,
+  pending_inputs: VecDeque<Vec<UserInput>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SteerInputError {
+  NoActiveTurn,
+  TurnMismatch {
+    expected_turn_id: TurnId,
+    active_turn_id: TurnId,
+  },
 }
 
 impl Session {
@@ -61,8 +91,10 @@ impl Session {
       event_tx,
       pending_approvals: Arc::new(PendingApprovals::default()),
       pending_user_inputs: Arc::new(PendingUserInputs::default()),
+      active_turn_state: Arc::new(RwLock::new(ActiveTurnState::default())),
       cached_shell: Arc::new(RwLock::new(shell)),
       token_usage: Arc::new(RwLock::new(TokenUsageState::default())),
+      model_switch_state: Arc::new(RwLock::new(ModelSwitchState::default())),
     }
   }
 
@@ -103,30 +135,23 @@ impl Session {
         .collect();
     }
 
-    let mut systems = Vec::new();
-    let mut selected_non_system_rev = Vec::new();
-    let mut used = 0usize;
+    let mut systems = history
+      .iter()
+      .filter(|msg| matches!(msg, Message::System(_)))
+      .cloned()
+      .collect::<Vec<_>>();
+    let Some(boundary_start) = first_non_system_index(&history) else {
+      return systems;
+    };
+    let first_kept_index = find_safe_tail_start_index(&history, boundary_start, max_tokens, true)
+      .unwrap_or(boundary_start);
 
-    for msg in history.iter() {
-      if matches!(msg, Message::System(_)) {
-        systems.push(msg.clone());
-      }
-    }
-
-    for msg in history.iter().rev() {
-      if matches!(msg, Message::System(_)) {
-        continue;
-      }
-      let msg_tokens = estimate_message_tokens(msg);
-      if used + msg_tokens > max_tokens {
-        break;
-      }
-      used += msg_tokens;
-      selected_non_system_rev.push(msg.clone());
-    }
-
-    selected_non_system_rev.reverse();
-    systems.extend(selected_non_system_rev);
+    systems.extend(
+      history[first_kept_index..]
+        .iter()
+        .filter(|msg| !matches!(msg, Message::System(_)))
+        .cloned(),
+    );
     systems
   }
 
@@ -150,6 +175,61 @@ impl Session {
     self.response_history.read().await.clone()
   }
 
+  pub async fn clone_history(&self) -> Vec<Message> {
+    self.history.read().await.clone()
+  }
+
+  pub async fn replace_history(&self, messages: Vec<Message>) {
+    *self.history.write().await = messages;
+  }
+
+  pub(crate) async fn begin_turn(&self, turn_id: TurnId) {
+    let mut active_turn = self.active_turn_state.write().await;
+    if active_turn.turn_id.as_deref() == Some(turn_id.as_str()) {
+      return;
+    }
+    active_turn.turn_id = Some(turn_id);
+    active_turn.pending_inputs.clear();
+  }
+
+  pub(crate) async fn end_turn(&self, turn_id: &str) {
+    let mut active_turn = self.active_turn_state.write().await;
+    if active_turn.turn_id.as_deref() == Some(turn_id) {
+      active_turn.turn_id = None;
+      active_turn.pending_inputs.clear();
+    }
+  }
+
+  pub(crate) async fn active_turn_id(&self) -> Option<TurnId> {
+    self.active_turn_state.read().await.turn_id.clone()
+  }
+
+  pub(crate) async fn steer_input(
+    &self,
+    expected_turn_id: Option<&str>,
+    items: Vec<UserInput>,
+  ) -> Result<(), SteerInputError> {
+    let mut active_turn = self.active_turn_state.write().await;
+    let Some(active_turn_id) = active_turn.turn_id.clone() else {
+      return Err(SteerInputError::NoActiveTurn);
+    };
+    if let Some(expected_turn_id) = expected_turn_id
+      && expected_turn_id != active_turn_id.as_str()
+    {
+      return Err(SteerInputError::TurnMismatch {
+        expected_turn_id: expected_turn_id.to_string(),
+        active_turn_id,
+      });
+    }
+    active_turn.pending_inputs.push_back(items);
+    Ok(())
+  }
+
+  pub(crate) async fn take_pending_inputs(&self) -> Vec<Vec<UserInput>> {
+    let mut active_turn = self.active_turn_state.write().await;
+    active_turn.pending_inputs.drain(..).collect()
+  }
+
   pub async fn update_token_usage(&self, usage: &Usage) {
     let mut token_usage = self.token_usage.write().await;
     token_usage.input_tokens += usage.input_tokens as u64;
@@ -168,22 +248,69 @@ impl Session {
     self.token_usage.read().await.total_tokens
   }
 
+  pub async fn track_model_selection(&self, model: impl Into<String>) -> ModelSwitchState {
+    let model = model.into();
+    let mut state = self.model_switch_state.write().await;
+    match state.current_model.as_deref() {
+      None => {
+        state.current_model = Some(model);
+        state.previous_model = None;
+        state.switched_at = None;
+      }
+      Some(current) if current == model => {}
+      Some(_) => {
+        state.previous_model = state.current_model.clone();
+        state.current_model = Some(model);
+        state.switched_at = Some(chrono::Utc::now().timestamp());
+      }
+    }
+    state.clone()
+  }
+
+  pub async fn model_switch_state(&self) -> ModelSwitchState {
+    self.model_switch_state.read().await.clone()
+  }
+
   /// Drop oldest non-system messages until usage is below `target_total_tokens`.
   pub async fn compact_history_to_token_target(&self, target_total_tokens: usize) {
     let mut history = self.history.write().await;
-    loop {
-      let current = estimate_messages_tokens(&history);
-      if current <= target_total_tokens {
-        break;
-      }
-      let Some(idx) = history
-        .iter()
-        .position(|msg| !matches!(msg, Message::System(_)))
-      else {
-        break;
-      };
-      history.remove(idx);
+    let system_tokens = history
+      .iter()
+      .filter(|msg| matches!(msg, Message::System(_)))
+      .map(estimate_message_tokens)
+      .sum::<usize>();
+    let Some(boundary_start) = first_non_system_index(&history) else {
+      return;
+    };
+
+    let allowed_non_system_tokens = target_total_tokens.saturating_sub(system_tokens);
+    if allowed_non_system_tokens == 0 {
+      history.retain(|msg| matches!(msg, Message::System(_)));
+      return;
     }
+
+    let Some(first_kept_index) =
+      find_safe_tail_start_index(&history, boundary_start, allowed_non_system_tokens, true)
+    else {
+      return;
+    };
+    if first_kept_index <= boundary_start {
+      return;
+    }
+
+    let systems = history
+      .iter()
+      .filter(|msg| matches!(msg, Message::System(_)))
+      .cloned()
+      .collect::<Vec<_>>();
+    let kept = history[first_kept_index..]
+      .iter()
+      .filter(|msg| !matches!(msg, Message::System(_)))
+      .cloned()
+      .collect::<Vec<_>>();
+    history.clear();
+    history.extend(systems);
+    history.extend(kept);
   }
 
   pub fn subscribe_events(&self) -> broadcast::Receiver<cokra_protocol::EventMsg> {
@@ -386,27 +513,15 @@ impl Default for Session {
   }
 }
 
-fn estimate_message_tokens(msg: &Message) -> usize {
-  let text_len = msg.text().map_or(0usize, |s| s.chars().count());
-  // Fast deterministic estimate: 1 token ~= 4 chars.
-  if text_len == 0 {
-    1
-  } else {
-    text_len.div_ceil(4)
-  }
-}
-
-fn estimate_messages_tokens(messages: &[Message]) -> usize {
-  messages.iter().map(estimate_message_tokens).sum()
-}
-
 #[cfg(test)]
 mod tests {
   use tokio::sync::oneshot;
 
   use super::Session;
+  use super::SteerInputError;
   use crate::model::Message;
   use cokra_protocol::ReviewDecision;
+  use cokra_protocol::UserInput;
   use cokra_protocol::user_input::RequestUserInputResponse;
 
   #[tokio::test]
@@ -537,6 +652,56 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn steer_input_round_trip_uses_active_turn_queue() {
+    let session = Session::new();
+    let queued_input = UserInput::Text {
+      text: "follow-up".to_string(),
+      text_elements: Vec::new(),
+    };
+
+    session.begin_turn("turn-1".to_string()).await;
+    session
+      .steer_input(None, vec![queued_input.clone()])
+      .await
+      .expect("steer input should queue while turn is active");
+
+    assert_eq!(session.active_turn_id().await, Some("turn-1".to_string()));
+    assert_eq!(
+      session.take_pending_inputs().await,
+      vec![vec![queued_input]]
+    );
+
+    session.end_turn("turn-1").await;
+    assert_eq!(session.active_turn_id().await, None);
+    assert!(session.take_pending_inputs().await.is_empty());
+  }
+
+  #[tokio::test]
+  async fn steer_input_rejects_turn_mismatch() {
+    let session = Session::new();
+    session.begin_turn("turn-1".to_string()).await;
+
+    let result = session
+      .steer_input(
+        Some("turn-2"),
+        vec![UserInput::Text {
+          text: "ignored".to_string(),
+          text_elements: Vec::new(),
+        }],
+      )
+      .await;
+
+    assert_eq!(
+      result,
+      Err(SteerInputError::TurnMismatch {
+        expected_turn_id: "turn-2".to_string(),
+        active_turn_id: "turn-1".to_string(),
+      })
+    );
+    assert!(session.take_pending_inputs().await.is_empty());
+  }
+
+  #[tokio::test]
   async fn get_history_for_prompt_keeps_system_and_recent_messages() {
     let session = Session::new();
     session
@@ -584,5 +749,49 @@ mod tests {
         .count(),
       1
     );
+  }
+
+  #[tokio::test]
+  async fn get_history_for_prompt_never_starts_with_orphaned_tool_result() {
+    let session = Session::new();
+    session
+      .append_messages(vec![
+        Message::Assistant {
+          content: Some("calling tool".to_string()),
+          tool_calls: Some(vec![crate::model::ToolCall {
+            id: "call-1".to_string(),
+            call_type: "function".to_string(),
+            function: crate::model::ToolCallFunction {
+              name: "read_file".to_string(),
+              arguments: r#"{"file_path":"src/lib.rs"}"#.to_string(),
+            },
+            provider_meta: None,
+          }]),
+        },
+        Message::Tool {
+          tool_call_id: "call-1".to_string(),
+          content: "content".to_string(),
+        },
+        Message::Assistant {
+          content: Some("done".to_string()),
+          tool_calls: None,
+        },
+      ])
+      .await;
+
+    let selected = session.get_history_for_prompt(2).await;
+    assert!(!matches!(selected.first(), Some(Message::Tool { .. })));
+    for (index, message) in selected.iter().enumerate() {
+      let Message::Tool { tool_call_id, .. } = message else {
+        continue;
+      };
+      assert!(matches!(
+        selected.get(index.saturating_sub(1)),
+        Some(Message::Assistant {
+          tool_calls: Some(tool_calls),
+          ..
+        }) if index > 0 && tool_calls.iter().any(|call| call.id == *tool_call_id)
+      ));
+    }
   }
 }

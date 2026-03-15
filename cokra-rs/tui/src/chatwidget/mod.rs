@@ -96,6 +96,10 @@ impl ChatWidget {
     self.session.token_usage()
   }
 
+  pub(crate) fn context_used_tokens(&self) -> Option<i64> {
+    self.session.context_used_tokens()
+  }
+
   pub(crate) fn cwd(&self) -> Option<&PathBuf> {
     self.session.cwd()
   }
@@ -826,10 +830,6 @@ mod tests {
     assert!(
       rendered.contains("? for shortcuts"),
       "expected composer shortcuts hint to remain visible: {rendered}"
-    );
-    assert!(
-      rendered.contains("/effort"),
-      "expected composer effort hint to remain visible: {rendered}"
     );
   }
 }

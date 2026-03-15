@@ -19,6 +19,7 @@
 #[allow(dead_code)]
 pub(crate) mod agent;
 pub mod cokra;
+pub(crate) mod compaction;
 pub(crate) mod config;
 pub(crate) mod exec;
 pub(crate) mod exec_policy;

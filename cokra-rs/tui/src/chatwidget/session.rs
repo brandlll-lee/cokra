@@ -1,16 +1,22 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TokenUsage {
   pub input_tokens: i64,
+  pub cached_input_tokens: i64,
   pub output_tokens: i64,
+  pub reasoning_output_tokens: i64,
   pub total_tokens: i64,
 }
 
 impl TokenUsage {
   pub fn is_zero(&self) -> bool {
-    self.input_tokens == 0 && self.output_tokens == 0 && self.total_tokens == 0
+    self.input_tokens == 0
+      && self.cached_input_tokens == 0
+      && self.output_tokens == 0
+      && self.reasoning_output_tokens == 0
+      && self.total_tokens == 0
   }
 }
 
@@ -42,6 +48,7 @@ impl StatusSnapshot {
 #[derive(Debug, Default)]
 pub(super) struct SessionState {
   pub(super) token_usage: TokenUsage,
+  pub(super) context_used_tokens: Option<i64>,
   pub(super) model_name: String,
   pub(super) cwd: Option<PathBuf>,
   pub(super) agent_turn_running: bool,
@@ -69,6 +76,10 @@ impl SessionState {
 
   pub(super) fn token_usage(&self) -> TokenUsage {
     self.token_usage
+  }
+
+  pub(super) fn context_used_tokens(&self) -> Option<i64> {
+    self.context_used_tokens
   }
 
   pub(super) fn worked_elapsed_from(&mut self, current_elapsed: u64) -> u64 {

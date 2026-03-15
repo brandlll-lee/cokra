@@ -17,6 +17,8 @@ use cokra_config::Config;
 use cokra_config::SandboxMode;
 use cokra_protocol::AskForApproval;
 use cokra_protocol::CompletionStatus;
+use cokra_protocol::ContextCompactedEvent;
+use cokra_protocol::ContextCompactionReason;
 use cokra_protocol::Event;
 use cokra_protocol::EventMsg;
 use cokra_protocol::Op;
@@ -26,7 +28,7 @@ use cokra_protocol::SessionConfiguredEvent;
 use cokra_protocol::Submission;
 use cokra_protocol::ThreadId;
 use cokra_protocol::TurnAbortedEvent;
-use cokra_protocol::UserInput as ProtocolUserInput;
+use cokra_protocol::WarningEvent;
 use cokra_state::StateDb;
 
 use crate::agent::AgentControl;
@@ -36,12 +38,15 @@ use crate::agent::team_runtime::build_leader_agent_teams_prompt_suffix;
 use crate::agent::team_runtime::clear_team_runtime;
 use crate::agent::team_runtime::register_team_runtime;
 use crate::agent::team_runtime::runtime_for_thread;
+use crate::compaction::compact_history_with_summary;
+use crate::compaction::estimate_messages_tokens;
 use crate::model::ChatResponse;
 use crate::model::ModelClient;
 use crate::model::ToolCall;
 use crate::model::Usage;
 use crate::model::init_model_layer;
 use crate::session::Session;
+use crate::session::SteerInputError;
 use crate::thread_manager::ThreadManager;
 use crate::tool_runtime::UnifiedToolRuntime;
 use crate::tools::build_default_tooling_with_cwd;
@@ -146,10 +151,13 @@ impl Cokra {
     let (tx_event, rx_event) = mpsc::channel(1024);
 
     let root_thread_id = resolve_or_persist_root_thread_id(&config).await?;
+    let thread_id = root_thread_id.clone();
     let session = Arc::new(Session::new_with_thread_id(root_thread_id.clone()));
     let thread_manager = Arc::new(ThreadManager::new(root_thread_id.clone()));
     let guards = Arc::new(crate::agent::Guards::default());
-    let turn_config = build_turn_config(&config);
+    let mut turn_config = build_turn_config(&config);
+    sync_turn_context_window_limit(model_client.as_ref(), &mut turn_config).await;
+    let _ = session.track_model_selection(turn_config.model.clone()).await;
 
     let configured_provider = config.models.provider.clone();
     if !configured_provider.is_empty()
@@ -175,7 +183,7 @@ impl Cokra {
       tool_router.clone(),
       tool_runtime.clone(),
       session.clone(),
-      turn_config,
+      turn_config.clone(),
       tx_raw_event.clone(),
       thread_manager.downgrade_state(),
       guards,
@@ -196,7 +204,6 @@ impl Cokra {
 
     let (event_bus, _event_rx) = broadcast::channel(1024);
     let event_bus = Arc::new(event_bus);
-    let thread_id = session.thread_id().cloned().unwrap_or_default();
 
     // Forward internal turn/tool events into public queue-pair events.
     tokio::spawn(forward_internal_events(
@@ -206,22 +213,13 @@ impl Cokra {
     ));
 
     // Emit initial session configured event, matching codex startup behavior.
-    emit_event(
-      &tx_event,
-      &event_bus,
-      EventMsg::SessionConfigured(SessionConfiguredEvent {
-        thread_id: thread_id.to_string(),
-        model: build_turn_config(&config).model,
-        approval_policy: format!("{:?}", config.approval.policy),
-        sandbox_mode: format!("{:?}", config.sandbox.mode),
-      }),
-    )
-    .await;
+    emit_session_configured_event(&tx_event, &event_bus, &session, &turn_config).await;
 
     // Submission loop runs until Op::Shutdown.
     tokio::spawn(submission_loop(
       session.clone(),
       config.clone(),
+      model_client.clone(),
       agent_control.clone(),
       rx_sub,
       tx_event.clone(),
@@ -285,7 +283,7 @@ impl Cokra {
 
     let cwd = self.config.cwd.clone();
     let op = Op::UserTurn {
-      items: vec![ProtocolUserInput::Text {
+      items: vec![cokra_protocol::UserInput::Text {
         text: user_message,
         text_elements: Vec::new(),
       }],
@@ -521,6 +519,195 @@ async fn infer_root_thread_id_from_team_state(
   )
 }
 
+async fn sync_turn_context_window_limit(model_client: &ModelClient, turn_config: &mut TurnConfig) {
+  turn_config.context_window_limit = model_client
+    .resolve_model_catalog(&turn_config.model)
+    .await
+    .and_then(|entry| entry.context_window)
+    .and_then(|limit| usize::try_from(limit).ok());
+}
+
+async fn emit_session_configured_event(
+  tx_event: &mpsc::Sender<Event>,
+  event_bus: &broadcast::Sender<EventMsg>,
+  session: &Session,
+  turn_config: &TurnConfig,
+) {
+  let model_switch_state = session.model_switch_state().await;
+  emit_event(
+    tx_event,
+    event_bus,
+    EventMsg::SessionConfigured(SessionConfiguredEvent {
+      thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
+      model: turn_config.model.clone(),
+      approval_policy: format!("{:?}", turn_config.approval_policy),
+      sandbox_mode: format!("{:?}", turn_config.sandbox_policy),
+      context_window_limit: turn_config.context_window_limit,
+      previous_model: model_switch_state.previous_model,
+      model_switched_at: model_switch_state.switched_at,
+    }),
+  )
+  .await;
+}
+
+async fn run_manual_compaction(
+  session: &Session,
+  model_client: &ModelClient,
+  turn_config: &TurnConfig,
+  tx_event: &mpsc::Sender<Event>,
+  event_bus: &broadcast::Sender<EventMsg>,
+  turn_id: &str,
+) {
+  let thread_id = session.thread_id().cloned().unwrap_or_default().to_string();
+  if !turn_config.compaction.enabled {
+    emit_event(
+      tx_event,
+      event_bus,
+      EventMsg::Warning(WarningEvent {
+        thread_id,
+        turn_id: turn_id.to_string(),
+        message: "context compaction is disabled".to_string(),
+      }),
+    )
+    .await;
+    return;
+  }
+
+  let history = session.clone_history().await;
+  let tokens_before_est = estimate_messages_tokens(&history);
+  let compacted = compact_history_with_summary(
+    model_client,
+    &turn_config.model,
+    &history,
+    &turn_config.compaction,
+  )
+  .await;
+
+  match compacted {
+    Ok(Some(result)) => {
+      session.update_token_usage(&result.usage).await;
+      session.replace_history(result.compacted_history).await;
+      emit_event(
+        tx_event,
+        event_bus,
+        EventMsg::ContextCompacted(ContextCompactedEvent {
+          thread_id,
+          turn_id: turn_id.to_string(),
+          reason: ContextCompactionReason::Manual,
+          tokens_before_est,
+          tokens_after_est: result.tokens_after_est,
+          reserve_tokens: turn_config.compaction.reserve_tokens,
+          keep_recent_tokens: turn_config.compaction.keep_recent_tokens,
+        }),
+      )
+      .await;
+    }
+    Ok(None) => {
+      emit_event(
+        tx_event,
+        event_bus,
+        EventMsg::Warning(WarningEvent {
+          thread_id,
+          turn_id: turn_id.to_string(),
+          message: "nothing to compact".to_string(),
+        }),
+      )
+      .await;
+    }
+    Err(err) => {
+      emit_event(
+        tx_event,
+        event_bus,
+        EventMsg::Warning(WarningEvent {
+          thread_id,
+          turn_id: turn_id.to_string(),
+          message: format!("context compaction failed: {err}"),
+        }),
+      )
+      .await;
+    }
+  }
+}
+
+async fn maybe_compact_before_model_switch(
+  session: &Session,
+  model_client: &ModelClient,
+  turn_config: &TurnConfig,
+  previous_model: &str,
+  previous_limit: Option<usize>,
+  tx_event: &mpsc::Sender<Event>,
+  event_bus: &broadcast::Sender<EventMsg>,
+  turn_id: &str,
+) {
+  if !turn_config.compaction.enabled {
+    return;
+  }
+
+  let Some(previous_limit) = previous_limit else {
+    return;
+  };
+  let Some(next_limit) = turn_config.context_window_limit else {
+    return;
+  };
+  if previous_limit <= next_limit {
+    return;
+  }
+
+  let threshold = next_limit.saturating_sub(turn_config.compaction.reserve_tokens);
+  if threshold == 0 {
+    return;
+  }
+
+  let history = session.clone_history().await;
+  let tokens_before_est = estimate_messages_tokens(&history);
+  if tokens_before_est < threshold {
+    return;
+  }
+
+  let compacted = compact_history_with_summary(
+    model_client,
+    previous_model,
+    &history,
+    &turn_config.compaction,
+  )
+  .await;
+
+  let thread_id = session.thread_id().cloned().unwrap_or_default().to_string();
+  match compacted {
+    Ok(Some(result)) => {
+      session.update_token_usage(&result.usage).await;
+      session.replace_history(result.compacted_history).await;
+      emit_event(
+        tx_event,
+        event_bus,
+        EventMsg::ContextCompacted(ContextCompactedEvent {
+          thread_id,
+          turn_id: turn_id.to_string(),
+          reason: ContextCompactionReason::Threshold,
+          tokens_before_est,
+          tokens_after_est: result.tokens_after_est,
+          reserve_tokens: turn_config.compaction.reserve_tokens,
+          keep_recent_tokens: turn_config.compaction.keep_recent_tokens,
+        }),
+      )
+      .await;
+    }
+    Ok(None) => {}
+    Err(err) => {
+      emit_event(
+        tx_event,
+        event_bus,
+        EventMsg::Warning(WarningEvent {
+          thread_id,
+          turn_id: turn_id.to_string(),
+          message: format!("model-switch compaction failed: {err}"),
+        }),
+      )
+      .await;
+    }
+  }
+}
+
 fn build_turn_config(config: &Config) -> TurnConfig {
   let provider = config.models.provider.trim();
   let model = config.models.model.trim();
@@ -540,6 +727,7 @@ fn build_turn_config(config: &Config) -> TurnConfig {
     has_managed_network_requirements: config.sandbox.network_access,
     allowed_domains: Vec::new(),
     denied_domains: Vec::new(),
+    context_window_limit: None,
     ..TurnConfig::default()
   }
 }
@@ -590,17 +778,6 @@ fn map_sandbox_policy(config: &Config) -> SandboxPolicy {
   }
 }
 
-fn extract_text_from_items(items: &[ProtocolUserInput]) -> String {
-  items
-    .iter()
-    .filter_map(|item| match item {
-      ProtocolUserInput::Text { text, .. } => Some(text.as_str()),
-      _ => None,
-    })
-    .collect::<Vec<_>>()
-    .join("\n")
-}
-
 async fn forward_internal_events(
   mut rx_raw_event: mpsc::Receiver<EventMsg>,
   tx_event: mpsc::Sender<Event>,
@@ -645,9 +822,46 @@ fn legacy_events_for(msg: &EventMsg) -> Vec<EventMsg> {
   }
 }
 
+async fn emit_steer_input_rejected_warning(
+  tx_event: &mpsc::Sender<Event>,
+  event_bus: &broadcast::Sender<EventMsg>,
+  session: &Session,
+  fallback_turn_id: &str,
+  expected_turn_id: Option<&str>,
+  error: SteerInputError,
+) {
+  let (turn_id, message) = match error {
+    SteerInputError::NoActiveTurn => (
+      expected_turn_id.unwrap_or(fallback_turn_id).to_string(),
+      "no active turn available for steering input".to_string(),
+    ),
+    SteerInputError::TurnMismatch {
+      expected_turn_id,
+      active_turn_id,
+    } => (
+      active_turn_id.clone(),
+      format!(
+        "steering input rejected: expected turn {expected_turn_id}, active turn is {active_turn_id}"
+      ),
+    ),
+  };
+
+  emit_event(
+    tx_event,
+    event_bus,
+    EventMsg::Warning(cokra_protocol::WarningEvent {
+      thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
+      turn_id,
+      message,
+    }),
+  )
+  .await;
+}
+
 async fn submission_loop(
   session: Arc<Session>,
   config: Arc<Config>,
+  model_client: Arc<ModelClient>,
   agent_control: Arc<AgentControl>,
   mut rx_sub: mpsc::Receiver<Submission>,
   tx_event: mpsc::Sender<Event>,
@@ -655,6 +869,7 @@ async fn submission_loop(
 ) {
   let mut queue: VecDeque<Submission> = VecDeque::new();
   let mut turn_config = build_turn_config(&config);
+  sync_turn_context_window_limit(model_client.as_ref(), &mut turn_config).await;
 
   loop {
     let sub = if let Some(next) = queue.pop_front() {
@@ -672,24 +887,27 @@ async fn submission_loop(
         sandbox_policy,
         model,
       } => {
-        let approval_policy_str = format!("{approval_policy:?}");
-        let sandbox_mode_str = format!("{sandbox_policy:?}");
+        let previous_model = turn_config.model.clone();
+        let previous_limit = turn_config.context_window_limit;
         turn_config.model = model.clone();
         turn_config.approval_policy = approval_policy;
         turn_config.sandbox_policy = sandbox_policy;
         turn_config.cwd = cwd;
-        agent_control.set_turn_config(turn_config.clone()).await;
-        emit_event(
+        sync_turn_context_window_limit(model_client.as_ref(), &mut turn_config).await;
+        maybe_compact_before_model_switch(
+          &session,
+          model_client.as_ref(),
+          &turn_config,
+          &previous_model,
+          previous_limit,
           &tx_event,
           &event_bus,
-          EventMsg::SessionConfigured(SessionConfiguredEvent {
-            thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
-            model,
-            approval_policy: approval_policy_str,
-            sandbox_mode: sandbox_mode_str,
-          }),
+          &sub.id,
         )
         .await;
+        agent_control.set_turn_config(turn_config.clone()).await;
+        let _ = session.track_model_selection(model).await;
+        emit_session_configured_event(&tx_event, &event_bus, &session, &turn_config).await;
       }
       Op::OverrideTurnContext {
         cwd,
@@ -699,6 +917,8 @@ async fn submission_loop(
         collaboration_mode: _,
         personality: _,
       } => {
+        let previous_model = turn_config.model.clone();
+        let previous_limit = turn_config.context_window_limit;
         if let Some(model) = model {
           turn_config.model = model;
         }
@@ -712,29 +932,33 @@ async fn submission_loop(
           turn_config.cwd = cwd;
         }
 
-        agent_control.set_turn_config(turn_config.clone()).await;
-        emit_event(
+        sync_turn_context_window_limit(model_client.as_ref(), &mut turn_config).await;
+        maybe_compact_before_model_switch(
+          &session,
+          model_client.as_ref(),
+          &turn_config,
+          &previous_model,
+          previous_limit,
           &tx_event,
           &event_bus,
-          EventMsg::SessionConfigured(SessionConfiguredEvent {
-            thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
-            model: turn_config.model.clone(),
-            approval_policy: format!("{:?}", turn_config.approval_policy),
-            sandbox_mode: format!("{:?}", turn_config.sandbox_policy),
-          }),
+          &sub.id,
         )
         .await;
+        agent_control.set_turn_config(turn_config.clone()).await;
+        let _ = session
+          .track_model_selection(turn_config.model.clone())
+          .await;
+        emit_session_configured_event(&tx_event, &event_bus, &session, &turn_config).await;
       }
       Op::UserInput { items, .. } => {
-        let user_item =
-          cokra_protocol::TurnItem::UserMessage(cokra_protocol::UserMessageItem::new(&items));
+        let user_item = cokra_protocol::UserMessageItem::new(&items);
         emit_event(
           &tx_event,
           &event_bus,
           EventMsg::ItemStarted(cokra_protocol::ItemStartedEvent {
             thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
             turn_id: sub.id.clone(),
-            item: user_item.clone(),
+            item: cokra_protocol::TurnItem::UserMessage(user_item.clone()),
           }),
         )
         .await;
@@ -744,11 +968,11 @@ async fn submission_loop(
           EventMsg::ItemCompleted(cokra_protocol::ItemCompletedEvent {
             thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
             turn_id: sub.id.clone(),
-            item: user_item,
+            item: cokra_protocol::TurnItem::UserMessage(user_item.clone()),
           }),
         )
         .await;
-        let user_message = extract_text_from_items(&items);
+        let user_message = user_item.message();
         run_turn_with_interrupt(
           &session,
           &agent_control,
@@ -773,15 +997,14 @@ async fn submission_loop(
         collaboration_mode: _,
         personality: _,
       } => {
-        let user_item =
-          cokra_protocol::TurnItem::UserMessage(cokra_protocol::UserMessageItem::new(&items));
+        let user_item = cokra_protocol::UserMessageItem::new(&items);
         emit_event(
           &tx_event,
           &event_bus,
           EventMsg::ItemStarted(cokra_protocol::ItemStartedEvent {
             thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
             turn_id: sub.id.clone(),
-            item: user_item.clone(),
+            item: cokra_protocol::TurnItem::UserMessage(user_item.clone()),
           }),
         )
         .await;
@@ -791,13 +1014,35 @@ async fn submission_loop(
           EventMsg::ItemCompleted(cokra_protocol::ItemCompletedEvent {
             thread_id: session.thread_id().cloned().unwrap_or_default().to_string(),
             turn_id: sub.id.clone(),
-            item: user_item,
+            item: cokra_protocol::TurnItem::UserMessage(user_item.clone()),
           }),
         )
         .await;
+        let previous_model = turn_config.model.clone();
+        let previous_limit = turn_config.context_window_limit;
         turn_config.model = model;
+        sync_turn_context_window_limit(model_client.as_ref(), &mut turn_config).await;
+        let model_changed = previous_model != turn_config.model
+          || previous_limit != turn_config.context_window_limit;
+        maybe_compact_before_model_switch(
+          &session,
+          model_client.as_ref(),
+          &turn_config,
+          &previous_model,
+          previous_limit,
+          &tx_event,
+          &event_bus,
+          &sub.id,
+        )
+        .await;
         agent_control.set_turn_config(turn_config.clone()).await;
-        let user_message = extract_text_from_items(&items);
+        let _ = session
+          .track_model_selection(turn_config.model.clone())
+          .await;
+        if model_changed {
+          emit_session_configured_event(&tx_event, &event_bus, &session, &turn_config).await;
+        }
+        let user_message = user_item.message();
         run_turn_with_interrupt(
           &session,
           &agent_control,
@@ -809,6 +1054,25 @@ async fn submission_loop(
           &sub.id,
         )
         .await;
+      }
+      Op::SteerInput {
+        expected_turn_id,
+        items,
+      } => {
+        if let Err(error) = session
+          .steer_input(expected_turn_id.as_deref(), items)
+          .await
+        {
+          emit_steer_input_rejected_warning(
+            &tx_event,
+            &event_bus,
+            &session,
+            &sub.id,
+            expected_turn_id.as_deref(),
+            error,
+          )
+          .await;
+        }
       }
       Op::ExecApproval {
         id,
@@ -855,6 +1119,17 @@ async fn submission_loop(
           )
           .await;
         }
+      }
+      Op::Compact => {
+        run_manual_compaction(
+          &session,
+          model_client.as_ref(),
+          &turn_config,
+          &tx_event,
+          &event_bus,
+          &sub.id,
+        )
+        .await;
       }
       Op::Interrupt => {
         emit_event(
@@ -913,6 +1188,7 @@ async fn run_turn_with_interrupt(
     return;
   }
 
+  session.begin_turn(turn_id.to_string()).await;
   let mut fut = Box::pin(agent_control.process_turn(Turn {
     turn_id: turn_id.to_string(),
     user_message,
@@ -976,6 +1252,25 @@ async fn run_turn_with_interrupt(
               ).await;
             }
           }
+          Op::SteerInput {
+            expected_turn_id,
+            items,
+          } => {
+            if let Err(error) = session
+              .steer_input(expected_turn_id.as_deref(), items)
+              .await
+            {
+              emit_steer_input_rejected_warning(
+                tx_event,
+                event_bus,
+                session,
+                turn_id,
+                expected_turn_id.as_deref(),
+                error,
+              )
+              .await;
+            }
+          }
           Op::Interrupt => {
             emit_event(
               tx_event,
@@ -1001,6 +1296,7 @@ async fn run_turn_with_interrupt(
       }
     }
   }
+  session.end_turn(turn_id).await;
 }
 
 impl CokraSpawnOk {

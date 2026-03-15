@@ -155,6 +155,10 @@ impl BottomPane {
     }
   }
 
+  pub(crate) fn set_steer_enabled(&mut self, enabled: bool) {
+    self.composer.set_steer_enabled(enabled);
+  }
+
   pub(crate) fn status_widget(&self) -> Option<&StatusIndicatorWidget> {
     self.status.as_ref()
   }
@@ -179,6 +183,10 @@ impl BottomPane {
 
   pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
     self.composer.set_status_line(status_line);
+  }
+
+  pub(crate) fn set_inline_footer_status(&mut self, status: Option<footer::InlineFooterStatus>) {
+    self.composer.set_inline_footer_status(status);
   }
 
   pub(crate) fn set_status_line_enabled(&mut self, enabled: bool) {

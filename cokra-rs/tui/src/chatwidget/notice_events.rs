@@ -32,7 +32,9 @@ impl ChatWidget {
       | EventMsg::ListCustomPromptsResponse(_)
       | EventMsg::ListSkillsResponse(_)
       | EventMsg::ListRemoteSkillsResponse(_) => {}
-      EventMsg::ContextCompacted(_) => {
+      EventMsg::ContextCompacted(event) => {
+        let _ = event;
+        self.session.context_used_tokens = None;
         self.add_to_history_preserving_exec(PlainHistoryCell::new(vec![Line::from(
           "● Context compacted".dim(),
         )]));
@@ -430,6 +432,7 @@ mod tests {
   use super::*;
   use crate::app_event_sender::AppEventSender;
   use crate::tui::FrameRequester;
+  use pretty_assertions::assert_eq;
   use tokio::sync::mpsc::unbounded_channel;
 
   fn make_widget() -> ChatWidget {
@@ -546,5 +549,24 @@ mod tests {
       .expect("active exec cell should remain visible");
     assert_eq!(cell.calls.len(), 1);
     assert!(cell.is_active());
+  }
+
+  #[test]
+  fn context_compaction_updates_footer_context_estimate() {
+    let mut widget = make_widget();
+
+    widget.handle_notice_event(&EventMsg::ContextCompacted(
+      cokra_protocol::ContextCompactedEvent {
+        thread_id: "thread-1".to_string(),
+        turn_id: "turn-1".to_string(),
+        reason: cokra_protocol::ContextCompactionReason::Threshold,
+        tokens_before_est: 180_000,
+        tokens_after_est: 12_345,
+        reserve_tokens: 16_384,
+        keep_recent_tokens: 24_576,
+      },
+    ));
+
+    assert_eq!(widget.context_used_tokens(), None);
   }
 }

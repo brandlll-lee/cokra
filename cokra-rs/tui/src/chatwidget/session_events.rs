@@ -7,6 +7,7 @@ impl ChatWidget {
     let is_first = !self.session.has_seen_session_configured;
     self.session.has_seen_session_configured = true;
     self.session.set_model_name(event.model.clone());
+    self.session.context_used_tokens = None;
     if !is_first {
       self.add_to_history(new_session_info(
         event.model.clone(),
@@ -26,8 +27,21 @@ impl ChatWidget {
 
   pub(super) fn on_token_count(&mut self, event: &cokra_protocol::TokenCountEvent) {
     self.session.token_usage.input_tokens = event.input_tokens;
+    self.session.token_usage.cached_input_tokens = event.cached_input_tokens;
     self.session.token_usage.output_tokens = event.output_tokens;
+    self.session.token_usage.reasoning_output_tokens = event.reasoning_output_tokens;
     self.session.token_usage.total_tokens = event.total_tokens;
+    let used_tokens = if event.total_tokens > 0 {
+      Some(event.total_tokens)
+    } else {
+      let sum = event
+        .input_tokens
+        .saturating_add(event.cached_input_tokens)
+        .saturating_add(event.output_tokens)
+        .saturating_add(event.reasoning_output_tokens);
+      (sum > 0).then_some(sum)
+    };
+    self.session.context_used_tokens = used_tokens;
   }
 
   pub(super) fn on_error(&mut self, event: &cokra_protocol::ErrorEvent) {
@@ -87,6 +101,7 @@ mod tests {
   use crate::app_event::AppEvent;
   use crate::app_event_sender::AppEventSender;
   use crate::tui::FrameRequester;
+  use pretty_assertions::assert_eq;
   use tokio::sync::mpsc::unbounded_channel;
 
   fn configured_event(model: &str) -> cokra_protocol::SessionConfiguredEvent {
@@ -95,6 +110,21 @@ mod tests {
       model: model.to_string(),
       approval_policy: "Ask".to_string(),
       sandbox_mode: "Permissive".to_string(),
+      context_window_limit: Some(272_000),
+      previous_model: None,
+      model_switched_at: None,
+    }
+  }
+
+  fn token_count_event() -> cokra_protocol::TokenCountEvent {
+    cokra_protocol::TokenCountEvent {
+      thread_id: "thread-1".to_string(),
+      turn_id: "turn-1".to_string(),
+      input_tokens: 1200,
+      cached_input_tokens: 300,
+      output_tokens: 45,
+      reasoning_output_tokens: 12,
+      total_tokens: 1557,
     }
   }
 
@@ -150,5 +180,31 @@ mod tests {
 
     assert!(rendered.contains("┌─ cokra ─ github/claude-sonnet-4.6"));
     assert!(!rendered.contains("Welcome to Cokra"));
+  }
+
+  #[test]
+  fn token_count_updates_footer_usage_state() {
+    let (tx, _rx) = unbounded_channel();
+    let sender = AppEventSender::new(tx);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::AnimatedPreview,
+    );
+
+    widget.on_token_count(&token_count_event());
+
+    assert_eq!(
+      widget.token_usage(),
+      TokenUsage {
+        input_tokens: 1200,
+        cached_input_tokens: 300,
+        output_tokens: 45,
+        reasoning_output_tokens: 12,
+        total_tokens: 1557,
+      }
+    );
+    assert_eq!(widget.context_used_tokens(), Some(1557));
   }
 }

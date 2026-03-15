@@ -713,32 +713,81 @@ fn header_i64(headers: &reqwest::header::HeaderMap, key: &str) -> Option<i64> {
 }
 
 fn parse_response_usage(value: &Value) -> Option<ResponseTokenUsage> {
-  let input_tokens = value
+  // Normalize provider-native usage details once, so downstream consumers can
+  // render a canonical input/cache/reasoning breakdown without re-parsing.
+  let prompt_tokens = value
     .get("input_tokens")
+    .or_else(|| value.get("prompt_tokens"))
+    .or_else(|| value.get("promptTokenCount"))
     .and_then(Value::as_i64)
     .unwrap_or(0);
+  let cached_input_tokens = value
+    .get("cached_input_tokens")
+    .or_else(|| value.get("cached_tokens"))
+    .or_else(|| {
+      value
+        .get("input_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+    })
+    .or_else(|| {
+      value
+        .get("prompt_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+    })
+    .or_else(|| value.get("cachedContentTokenCount"))
+    .and_then(Value::as_i64)
+    .unwrap_or(0);
+  let input_tokens = prompt_tokens.saturating_sub(cached_input_tokens);
   let output_tokens = value
     .get("output_tokens")
+    .or_else(|| value.get("completion_tokens"))
+    .or_else(|| value.get("candidatesTokenCount"))
+    .and_then(Value::as_i64)
+    .unwrap_or(0);
+  let reasoning_output_tokens = value
+    .get("reasoning_output_tokens")
+    .or_else(|| value.get("reasoning_tokens"))
+    .or_else(|| {
+      value
+        .get("output_tokens_details")
+        .and_then(|details| details.get("reasoning_tokens"))
+    })
+    .or_else(|| {
+      value
+        .get("completion_tokens_details")
+        .and_then(|details| details.get("reasoning_tokens"))
+    })
+    .or_else(|| value.get("thoughtsTokenCount"))
     .and_then(Value::as_i64)
     .unwrap_or(0);
   let total_tokens = value
     .get("total_tokens")
+    .or_else(|| value.get("totalTokenCount"))
     .and_then(Value::as_i64)
-    .unwrap_or(input_tokens + output_tokens);
+    .unwrap_or(prompt_tokens + output_tokens + reasoning_output_tokens);
 
-  if input_tokens == 0 && output_tokens == 0 && total_tokens == 0 {
+  if input_tokens == 0
+    && cached_input_tokens == 0
+    && output_tokens == 0
+    && reasoning_output_tokens == 0
+    && total_tokens == 0
+  {
     return None;
   }
 
   Some(ResponseTokenUsage {
     input_tokens,
+    cached_input_tokens,
     output_tokens,
+    reasoning_output_tokens,
     total_tokens,
   })
 }
 
 #[cfg(test)]
 mod tests {
+  use pretty_assertions::assert_eq;
+
   use super::*;
 
   #[test]
@@ -785,7 +834,7 @@ mod tests {
       "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\"}}\n",
       "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n",
       "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\"}}\n",
-      "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}\n",
+      "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":22,\"input_tokens_details\":{\"cached_tokens\":3},\"output_tokens_details\":{\"reasoning_tokens\":7}}}}\n",
     );
 
     let mut response_id = String::new();
@@ -802,6 +851,24 @@ mod tests {
     assert!(matches!(events[4], ResponseEvent::OutputItemDone(_)));
     assert!(matches!(events[5], ResponseEvent::Completed { .. }));
     assert!(matches!(events[6], ResponseEvent::EndTurn));
+
+    let usage = match &events[5] {
+      ResponseEvent::Completed {
+        token_usage: Some(usage),
+        ..
+      } => usage,
+      _ => panic!("expected completed usage"),
+    };
+    assert_eq!(
+      usage,
+      &ResponseTokenUsage {
+        input_tokens: 7,
+        cached_input_tokens: 3,
+        output_tokens: 5,
+        reasoning_output_tokens: 7,
+        total_tokens: 22,
+      }
+    );
   }
 
   #[test]

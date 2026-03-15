@@ -34,6 +34,35 @@ pub(crate) fn get_git_repo_root(base_dir: &Path) -> Option<PathBuf> {
   None
 }
 
+/// Return the current git branch name for `base_dir`, if discoverable.
+///
+/// This mirrors the lightweight `.git` walking approach above instead of
+/// requiring the `git` binary or the `git2` crate.
+pub(crate) fn get_git_branch(base_dir: &Path) -> Option<String> {
+  let repo_root = get_git_repo_root(base_dir)?;
+  let git_entry = repo_root.join(".git");
+  let git_dir = if git_entry.is_dir() {
+    git_entry
+  } else {
+    let contents = std::fs::read_to_string(&git_entry).ok()?;
+    let gitdir = contents
+      .lines()
+      .find_map(|line| line.strip_prefix("gitdir:"))
+      .map(str::trim)?;
+    let git_dir = PathBuf::from(gitdir);
+    if git_dir.is_absolute() {
+      git_dir
+    } else {
+      repo_root.join(git_dir)
+    }
+  };
+
+  let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+  let head = head.trim();
+  let reference = head.strip_prefix("ref:")?.trim();
+  reference.rsplit('/').next().map(ToString::to_string)
+}
+
 /// If `path` is absolute and inside $HOME, return the part *after* the home
 /// directory; otherwise, return the path as-is. Note if `path` is the homedir,
 /// this will return and empty path.
@@ -151,5 +180,41 @@ mod tests {
     let result = get_git_repo_root(&cwd);
     // Just ensure it doesn't panic - result depends on where test runs
     let _ = result;
+  }
+
+  #[test]
+  fn test_get_git_branch_from_git_dir() {
+    let temp = std::env::temp_dir().join(format!("cokra-branch-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    let repo = temp.join("repo");
+    let git_dir = repo.join(".git");
+    std::fs::create_dir_all(&git_dir).expect("git dir");
+    std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/master\n").expect("head");
+
+    assert_eq!(get_git_branch(&repo), Some("master".to_string()));
+    let _ = std::fs::remove_dir_all(&temp);
+  }
+
+  #[test]
+  fn test_get_git_branch_from_git_file_pointer() {
+    let temp = std::env::temp_dir().join(format!("cokra-branch-file-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    let repo = temp.join("repo");
+    let actual_git_dir = temp.join("worktrees").join("repo");
+    std::fs::create_dir_all(&actual_git_dir).expect("git dir");
+    std::fs::create_dir_all(&repo).expect("repo");
+    std::fs::write(
+      repo.join(".git"),
+      format!("gitdir: {}\n", actual_git_dir.display()),
+    )
+    .expect("git file");
+    std::fs::write(
+      actual_git_dir.join("HEAD"),
+      "ref: refs/heads/feature/footer\n",
+    )
+    .expect("head");
+
+    assert_eq!(get_git_branch(&repo), Some("footer".to_string()));
+    let _ = std::fs::remove_dir_all(&temp);
   }
 }

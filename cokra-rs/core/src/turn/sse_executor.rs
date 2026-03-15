@@ -8,12 +8,17 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use cokra_protocol::AgentMessageContentDeltaEvent;
+use cokra_protocol::ContextCompactedEvent;
+use cokra_protocol::ContextCompactionReason;
 use cokra_protocol::EventMsg;
 use cokra_protocol::FunctionCallEvent;
 use cokra_protocol::ItemCompletedEvent;
 use cokra_protocol::ItemStartedEvent;
 use cokra_protocol::ResponseEvent;
+use cokra_protocol::TokenCountEvent;
 
+use crate::compaction::compact_history_with_summary;
+use crate::compaction::prepare_compaction;
 use crate::model::ChatRequest;
 use crate::model::Message as ModelMessage;
 use crate::model::ModelClient;
@@ -194,6 +199,17 @@ impl SseTurnExecutor {
               total_tokens: usage.total_tokens.max(0) as u32,
             })
             .await;
+          self
+            .send_event(EventMsg::TokenCount(TokenCountEvent {
+              thread_id: thread_id.to_string(),
+              turn_id: turn_id.to_string(),
+              input_tokens: usage.input_tokens.max(0),
+              cached_input_tokens: usage.cached_input_tokens.max(0),
+              output_tokens: usage.output_tokens.max(0),
+              reasoning_output_tokens: usage.reasoning_output_tokens.max(0),
+              total_tokens: usage.total_tokens.max(0),
+            }))
+            .await?;
         }
         ResponseEvent::RateLimits(_) => {
           // phase-6: reserved for future UI/state integration
@@ -214,14 +230,16 @@ impl SseTurnExecutor {
 
   async fn run_sampling_request(
     &self,
-    messages: Vec<ModelMessage>,
+    messages: &mut Vec<ModelMessage>,
     thread_id: &str,
     turn_id: &str,
     item_id: &str,
     cancellation_token: CancellationToken,
   ) -> Result<SamplingRequestResult, TurnError> {
     let max_retries = 3;
+    let max_overflow_retries = 2;
     let mut retries = 0;
+    let mut overflow_retries = 0;
 
     loop {
       match self
@@ -235,6 +253,21 @@ impl SseTurnExecutor {
         .await
       {
         Ok(output) => return Ok(output),
+        Err(err) if is_context_overflow_error(&err) && overflow_retries < max_overflow_retries => {
+          overflow_retries += 1;
+          let compacted = self
+            .compact_messages(
+              messages,
+              thread_id,
+              turn_id,
+              ContextCompactionReason::Overflow,
+            )
+            .await?;
+          if !compacted {
+            return Err(err);
+          }
+          retries = 0;
+        }
         Err(err) if err.is_retryable() && retries < max_retries => {
           retries += 1;
           let delay = backoff(retries);
@@ -252,17 +285,7 @@ impl SseTurnExecutor {
     }
   }
 
-  async fn maybe_run_auto_compact_for_messages(&self, messages: &mut Vec<ModelMessage>) {
-    let Some(limit) = self.config.auto_compact_token_limit else {
-      return;
-    };
-
-    if estimate_messages_tokens(messages) < limit {
-      return;
-    }
-
-    self.session.compact_history_to_token_target(limit).await;
-
+  async fn rebuild_messages_from_session(&self) -> Vec<ModelMessage> {
     let mut rebuilt = if self.prompt_prefix.is_empty() {
       let mut messages = Vec::new();
       if let Some(system) = &self.config.system_prompt {
@@ -279,7 +302,89 @@ impl SseTurnExecutor {
       rebuilt.extend(self.session.get_history(100).await);
     }
 
+    rebuilt
+  }
+
+  async fn compact_messages(
+    &self,
+    messages: &mut Vec<ModelMessage>,
+    thread_id: &str,
+    turn_id: &str,
+    reason: ContextCompactionReason,
+  ) -> Result<bool, TurnError> {
+    if !self.config.compaction.enabled {
+      return Ok(false);
+    }
+
+    let history = self.session.clone_history().await;
+    if prepare_compaction(&history, &self.config.compaction).is_none() {
+      return Ok(false);
+    }
+
+    let tokens_before_est = estimate_messages_tokens(messages);
+    let Some(compaction) = compact_history_with_summary(
+      self.model_client.as_ref(),
+      &self.config.model,
+      &history,
+      &self.config.compaction,
+    )
+    .await
+    .map_err(TurnError::ModelError)?
+    else {
+      return Ok(false);
+    };
+
+    self.session.update_token_usage(&compaction.usage).await;
+    self
+      .session
+      .replace_history(compaction.compacted_history.clone())
+      .await;
+    let rebuilt = self.rebuild_messages_from_session().await;
+    let tokens_after_est = estimate_messages_tokens(&rebuilt);
     *messages = rebuilt;
+
+    self
+      .send_event(EventMsg::ContextCompacted(ContextCompactedEvent {
+        thread_id: thread_id.to_string(),
+        turn_id: turn_id.to_string(),
+        reason,
+        tokens_before_est,
+        tokens_after_est,
+        reserve_tokens: self.config.compaction.reserve_tokens,
+        keep_recent_tokens: self.config.compaction.keep_recent_tokens,
+      }))
+      .await?;
+
+    Ok(true)
+  }
+
+  async fn maybe_run_auto_compact_for_messages(
+    &self,
+    messages: &mut Vec<ModelMessage>,
+    thread_id: &str,
+    turn_id: &str,
+  ) -> Result<(), TurnError> {
+    if !self.config.compaction.enabled {
+      return Ok(());
+    }
+
+    let Some(context_window_limit) = self.config.context_window_limit else {
+      return Ok(());
+    };
+    let threshold = context_window_limit.saturating_sub(self.config.compaction.reserve_tokens);
+    if threshold == 0 || estimate_messages_tokens(messages) < threshold {
+      return Ok(());
+    }
+
+    let _ = self
+      .compact_messages(
+        messages,
+        thread_id,
+        turn_id,
+        ContextCompactionReason::Threshold,
+      )
+      .await?;
+    Ok(())
   }
 
   pub async fn run_sse_interaction(
@@ -296,9 +401,39 @@ impl SseTurnExecutor {
         return Err(TurnError::TurnAborted);
       }
 
+      for items in self.session.take_pending_inputs().await {
+        let user_item = cokra_protocol::UserMessageItem::new(&items);
+        let user_message = user_item.message();
+        self
+          .send_event(EventMsg::ItemStarted(ItemStartedEvent {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            item: cokra_protocol::TurnItem::UserMessage(user_item.clone()),
+          }))
+          .await?;
+
+        let user_model_message = ModelMessage::User(user_message);
+        messages.push(user_model_message.clone());
+        self
+          .session
+          .append_message(user_model_message.clone())
+          .await;
+        if let Some(item) = ResponseItem::from_model_message(&user_model_message) {
+          self.session.append_response_item(item).await;
+        }
+
+        self
+          .send_event(EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            item: cokra_protocol::TurnItem::UserMessage(user_item),
+          }))
+          .await?;
+      }
+
       self
-        .maybe_run_auto_compact_for_messages(&mut messages)
-        .await;
+        .maybe_run_auto_compact_for_messages(&mut messages, &thread_id, &turn_id)
+        .await?;
 
       let item_id = Uuid::new_v4().to_string();
       self
@@ -318,7 +453,7 @@ impl SseTurnExecutor {
         mut function_calls,
       } = self
         .run_sampling_request(
-          messages.clone(),
+          &mut messages,
           &thread_id,
           &turn_id,
           &item_id,
@@ -630,6 +765,34 @@ fn map_stream_model_error(err: ModelError) -> TurnError {
   }
 }
 
+fn is_context_overflow_error(err: &TurnError) -> bool {
+  match err {
+    TurnError::ContextWindowExceeded => true,
+    TurnError::ModelError(ModelError::ContextLimitExceeded(_)) => true,
+    TurnError::ModelError(ModelError::ApiError(message))
+    | TurnError::ModelError(ModelError::InvalidRequest(message))
+    | TurnError::ModelError(ModelError::StreamError(message))
+    | TurnError::Stream(message, _) => contains_context_overflow_hint(message),
+    _ => false,
+  }
+}
+
+fn contains_context_overflow_hint(message: &str) -> bool {
+  let lowercase = message.to_ascii_lowercase();
+  [
+    "context length",
+    "maximum context",
+    "context window",
+    "too long",
+    "too many tokens",
+    "maximum number of tokens",
+    "prompt is too long",
+    "context_limit_exceeded",
+  ]
+  .iter()
+  .any(|needle| lowercase.contains(needle))
+}
+
 fn backoff(retries: usize) -> Duration {
   let seconds = 2u64.pow((retries.min(5) as u32).saturating_sub(1));
   Duration::from_secs(seconds.max(1))
@@ -655,6 +818,8 @@ mod tests {
   use cokra_protocol::ContentDeltaEvent;
   use cokra_protocol::FunctionCall;
   use cokra_protocol::ResponseErrorEvent;
+  use cokra_protocol::ResponseTokenUsage;
+  use pretty_assertions::assert_eq;
 
   use super::SseTurnExecutor;
   use crate::model::ChatRequest;
@@ -686,6 +851,7 @@ mod tests {
   #[derive(Debug)]
   enum MockStep {
     Delta(&'static str),
+    CompletedUsage(ResponseTokenUsage),
     Call {
       id: &'static str,
       name: &'static str,
@@ -788,6 +954,10 @@ mod tests {
           text: text.to_string(),
           index: 0,
         })),
+        MockStep::CompletedUsage(usage) => Ok(ResponseEvent::Completed {
+          response_id: "resp_mock".to_string(),
+          token_usage: Some(usage),
+        }),
         MockStep::Call {
           id,
           name,
@@ -908,6 +1078,13 @@ mod tests {
     let provider = MockResponsesProvider::new(vec![vec![
       MockStep::Delta("Hello"),
       MockStep::Delta(" World"),
+      MockStep::CompletedUsage(ResponseTokenUsage {
+        input_tokens: 64,
+        cached_input_tokens: 16,
+        output_tokens: 12,
+        reasoning_output_tokens: 4,
+        total_tokens: 96,
+      }),
       MockStep::End,
     ]]);
 
@@ -944,6 +1121,22 @@ mod tests {
       .filter(|event| matches!(event, EventMsg::AgentMessageContentDelta(_)))
       .count();
     assert_eq!(delta_count, 2);
+    let token_counts = events
+      .iter()
+      .filter_map(|event| match event {
+        EventMsg::TokenCount(event) => Some(event),
+        _ => None,
+      })
+      .collect::<Vec<_>>();
+    assert_eq!(token_counts.len(), 1);
+    let token_count = token_counts[0];
+    assert_eq!(token_count.thread_id, "thread-1");
+    assert_eq!(token_count.turn_id, "turn-1");
+    assert_eq!(token_count.input_tokens, 64);
+    assert_eq!(token_count.cached_input_tokens, 16);
+    assert_eq!(token_count.output_tokens, 12);
+    assert_eq!(token_count.reasoning_output_tokens, 4);
+    assert_eq!(token_count.total_tokens, 96);
   }
 
   #[tokio::test]

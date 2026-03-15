@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// User input content
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum UserInput {
   /// Text input with optional formatting
   Text {
@@ -26,14 +26,14 @@ pub enum UserInput {
 }
 
 /// Text element with formatting info
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TextElement {
   pub byte_range: ByteRange,
   pub placeholder: Option<String>,
 }
 
 /// Byte range for text formatting
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ByteRange {
   pub start: usize,
   pub end: usize,

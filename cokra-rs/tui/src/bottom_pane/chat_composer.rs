@@ -29,6 +29,7 @@ use super::footer;
 use super::footer::CollaborationModeIndicator;
 use super::footer::FooterMode;
 use super::footer::FooterProps;
+use super::footer::InlineFooterStatus;
 use super::paste_burst::CharDecision;
 use super::paste_burst::FlushResult;
 use super::paste_burst::PasteBurst;
@@ -41,7 +42,6 @@ use crate::render::Insets;
 use crate::render::RectExt as _;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
-use crate::style::user_message_style;
 use crate::ui_consts::LIVE_PREFIX_COLS;
 
 const FOOTER_TRANSIENT_HINT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -82,6 +82,7 @@ pub(crate) struct ChatComposer {
   collaboration_mode_indicator: Option<CollaborationModeIndicator>,
   context_window_percent: Option<i64>,
   context_window_used_tokens: Option<i64>,
+  inline_footer_status: Option<InlineFooterStatus>,
   status_line_value: Option<Line<'static>>,
   status_line_enabled: bool,
   local_image_attachments: HashMap<String, PathBuf>,
@@ -107,6 +108,7 @@ impl ChatComposer {
       collaboration_mode_indicator: None,
       context_window_percent: None,
       context_window_used_tokens: None,
+      inline_footer_status: None,
       status_line_value: None,
       status_line_enabled: false,
       local_image_attachments: HashMap::new(),
@@ -120,6 +122,10 @@ impl ChatComposer {
     self.is_task_running = running;
   }
 
+  pub(crate) fn set_steer_enabled(&mut self, enabled: bool) {
+    self.steer_enabled = enabled;
+  }
+
   pub(crate) fn set_context_window(&mut self, percent: Option<i64>, used_tokens: Option<i64>) {
     self.context_window_percent = percent;
     self.context_window_used_tokens = used_tokens;
@@ -127,6 +133,10 @@ impl ChatComposer {
 
   pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
     self.status_line_value = status_line;
+  }
+
+  pub(crate) fn set_inline_footer_status(&mut self, status: Option<InlineFooterStatus>) {
+    self.inline_footer_status = status;
   }
 
   pub(crate) fn set_status_line_enabled(&mut self, enabled: bool) {
@@ -710,6 +720,7 @@ impl ChatComposer {
       quit_shortcut_key: key_hint::plain(KeyCode::Esc),
       context_window_percent: self.context_window_percent,
       context_window_used_tokens: self.context_window_used_tokens,
+      inline_footer_status: self.inline_footer_status.clone(),
       status_line_value: self.status_line_value.clone(),
       status_line_enabled: self.status_line_enabled,
     }
@@ -892,14 +903,8 @@ impl Renderable for ChatComposer {
       .style(Style::default())
       .render(composer_rect, buf);
 
-    // Tint only the input surface between the horizontal rules.
-    let input_surface = composer_rect.inset(Insets::tlbr(1, 0, 1, 0));
-    let input_style = user_message_style();
-    Block::default()
-      .style(input_style)
-      .render(input_surface, buf);
-
-    // Claude Code-style horizontal rules above/below the input surface.
+    // Keep the composer body transparent so the input line matches Claude Code's
+    // unfilled prompt area instead of rendering as a tinted bar.
     if composer_rect.height >= 2 {
       let rule = Span::from("─".repeat(composer_rect.width as usize)).dim();
       buf.set_span(composer_rect.x, composer_rect.y, &rule, composer_rect.width);
@@ -916,9 +921,9 @@ impl Renderable for ChatComposer {
     // Render the prompt at the left gutter.
     if !textarea_rect.is_empty() {
       let prompt_style = if self.input_enabled {
-        input_style.add_modifier(Modifier::BOLD)
+        Style::default().add_modifier(Modifier::BOLD)
       } else {
-        input_style.add_modifier(Modifier::DIM)
+        Style::default().add_modifier(Modifier::DIM)
       };
       let prompt = Span::styled("> ", prompt_style);
       buf.set_span(
@@ -952,13 +957,27 @@ impl Renderable for ChatComposer {
         && footer_props.is_task_running
         && footer_props.steer_enabled;
 
+      let show_inline_footer = !footer_props.status_line_enabled
+        && footer_props.inline_footer_status.is_some()
+        && matches!(
+          footer_props.mode,
+          FooterMode::ComposerEmpty | FooterMode::ComposerHasDraft
+        );
+
+      if show_inline_footer {
+        if let Some(status) = &footer_props.inline_footer_status {
+          footer::render_inline_status_footer(popup_rect, buf, status);
+        }
+        return;
+      }
+
       let right_line = if footer_props.status_line_enabled {
         Some(footer::context_window_line(
           footer_props.context_window_percent,
           footer_props.context_window_used_tokens,
         ))
       } else {
-        Some(Line::from(vec![Span::from(CLAUDE_EFFORT_HINT).dim()]))
+        None
       };
       let right_width = right_line
         .as_ref()

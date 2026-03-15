@@ -35,6 +35,7 @@ pub use error::ModelError;
 pub use error::Result;
 pub use provider::ModelProvider;
 pub use provider::ProviderInfo;
+pub use registry::ModelCatalogEntry;
 pub use registry::ProviderRegistry;
 pub use types::*;
 

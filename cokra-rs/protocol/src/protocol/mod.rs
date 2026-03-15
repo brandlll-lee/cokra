@@ -164,6 +164,9 @@ pub enum Op {
   /// Interrupt current operation
   Interrupt,
 
+  /// Compact current conversation context.
+  Compact,
+
   /// Clean background terminals
   CleanBackgroundTerminals,
 
@@ -171,6 +174,12 @@ pub enum Op {
   UserInput {
     items: Vec<UserInput>,
     final_output_json_schema: Option<serde_json::Value>,
+  },
+
+  /// Inject additional user input into the currently active turn.
+  SteerInput {
+    expected_turn_id: Option<TurnId>,
+    items: Vec<UserInput>,
   },
 
   /// User turn (main task execution)
@@ -404,6 +413,11 @@ pub struct SessionConfiguredEvent {
   pub model: String,
   pub approval_policy: String,
   pub sandbox_mode: String,
+  pub context_window_limit: Option<usize>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub previous_model: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub model_switched_at: Option<i64>,
 }
 
 /// Thread name updated event
@@ -648,9 +662,26 @@ pub enum ModelRerouteReason {
   HighRiskCyberActivity,
 }
 
-/// Context compacted event (no payload)
+/// Reason why context compaction happened.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextCompactionReason {
+  Threshold,
+  Overflow,
+  Manual,
+}
+
+/// Context compacted event
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContextCompactedEvent;
+pub struct ContextCompactedEvent {
+  pub thread_id: String,
+  pub turn_id: String,
+  pub reason: ContextCompactionReason,
+  pub tokens_before_est: usize,
+  pub tokens_after_est: usize,
+  pub reserve_tokens: usize,
+  pub keep_recent_tokens: usize,
+}
 
 /// Thread rolled back event
 #[derive(Debug, Clone, Serialize, Deserialize)]

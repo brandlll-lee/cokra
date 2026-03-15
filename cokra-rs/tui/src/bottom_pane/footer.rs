@@ -3,6 +3,8 @@
 //! This module is intentionally pure rendering/state-derivation: it formats
 //! `FooterProps` into lines without mutating external state.
 
+use std::borrow::Cow;
+
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::render::line_utils::prefix_lines;
@@ -32,8 +34,24 @@ pub(crate) struct FooterProps {
   pub(crate) quit_shortcut_key: KeyBinding,
   pub(crate) context_window_percent: Option<i64>,
   pub(crate) context_window_used_tokens: Option<i64>,
+  pub(crate) inline_footer_status: Option<InlineFooterStatus>,
   pub(crate) status_line_value: Option<Line<'static>>,
   pub(crate) status_line_enabled: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct InlineFooterStatus {
+  pub(crate) cwd: String,
+  pub(crate) git_branch: Option<String>,
+  pub(crate) input_tokens: i64,
+  pub(crate) cached_input_tokens: i64,
+  pub(crate) output_tokens: i64,
+  pub(crate) context_window_used_tokens: Option<i64>,
+  pub(crate) context_window_limit: Option<i64>,
+  pub(crate) compaction_mode: Option<String>,
+  pub(crate) provider_id: Option<String>,
+  pub(crate) model_name: String,
+  pub(crate) effort_label: String,
 }
 
 impl Default for FooterProps {
@@ -49,6 +67,7 @@ impl Default for FooterProps {
       quit_shortcut_key: key_hint::plain(KeyCode::Esc),
       context_window_percent: None,
       context_window_used_tokens: None,
+      inline_footer_status: None,
       status_line_value: None,
       status_line_enabled: false,
     }
@@ -135,6 +154,16 @@ pub(crate) fn reset_mode_after_activity(current: FooterMode) -> FooterMode {
 }
 
 pub(crate) fn footer_height(props: &FooterProps) -> u16 {
+  if !props.status_line_enabled
+    && props.inline_footer_status.is_some()
+    && matches!(
+      props.mode,
+      FooterMode::ComposerEmpty | FooterMode::ComposerHasDraft
+    )
+  {
+    return 2;
+  }
+
   let show_shortcuts_hint = match props.mode {
     FooterMode::ComposerEmpty => true,
     FooterMode::QuitShortcutReminder
@@ -163,6 +192,37 @@ pub(crate) fn render_footer_line(area: Rect, buf: &mut Buffer, line: Line<'stati
     " ".repeat(FOOTER_INDENT_COLS).into(),
   ))
   .render(area, buf);
+}
+
+pub(crate) fn render_inline_status_footer(
+  area: Rect,
+  buf: &mut Buffer,
+  status: &InlineFooterStatus,
+) {
+  if area.is_empty() {
+    return;
+  }
+
+  let top_area = Rect {
+    x: area.x,
+    y: area.y,
+    width: area.width,
+    height: 1,
+  };
+  render_footer_line(top_area, buf, inline_status_path_line(status));
+
+  if area.height < 2 {
+    return;
+  }
+
+  let bottom_area = Rect {
+    x: area.x,
+    y: area.y + area.height - 1,
+    width: area.width,
+    height: 1,
+  };
+  render_footer_line(bottom_area, buf, inline_status_usage_line(status));
+  render_context_right(bottom_area, buf, &inline_status_model_line(status));
 }
 
 pub(crate) fn render_footer_from_props(
@@ -225,11 +285,11 @@ fn left_side_line(
     }
     SummaryHintKind::QueueMessage => {
       line.push_span(key_hint::plain(KeyCode::Tab));
-      line.push_span(" to queue message".dim());
+      line.push_span(" to send message".dim());
     }
     SummaryHintKind::QueueShort => {
       line.push_span(key_hint::plain(KeyCode::Tab));
-      line.push_span(" to queue".dim());
+      line.push_span(" to send".dim());
     }
   }
 
@@ -489,6 +549,69 @@ pub(crate) fn render_context_right(area: Rect, buf: &mut Buffer, line: &Line<'st
   }
 }
 
+pub(crate) fn inline_status_path_line(status: &InlineFooterStatus) -> Line<'static> {
+  let path = if let Some(branch) = &status.git_branch {
+    format!("{} ({branch})", status.cwd)
+  } else {
+    status.cwd.clone()
+  };
+  Line::from(path).dim()
+}
+
+pub(crate) fn inline_status_usage_line(status: &InlineFooterStatus) -> Line<'static> {
+  let mut spans = vec![
+    Span::from(format!("↑{}", format_tokens_compact(status.input_tokens))).dim(),
+    " ".into(),
+    Span::from(format!("↓{}", format_tokens_compact(status.output_tokens))).dim(),
+  ];
+
+  if status.cached_input_tokens > 0 {
+    spans.push(" ".into());
+    spans.push(
+      Span::from(format!(
+        "R{}",
+        format_tokens_compact(status.cached_input_tokens)
+      ))
+      .dim(),
+    );
+  }
+
+  if let Some(limit) = status.context_window_limit.filter(|limit| *limit > 0) {
+    spans.push(" ".into());
+    let usage = if let Some(used_tokens) = status.context_window_used_tokens {
+      format!(
+        "{}/{}",
+        format_context_window_percent(used_tokens, limit),
+        format_tokens_compact(limit)
+      )
+    } else {
+      format!("?/{limit}", limit = format_tokens_compact(limit))
+    };
+    spans.push(Span::from(usage).dim());
+  }
+
+  if let Some(mode) = &status.compaction_mode {
+    spans.push(" ".into());
+    spans.push(Span::from(format!("({mode})")).dim());
+  }
+
+  Line::from(spans)
+}
+
+pub(crate) fn inline_status_model_line(status: &InlineFooterStatus) -> Line<'static> {
+  let mut content = String::new();
+  if let Some(provider_id) = &status.provider_id
+    && !provider_id.is_empty()
+  {
+    content.push_str(&format!("({provider_id}) "));
+  }
+  content.push_str(&status.model_name);
+  if !status.effort_label.is_empty() {
+    content.push_str(&format!(" • {}", status.effort_label));
+  }
+  Line::from(content).dim()
+}
+
 pub(crate) fn inset_footer_hint_area(mut area: Rect) -> Rect {
   if area.width > 2 {
     area.x += 2;
@@ -742,14 +865,37 @@ pub(crate) fn context_window_line(percent: Option<i64>, used_tokens: Option<i64>
   Line::from(vec![Span::from("100% context left").dim()])
 }
 
-fn format_tokens_compact(value: i64) -> String {
-  if value >= 1_000_000 {
-    return format!("{:.1}M", value as f64 / 1_000_000.0);
+pub(crate) fn format_tokens_compact(value: i64) -> String {
+  let abs = value.unsigned_abs() as f64;
+  let sign = if value < 0 { "-" } else { "" };
+  if abs >= 1_000_000.0 {
+    let scaled = abs / 1_000_000.0;
+    if scaled >= 100.0 {
+      return format!("{sign}{scaled:.0}m");
+    }
+    return format!("{sign}{scaled:.1}m");
   }
-  if value >= 1_000 {
-    return format!("{:.1}K", value as f64 / 1_000.0);
+  if abs >= 1_000.0 {
+    let scaled = abs / 1_000.0;
+    if scaled >= 100.0 {
+      return format!("{sign}{scaled:.0}k");
+    }
+    return format!("{sign}{scaled:.1}k");
   }
-  value.to_string()
+  format!("{value}")
+}
+
+fn format_context_window_percent(used_tokens: i64, limit: i64) -> Cow<'static, str> {
+  if limit <= 0 {
+    return Cow::Borrowed("0%");
+  }
+
+  let percent = ((used_tokens.max(0) as f64 / limit as f64) * 100.0).clamp(0.0, 999.9);
+  if percent >= 10.0 {
+    Cow::Owned(format!("{percent:.0}%"))
+  } else {
+    Cow::Owned(format!("{percent:.1}%"))
+  }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -874,7 +1020,7 @@ const SHORTCUTS: &[ShortcutDescriptor] = &[
       condition: DisplayCondition::Always,
     }],
     prefix: "",
-    label: " to queue message",
+    label: " to send message",
   },
   ShortcutDescriptor {
     id: ShortcutId::FilePaths,
@@ -946,3 +1092,45 @@ const SHORTCUTS: &[ShortcutDescriptor] = &[
     label: " to change mode",
   },
 ];
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn sample_status() -> InlineFooterStatus {
+    InlineFooterStatus {
+      cwd: "/mnt/f/CodeHub/leehub".to_string(),
+      git_branch: Some("master".to_string()),
+      input_tokens: 2_600,
+      cached_input_tokens: 5_000,
+      output_tokens: 498,
+      context_window_used_tokens: Some(5_000),
+      context_window_limit: Some(272_000),
+      compaction_mode: Some("auto".to_string()),
+      provider_id: Some("openai-codex".to_string()),
+      model_name: "gpt-5.3-codex".to_string(),
+      effort_label: "medium".to_string(),
+    }
+  }
+
+  fn line_to_string(line: Line<'static>) -> String {
+    line
+      .spans
+      .into_iter()
+      .map(|span| span.content.into_owned())
+      .collect::<String>()
+  }
+
+  #[test]
+  fn inline_footer_status_lines_snapshot() {
+    let status = sample_status();
+    let rendered = [
+      line_to_string(inline_status_path_line(&status)),
+      line_to_string(inline_status_usage_line(&status)),
+      line_to_string(inline_status_model_line(&status)),
+    ]
+    .join("\n");
+
+    insta::assert_snapshot!(rendered);
+  }
+}

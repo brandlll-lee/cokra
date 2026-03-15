@@ -45,7 +45,11 @@ pub struct OutputItemEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ResponseTokenUsage {
   pub input_tokens: i64,
+  #[serde(default)]
+  pub cached_input_tokens: i64,
   pub output_tokens: i64,
+  #[serde(default)]
+  pub reasoning_output_tokens: i64,
   pub total_tokens: i64,
 }
 
@@ -128,7 +132,9 @@ mod tests {
       response_id: "resp_1".to_string(),
       token_usage: Some(ResponseTokenUsage {
         input_tokens: 10,
+        cached_input_tokens: 4,
         output_tokens: 5,
+        reasoning_output_tokens: 2,
         total_tokens: 15,
       }),
     };

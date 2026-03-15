@@ -11,6 +11,7 @@ use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::compaction::CompactionSettings;
 use crate::model::Message as ModelMessage;
 use crate::model::ModelClient;
 use crate::model::transform::ProviderRuntimeKind;
@@ -108,7 +109,7 @@ pub struct TurnConfig {
   pub denied_domains: Vec<String>,
   pub tool_output_truncation: TruncationPolicy,
   pub context_window_limit: Option<usize>,
-  pub auto_compact_token_limit: Option<usize>,
+  pub compaction: CompactionSettings,
 }
 
 impl Default for TurnConfig {
@@ -128,8 +129,8 @@ impl Default for TurnConfig {
       allowed_domains: Vec::new(),
       denied_domains: Vec::new(),
       tool_output_truncation: TruncationPolicy::Tokens(DEFAULT_TOOL_OUTPUT_TOKENS),
-      context_window_limit: Some(128_000),
-      auto_compact_token_limit: Some(96_000),
+      context_window_limit: None,
+      compaction: CompactionSettings::default(),
     }
   }
 }
@@ -189,91 +190,98 @@ impl TurnExecutor {
       .cloned()
       .unwrap_or_default()
       .to_string();
+    self.session.begin_turn(turn_id.clone()).await;
 
-    self
-      .send_event(EventMsg::TurnStarted(TurnStartedEvent {
-        thread_id: thread_id.clone(),
-        turn_id: turn_id.clone(),
-        mode: ModeKind::Default,
-        model: self.config.model.clone(),
-        cwd: self.config.cwd.clone(),
-        start_time: chrono::Utc::now().timestamp(),
-      }))
-      .await?;
+    let result = async {
+      self
+        .send_event(EventMsg::TurnStarted(TurnStartedEvent {
+          thread_id: thread_id.clone(),
+          turn_id: turn_id.clone(),
+          mode: ModeKind::Default,
+          model: self.config.model.clone(),
+          cwd: self.config.cwd.clone(),
+          start_time: chrono::Utc::now().timestamp(),
+        }))
+        .await?;
 
-    let prompt = self.build_messages(&input).await?;
-    let messages = prompt.messages.clone();
+      let prompt = self.build_messages(&input).await?;
+      let messages = prompt.messages.clone();
 
-    let user_message = ModelMessage::User(input.content.clone());
-    self.session.append_message(user_message.clone()).await;
-    if let Some(item) = ResponseItem::from_model_message(&user_message) {
-      self.session.append_response_item(item).await;
+      let user_message = ModelMessage::User(input.content.clone());
+      self.session.append_message(user_message.clone()).await;
+      if let Some(item) = ResponseItem::from_model_message(&user_message) {
+        self.session.append_response_item(item).await;
+      }
+
+      let sse_executor = SseTurnExecutor::new_with_cancellation(
+        self.model_client.clone(),
+        self.tool_registry.clone(),
+        self.tool_router.clone(),
+        self.session.clone(),
+        self.tx_event.clone(),
+        self.config.clone(),
+        self.cancellation_token.child_token(),
+      )
+      .with_prompt_prefix(prompt.prefix_messages);
+
+      let output = match sse_executor
+        .run_sse_interaction(messages, thread_id.clone(), turn_id.clone())
+        .await
+      {
+        Ok(output) => output,
+        Err(TurnError::TurnAborted) => {
+          self
+            .send_event(EventMsg::TurnAborted(cokra_protocol::TurnAbortedEvent {
+              thread_id: thread_id.clone(),
+              turn_id: turn_id.clone(),
+              reason: "turn aborted".to_string(),
+            }))
+            .await?;
+          return Err(TurnError::TurnAborted);
+        }
+        Err(e) => {
+          let error = e.to_string();
+          let details = format!("{e:?}");
+          self
+            .send_event(EventMsg::Error(ErrorEvent {
+              thread_id: thread_id.clone(),
+              turn_id: turn_id.clone(),
+              error: error.clone(),
+              user_facing_message: error.clone(),
+              details: details.clone(),
+            }))
+            .await?;
+          self
+            .send_event(EventMsg::TurnComplete(TurnCompleteEvent {
+              thread_id: thread_id.clone(),
+              turn_id: turn_id.clone(),
+              status: CompletionStatus::Errored {
+                error,
+                user_facing_message: e.to_string(),
+                details,
+              },
+              end_time: chrono::Utc::now().timestamp(),
+            }))
+            .await?;
+          return Err(e);
+        }
+      };
+
+      self
+        .send_event(EventMsg::TurnComplete(TurnCompleteEvent {
+          thread_id: thread_id.clone(),
+          turn_id: turn_id.clone(),
+          status: CompletionStatus::Success,
+          end_time: chrono::Utc::now().timestamp(),
+        }))
+        .await?;
+
+      Ok(output)
     }
+    .await;
 
-    let sse_executor = SseTurnExecutor::new_with_cancellation(
-      self.model_client.clone(),
-      self.tool_registry.clone(),
-      self.tool_router.clone(),
-      self.session.clone(),
-      self.tx_event.clone(),
-      self.config.clone(),
-      self.cancellation_token.child_token(),
-    )
-    .with_prompt_prefix(prompt.prefix_messages);
-
-    let output = match sse_executor
-      .run_sse_interaction(messages, thread_id.clone(), turn_id.clone())
-      .await
-    {
-      Ok(output) => output,
-      Err(TurnError::TurnAborted) => {
-        self
-          .send_event(EventMsg::TurnAborted(cokra_protocol::TurnAbortedEvent {
-            thread_id,
-            turn_id,
-            reason: "turn aborted".to_string(),
-          }))
-          .await?;
-        return Err(TurnError::TurnAborted);
-      }
-      Err(e) => {
-        let error = e.to_string();
-        let details = format!("{e:?}");
-        self
-          .send_event(EventMsg::Error(ErrorEvent {
-            thread_id: thread_id.clone(),
-            turn_id: turn_id.clone(),
-            error: error.clone(),
-            user_facing_message: error.clone(),
-            details: details.clone(),
-          }))
-          .await?;
-        self
-          .send_event(EventMsg::TurnComplete(TurnCompleteEvent {
-            thread_id,
-            turn_id,
-            status: CompletionStatus::Errored {
-              error,
-              user_facing_message: e.to_string(),
-              details,
-            },
-            end_time: chrono::Utc::now().timestamp(),
-          }))
-          .await?;
-        return Err(e);
-      }
-    };
-
-    self
-      .send_event(EventMsg::TurnComplete(TurnCompleteEvent {
-        thread_id,
-        turn_id,
-        status: CompletionStatus::Success,
-        end_time: chrono::Utc::now().timestamp(),
-      }))
-      .await?;
-
-    Ok(output)
+    self.session.end_turn(&turn_id).await;
+    result
   }
 
   async fn build_messages(&self, input: &UserInput) -> Result<PromptAssembly, TurnError> {

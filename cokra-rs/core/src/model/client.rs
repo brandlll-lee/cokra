@@ -16,6 +16,7 @@ use super::error::Result;
 use super::provider_catalog::find_provider_catalog_entry;
 use super::providers::register_provider_by_registration;
 use super::providers::registration_token_for_stored;
+use super::registry::ModelCatalogEntry;
 use super::registry::ProviderRegistryRef;
 use super::transform::ProviderRuntimeKind;
 use super::transform::ProviderRuntimeTransform;
@@ -241,6 +242,14 @@ impl ModelClient {
   /// Get the provider registry
   pub fn registry(&self) -> &ProviderRegistryRef {
     &self.registry
+  }
+
+  pub async fn resolve_model_catalog(&self, model: &str) -> Option<ModelCatalogEntry> {
+    let provider_id = self.resolve_provider_id(model).await.ok()?;
+    self
+      .registry
+      .lookup_model_catalog(&provider_id, get_model_name(model))
+      .await
   }
 }
 
