@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::Utc;
 use serde::Deserialize;
 
 use cokra_protocol::CollabMessagePostedEvent;
@@ -14,10 +15,10 @@ use crate::tools::context::ToolOutput;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 
-pub struct SendTeamMessageHandler;
+pub struct SendTeamNudgeHandler;
 
 #[derive(Debug, Deserialize)]
-struct SendTeamMessageArgs {
+struct SendTeamNudgeArgs {
   message: String,
   recipient_thread_id: Option<String>,
   channel: Option<String>,
@@ -25,10 +26,11 @@ struct SendTeamMessageArgs {
   priority: Option<TeamMessagePriority>,
   correlation_id: Option<String>,
   task_id: Option<String>,
+  expires_at: Option<i64>,
 }
 
 #[async_trait]
-impl ToolHandler for SendTeamMessageHandler {
+impl ToolHandler for SendTeamNudgeHandler {
   fn kind(&self) -> ToolKind {
     ToolKind::Function
   }
@@ -37,12 +39,12 @@ impl ToolHandler for SendTeamMessageHandler {
     &self,
     invocation: ToolInvocation,
   ) -> Result<ToolOutput, FunctionCallError> {
-    let args: SendTeamMessageArgs = invocation.parse_arguments()?;
+    let args: SendTeamNudgeArgs = invocation.parse_arguments()?;
     let runtime = invocation.runtime.ok_or_else(|| {
-      FunctionCallError::Fatal("send_team_message missing runtime context".to_string())
+      FunctionCallError::Fatal("send_team_nudge missing runtime context".to_string())
     })?;
     let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
-      FunctionCallError::Execution("send_team_message runtime is not configured".to_string())
+      FunctionCallError::Execution("send_team_nudge runtime is not configured".to_string())
     })?;
     let direct = args
       .recipient_thread_id
@@ -70,18 +72,21 @@ impl ToolHandler for SendTeamMessageHandler {
     } else {
       channel.clone()
     };
+    let expires_at = args
+      .expires_at
+      .or_else(|| Some(Utc::now().timestamp() + 300));
     let message = team_runtime
       .post_message(
         runtime.thread_id.clone(),
         direct.clone(),
         kind,
         route_key,
-        TeamMessageDeliveryMode::DurableMail,
+        TeamMessageDeliveryMode::EphemeralNudge,
         args.priority.unwrap_or_default(),
         args.correlation_id,
         args.task_id,
         args.message.clone(),
-        None,
+        expires_at,
       )
       .await;
 
@@ -100,7 +105,7 @@ impl ToolHandler for SendTeamMessageHandler {
     }
 
     let out = ToolOutput::success(serde_json::to_string(&message).map_err(|err| {
-      FunctionCallError::Fatal(format!("failed to serialize team message: {err}"))
+      FunctionCallError::Fatal(format!("failed to serialize team nudge: {err}"))
     })?);
     Ok(out.with_id(invocation.id))
   }

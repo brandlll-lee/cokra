@@ -3,6 +3,8 @@ use serde::Deserialize;
 
 use cokra_protocol::CollabTaskUpdatedEvent;
 use cokra_protocol::EventMsg;
+use cokra_protocol::ScopeRequest;
+use cokra_protocol::TeamTaskReviewState;
 use cokra_protocol::TeamTaskStatus;
 
 use crate::agent::team_runtime::runtime_for_thread;
@@ -18,9 +20,14 @@ pub struct UpdateTeamTaskHandler;
 struct UpdateTeamTaskArgs {
   task_id: String,
   status: Option<TeamTaskStatus>,
+  owner_thread_id: Option<String>,
+  clear_owner: Option<bool>,
   assignee_thread_id: Option<String>,
   clear_assignee: Option<bool>,
   note: Option<String>,
+  requested_scopes: Option<Vec<ScopeRequest>>,
+  granted_scopes: Option<Vec<ScopeRequest>>,
+  review_state: Option<TeamTaskReviewState>,
 }
 
 #[async_trait]
@@ -45,8 +52,22 @@ impl ToolHandler for UpdateTeamTaskHandler {
     } else {
       args.assignee_thread_id.map(Some)
     };
+    let owner_thread_id = if args.clear_owner.unwrap_or(false) {
+      Some(None)
+    } else {
+      args.owner_thread_id.map(Some)
+    };
     let task = team_runtime
-      .update_task(&args.task_id, args.status, assignee_thread_id, args.note)
+      .update_task(
+        &args.task_id,
+        args.status,
+        assignee_thread_id,
+        owner_thread_id,
+        args.note,
+        args.requested_scopes,
+        args.granted_scopes,
+        args.review_state,
+      )
       .await
       .ok_or_else(|| {
         FunctionCallError::RespondToModel(format!("unknown task id: {}", args.task_id))

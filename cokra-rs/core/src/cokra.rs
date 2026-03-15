@@ -3233,8 +3233,8 @@ mod tests {
           arguments: serde_json::json!({
             "task_id": task.id,
             "to_thread_id": alex_id.clone(),
-            "review_mode": true,
-            "note": "Ready for review"
+            "review_mode": false,
+            "note": "Ready for implementation handoff"
           })
           .to_string(),
         },
@@ -3243,7 +3243,7 @@ mod tests {
       .await
       .expect("handoff");
     let handed_task: TeamTask = serde_json::from_str(&handed.text_content()).expect("handoff json");
-    assert_eq!(handed_task.status, TeamTaskStatus::Review);
+    assert_eq!(handed_task.status, TeamTaskStatus::Pending);
     assert_eq!(
       handed_task.assignee_thread_id.as_deref(),
       Some(alex_id.as_str())

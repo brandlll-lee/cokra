@@ -44,19 +44,130 @@ pub enum TeamTaskStatus {
   Canceled,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum TeamTaskReadyState {
+  Blocked,
+  #[default]
+  Ready,
+  Claimed,
+  Review,
+  Completed,
+  Failed,
+  Canceled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum TeamTaskReviewState {
+  #[default]
+  NotRequested,
+  Requested,
+  Approved,
+  ChangesRequested,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum TaskBlockerKind {
+  Dependency,
+  #[default]
+  Manual,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TeamTask {
+pub struct TaskBlocker {
+  pub id: String,
+  #[serde(default)]
+  pub kind: TaskBlockerKind,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub blocking_task_id: Option<String>,
+  pub reason: String,
+  #[serde(default)]
+  pub active: bool,
+  pub created_at: i64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cleared_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum TaskEdgeKind {
+  #[default]
+  Blocks,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskEdge {
+  pub from_task_id: String,
+  pub to_task_id: String,
+  #[serde(default)]
+  pub kind: TaskEdgeKind,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub reason: Option<String>,
+  pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum OwnershipScopeKind {
+  #[default]
+  File,
+  Directory,
+  Glob,
+  Module,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum OwnershipAccessMode {
+  SharedRead,
+  #[default]
+  ExclusiveWrite,
+  Review,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScopeRequest {
+  #[serde(default)]
+  pub kind: OwnershipScopeKind,
+  pub path: String,
+  #[serde(default)]
+  pub access: OwnershipAccessMode,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskNode {
   pub id: String,
   pub title: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub details: Option<String>,
   pub status: TeamTaskStatus,
+  #[serde(default)]
+  pub ready_state: TeamTaskReadyState,
+  #[serde(default)]
+  pub review_state: TeamTaskReviewState,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub owner_thread_id: Option<String>,
+  #[serde(default)]
+  pub blocked_by_task_ids: Vec<String>,
+  #[serde(default)]
+  pub blocks_task_ids: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub blocking_reason: Option<String>,
+  #[serde(default)]
+  pub blockers: Vec<TaskBlocker>,
+  #[serde(default)]
+  pub requested_scopes: Vec<ScopeRequest>,
+  #[serde(default)]
+  pub granted_scopes: Vec<ScopeRequest>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub assignee_thread_id: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub workflow_run_id: Option<String>,
   pub created_at: i64,
   pub updated_at: i64,
+  #[serde(default)]
   pub notes: Vec<String>,
 }
+
+pub type TeamTask = TaskNode;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum TeamMessageKind {
@@ -67,16 +178,61 @@ pub enum TeamMessageKind {
   Queue,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum TeamMessageDeliveryMode {
+  #[default]
+  DurableMail,
+  EphemeralNudge,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum TeamMessagePriority {
+  Low,
+  #[default]
+  Normal,
+  High,
+  Urgent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum TeamMessageAckState {
+  #[default]
+  NotRequired,
+  Pending,
+  Acknowledged,
+  Expired,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TeamMessage {
   pub id: String,
   pub sender_thread_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub recipient_thread_id: Option<String>,
+  #[serde(default)]
   pub kind: TeamMessageKind,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub route_key: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub claimed_by_thread_id: Option<String>,
+  #[serde(default)]
+  pub delivery_mode: TeamMessageDeliveryMode,
+  #[serde(default)]
+  pub priority: TeamMessagePriority,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub correlation_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub task_id: Option<String>,
+  #[serde(default)]
+  pub ack_state: TeamMessageAckState,
   pub message: String,
   pub created_at: i64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expires_at: Option<i64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub acknowledged_at: Option<i64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub acknowledged_by_thread_id: Option<String>,
   pub unread: bool,
 }
 
@@ -96,8 +252,12 @@ pub struct TeamSnapshot {
   pub root_thread_id: String,
   pub members: Vec<TeamMember>,
   pub tasks: Vec<TeamTask>,
+  #[serde(default)]
+  pub task_edges: Vec<TaskEdge>,
   pub plans: Vec<TeamPlan>,
   pub unread_counts: HashMap<String, usize>,
+  #[serde(default)]
+  pub mailbox_version: u64,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub workflow: Option<WorkflowRuntimeSnapshot>,
 }

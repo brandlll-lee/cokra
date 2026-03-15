@@ -16,7 +16,12 @@ use cokra_protocol::CollabTaskUpdatedEvent;
 use cokra_protocol::CollabTeamSnapshotEvent;
 use cokra_protocol::CollabWaitingBeginEvent;
 use cokra_protocol::CollabWaitingEndEvent;
+use cokra_protocol::ScopeRequest;
+use cokra_protocol::TaskBlocker;
+use cokra_protocol::TaskEdge;
 use cokra_protocol::TeamMember;
+use cokra_protocol::TeamTaskReadyState;
+use cokra_protocol::TeamTaskReviewState;
 
 use crate::history_cell::CollabWaitStatusTreeCell;
 use crate::history_cell::CollabWaitStatusTreeEntry;
@@ -765,6 +770,15 @@ mod tests {
             title: "Project Exploration - Core".to_string(),
             details: Some("历史遗留任务".to_string()),
             status: TeamTaskStatus::Pending,
+            ready_state: TeamTaskReadyState::Ready,
+            review_state: TeamTaskReviewState::NotRequested,
+            owner_thread_id: None,
+            blocked_by_task_ids: Vec::new(),
+            blocks_task_ids: Vec::new(),
+            blocking_reason: None,
+            blockers: Vec::<TaskBlocker>::new(),
+            requested_scopes: Vec::<ScopeRequest>::new(),
+            granted_scopes: Vec::<ScopeRequest>::new(),
             assignee_thread_id: None,
             workflow_run_id: None,
             created_at: 1,
@@ -776,6 +790,15 @@ mod tests {
             title: "当前团队讨论".to_string(),
             details: None,
             status: TeamTaskStatus::InProgress,
+            ready_state: TeamTaskReadyState::Claimed,
+            review_state: TeamTaskReviewState::NotRequested,
+            owner_thread_id: Some("ash-thread".to_string()),
+            blocked_by_task_ids: Vec::new(),
+            blocks_task_ids: Vec::new(),
+            blocking_reason: None,
+            blockers: Vec::<TaskBlocker>::new(),
+            requested_scopes: Vec::<ScopeRequest>::new(),
+            granted_scopes: Vec::<ScopeRequest>::new(),
             assignee_thread_id: Some("ash-thread".to_string()),
             workflow_run_id: None,
             created_at: 2,
@@ -783,6 +806,7 @@ mod tests {
             notes: Vec::new(),
           },
         ],
+        task_edges: Vec::<TaskEdge>::new(),
         plans: vec![TeamPlan {
           id: "plan-1".to_string(),
           author_thread_id: "ash-thread".to_string(),
@@ -801,6 +825,7 @@ mod tests {
           ("ash-thread".to_string(), 1),
           ("sparrow-thread".to_string(), 0),
         ]),
+        mailbox_version: 2,
         workflow: None,
       },
     });

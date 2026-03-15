@@ -11,18 +11,17 @@ use crate::tools::context::ToolOutput;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 
-pub struct HandoffTeamTaskHandler;
+pub struct AddTaskDependencyHandler;
 
 #[derive(Debug, Deserialize)]
-struct HandoffTeamTaskArgs {
+struct AddTaskDependencyArgs {
   task_id: String,
-  to_thread_id: String,
-  note: Option<String>,
-  review_mode: Option<bool>,
+  dependency_task_id: String,
+  reason: Option<String>,
 }
 
 #[async_trait]
-impl ToolHandler for HandoffTeamTaskHandler {
+impl ToolHandler for AddTaskDependencyHandler {
   fn kind(&self) -> ToolKind {
     ToolKind::Function
   }
@@ -31,23 +30,21 @@ impl ToolHandler for HandoffTeamTaskHandler {
     &self,
     invocation: ToolInvocation,
   ) -> Result<ToolOutput, FunctionCallError> {
-    let args: HandoffTeamTaskArgs = invocation.parse_arguments()?;
+    let args: AddTaskDependencyArgs = invocation.parse_arguments()?;
     let runtime = invocation.runtime.ok_or_else(|| {
-      FunctionCallError::Fatal("handoff_team_task missing runtime context".to_string())
+      FunctionCallError::Fatal("add_task_dependency missing runtime context".to_string())
     })?;
     let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
-      FunctionCallError::Execution("handoff_team_task runtime is not configured".to_string())
+      FunctionCallError::Execution("add_task_dependency runtime is not configured".to_string())
     })?;
     let task = team_runtime
-      .handoff_task(
-        &args.task_id,
-        args.to_thread_id,
-        args.note,
-        args.review_mode.unwrap_or(false),
-      )
+      .add_task_dependency(&args.task_id, &args.dependency_task_id, args.reason)
       .await
       .ok_or_else(|| {
-        FunctionCallError::RespondToModel(format!("unknown task id: {}", args.task_id))
+        FunctionCallError::RespondToModel(format!(
+          "failed to add dependency {} -> {}",
+          args.dependency_task_id, args.task_id
+        ))
       })?;
 
     if let Some(tx_event) = &runtime.tx_event {
@@ -60,7 +57,7 @@ impl ToolHandler for HandoffTeamTaskHandler {
     }
 
     let out = ToolOutput::success(serde_json::to_string(&task).map_err(|err| {
-      FunctionCallError::Fatal(format!("failed to serialize handed off task: {err}"))
+      FunctionCallError::Fatal(format!("failed to serialize dependent task: {err}"))
     })?);
     Ok(out.with_id(invocation.id))
   }

@@ -3,7 +3,6 @@ use serde::Deserialize;
 
 use cokra_protocol::CollabTaskUpdatedEvent;
 use cokra_protocol::EventMsg;
-use cokra_protocol::TeamTaskStatus;
 
 use crate::agent::team_runtime::runtime_for_thread;
 use crate::tools::context::FunctionCallError;
@@ -38,15 +37,13 @@ impl ToolHandler for ClaimTeamTaskHandler {
       FunctionCallError::Execution("claim_team_task runtime is not configured".to_string())
     })?;
     let task = team_runtime
-      .update_task(
-        &args.task_id,
-        Some(TeamTaskStatus::InProgress),
-        Some(Some(runtime.thread_id.clone())),
-        args.note,
-      )
+      .claim_task(&args.task_id, runtime.thread_id.clone(), args.note)
       .await
       .ok_or_else(|| {
-        FunctionCallError::RespondToModel(format!("unknown task id: {}", args.task_id))
+        FunctionCallError::RespondToModel(format!(
+          "task {} is unknown or not ready to be claimed",
+          args.task_id
+        ))
       })?;
 
     if let Some(tx_event) = &runtime.tx_event {

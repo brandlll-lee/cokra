@@ -25,6 +25,9 @@ pub(crate) fn build_specs() -> Vec<ToolSpec> {
     approve_team_plan_tool(),
     team_status_tool(),
     send_team_message_tool(),
+    send_team_nudge_tool(),
+    ack_team_message_tool(),
+    watch_team_inbox_tool(),
     read_team_messages_tool(),
     create_team_task_tool(),
     update_team_task_tool(),
@@ -48,6 +51,27 @@ fn collaboration_tool(
   .with_permission_key("team")
   .with_supports_parallel(false)
   .with_mutates_state(true)
+}
+
+fn scope_request_schema(description: &str) -> JsonSchema {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "kind".to_string(),
+    str_field("Ownership scope kind: File, Directory, Glob, or Module."),
+  );
+  props.insert("path".to_string(), str_field("Scope path or module identifier."));
+  props.insert(
+    "access".to_string(),
+    str_field("Requested access mode: SharedRead, ExclusiveWrite, or Review."),
+  );
+  props.insert(
+    "reason".to_string(),
+    str_field("Optional reason for requesting this scope."),
+  );
+  JsonSchema::Array {
+    items: Box::new(obj(props, &["path"])),
+    description: Some(description.to_string()),
+  }
 }
 
 fn spawn_agent_tool() -> ToolSpec {
@@ -143,7 +167,7 @@ fn assign_team_task_tool() -> ToolSpec {
   props.insert("note".to_string(), str_field("Optional assignment note."));
   collaboration_tool(
     "assign_team_task",
-    "Assign a shared team task to a specific teammate.",
+    "Assign a shared team task to a specific teammate without auto-claiming it.",
     obj(props, &["task_id", "assignee_thread_id"]),
   )
 }
@@ -157,7 +181,7 @@ fn claim_team_task_tool() -> ToolSpec {
   );
   collaboration_tool(
     "claim_team_task",
-    "Claim a shared team task for the current teammate and mark it in progress.",
+    "Compatibility wrapper that claims a ready shared team task for the current teammate and marks it in progress.",
     obj(props, &["task_id"]),
   )
 }
@@ -267,11 +291,102 @@ fn send_team_message_tool() -> ToolSpec {
     "recipient_thread_id".to_string(),
     str_field("Optional teammate thread id. Omit to broadcast to the whole team."),
   );
+  props.insert(
+    "channel".to_string(),
+    str_field("Optional channel name for channel-style durable mail."),
+  );
+  props.insert(
+    "queue_name".to_string(),
+    str_field("Optional queue name for shared durable mailbox work items."),
+  );
+  props.insert(
+    "priority".to_string(),
+    str_field("Optional priority: Low, Normal, High, or Urgent."),
+  );
+  props.insert(
+    "correlation_id".to_string(),
+    str_field("Optional correlation id for message threading."),
+  );
+  props.insert(
+    "task_id".to_string(),
+    str_field("Optional task id that this message is about."),
+  );
   collaboration_tool(
     "send_team_message",
-    "Send a direct or broadcast team mailbox message.",
+    "Send durable team mail through the shared mailbox.",
     obj(props, &["message"]),
   )
+}
+
+fn send_team_nudge_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert("message".to_string(), str_field("Ephemeral nudge body to send."));
+  props.insert(
+    "recipient_thread_id".to_string(),
+    str_field("Optional teammate thread id. Omit to nudge a channel or the team."),
+  );
+  props.insert(
+    "channel".to_string(),
+    str_field("Optional channel name for broadcast-style nudges."),
+  );
+  props.insert(
+    "queue_name".to_string(),
+    str_field("Optional queue name for ephemeral work nudges."),
+  );
+  props.insert(
+    "priority".to_string(),
+    str_field("Optional priority: Low, Normal, High, or Urgent."),
+  );
+  props.insert(
+    "correlation_id".to_string(),
+    str_field("Optional correlation id for message threading."),
+  );
+  props.insert(
+    "task_id".to_string(),
+    str_field("Optional task id that this nudge is about."),
+  );
+  props.insert(
+    "expires_at".to_string(),
+    int_field("Optional Unix timestamp when this nudge expires."),
+  );
+  collaboration_tool(
+    "send_team_nudge",
+    "Send an ephemeral real-time nudge through the mailbox kernel.",
+    obj(props, &["message"]),
+  )
+}
+
+fn ack_team_message_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert("message_id".to_string(), str_field("Mailbox message id to acknowledge."));
+  collaboration_tool(
+    "ack_team_message",
+    "Acknowledge receipt of a team mailbox message that requires ack.",
+    obj(props, &["message_id"]),
+  )
+}
+
+fn watch_team_inbox_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "after_version".to_string(),
+    int_field("Optional mailbox version to watch after. Defaults to 0."),
+  );
+  props.insert(
+    "timeout_ms".to_string(),
+    int_field("Optional wait timeout in milliseconds."),
+  );
+  props.insert(
+    "unread_only".to_string(),
+    bool_field("When true, only return unread messages."),
+  );
+  collaboration_tool(
+    "watch_team_inbox",
+    "Wait for mailbox changes after a known version and return the visible inbox state.",
+    obj(props, &[]),
+  )
+  .with_supports_parallel(true)
+  .with_mutates_state(false)
 }
 
 fn read_team_messages_tool() -> ToolSpec {
@@ -296,6 +411,10 @@ fn create_team_task_tool() -> ToolSpec {
     str_field("Optional detailed task description."),
   );
   props.insert(
+    "owner_thread_id".to_string(),
+    str_field("Optional teammate thread id owning the task."),
+  );
+  props.insert(
     "assignee_thread_id".to_string(),
     str_field("Optional teammate thread id to assign immediately."),
   );
@@ -303,9 +422,17 @@ fn create_team_task_tool() -> ToolSpec {
     "workflow_run_id".to_string(),
     str_field("Optional run id to link this task back to a resumable team activity."),
   );
+  props.insert(
+    "requested_scopes".to_string(),
+    scope_request_schema("Optional ownership scopes requested by this task."),
+  );
+  props.insert(
+    "blocking_reason".to_string(),
+    str_field("Optional manual blocking reason to create the task in a blocked state."),
+  );
   collaboration_tool(
     "create_team_task",
-    "Create a shared team task on the common task board, optionally linked to a resumable team run.",
+    "Create a shared team task node on the common task graph, optionally linked to a resumable team run.",
     obj(props, &["title"]),
   )
 }
@@ -317,10 +444,18 @@ fn update_team_task_tool() -> ToolSpec {
     "status".to_string(),
     JsonSchema::String {
       description: Some(
-        "Optional new task status: Pending, InProgress, Completed, Failed, or Canceled."
+        "Optional new task status: Pending, InProgress, Review, Completed, Failed, or Canceled."
           .to_string(),
       ),
     },
+  );
+  props.insert(
+    "owner_thread_id".to_string(),
+    str_field("Optional new owner thread id."),
+  );
+  props.insert(
+    "clear_owner".to_string(),
+    bool_field("When true, clears the current owner."),
   );
   props.insert(
     "assignee_thread_id".to_string(),
@@ -334,9 +469,21 @@ fn update_team_task_tool() -> ToolSpec {
     "note".to_string(),
     str_field("Optional note to append to the task history."),
   );
+  props.insert(
+    "requested_scopes".to_string(),
+    scope_request_schema("Optional replacement list of requested ownership scopes."),
+  );
+  props.insert(
+    "granted_scopes".to_string(),
+    scope_request_schema("Optional replacement list of granted ownership scopes."),
+  );
+  props.insert(
+    "review_state".to_string(),
+    str_field("Optional review state: NotRequested, Requested, Approved, or ChangesRequested."),
+  );
   collaboration_tool(
     "update_team_task",
-    "Update a shared team task status, assignee, or notes.",
+    "Update a shared team task node status, ownership, scopes, or notes.",
     obj(props, &["task_id"]),
   )
 }

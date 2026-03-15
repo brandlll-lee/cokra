@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 use cokra_protocol::CollabTaskUpdatedEvent;
 use cokra_protocol::EventMsg;
+use cokra_protocol::ScopeRequest;
 
 use crate::agent::team_runtime::runtime_for_thread;
 use crate::tools::context::FunctionCallError;
@@ -17,8 +18,11 @@ pub struct CreateTeamTaskHandler;
 struct CreateTeamTaskArgs {
   title: String,
   details: Option<String>,
+  owner_thread_id: Option<String>,
   assignee_thread_id: Option<String>,
   workflow_run_id: Option<String>,
+  requested_scopes: Option<Vec<ScopeRequest>>,
+  blocking_reason: Option<String>,
 }
 
 #[async_trait]
@@ -42,8 +46,11 @@ impl ToolHandler for CreateTeamTaskHandler {
       .create_task(
         args.title,
         args.details,
+        args.owner_thread_id,
         args.assignee_thread_id,
         args.workflow_run_id,
+        args.requested_scopes.unwrap_or_default(),
+        args.blocking_reason,
       )
       .await;
 

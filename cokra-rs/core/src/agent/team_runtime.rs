@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use anyhow::Context;
 use cokra_protocol::BackgroundEventEvent;
 use cokra_protocol::EventMsg;
+use tokio::time::timeout;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -14,11 +16,15 @@ use cokra_config::Config;
 use cokra_protocol::AgentStatus as CollabAgentStatus;
 use cokra_protocol::CollabAgentRef;
 use cokra_protocol::CollabAgentStatusEntry;
+use cokra_protocol::ScopeRequest;
 use cokra_protocol::TeamMessage;
+use cokra_protocol::TeamMessageDeliveryMode;
 use cokra_protocol::TeamMessageKind;
+use cokra_protocol::TeamMessagePriority;
 use cokra_protocol::TeamPlan;
 use cokra_protocol::TeamSnapshot;
 use cokra_protocol::TeamTask;
+use cokra_protocol::TeamTaskReviewState;
 use cokra_protocol::TeamTaskStatus;
 use cokra_protocol::ThreadId;
 use cokra_protocol::WorkflowRun;
@@ -113,6 +119,7 @@ pub(crate) struct TeamRuntime {
   handles: Mutex<HashMap<String, Arc<ManagedAgentHandle>>>,
   team_state: Mutex<TeamState>,
   run_state: Mutex<TeamRunState>,
+  mailbox_version_tx: watch::Sender<u64>,
   state_db: Arc<StateDb>,
 }
 
@@ -138,6 +145,11 @@ pub(crate) async fn register_team_runtime(
   let persisted =
     load_persisted_state::<TeamState>(&state_db, &team_store_key, Some(&legacy_store_key)).await?;
   let run_state = load_persisted_state::<TeamRunState>(&state_db, &run_store_key, None).await?;
+  let mailbox_version = persisted
+    .as_ref()
+    .map(TeamState::mailbox_version)
+    .unwrap_or_default();
+  let (mailbox_version_tx, _mailbox_version_rx) = watch::channel(mailbox_version);
   let runtime = Arc::new(TeamRuntime {
     root_thread_id: root_thread_id.clone(),
     legacy_store_key,
@@ -152,6 +164,7 @@ pub(crate) async fn register_team_runtime(
     handles: Mutex::new(HashMap::new()),
     team_state: Mutex::new(persisted.unwrap_or_default()),
     run_state: Mutex::new(run_state.unwrap_or_default()),
+    mailbox_version_tx,
     state_db,
   });
 
@@ -241,16 +254,16 @@ impl TeamRuntime {
         (thread.thread_id.to_string(), status)
       })
       .collect();
-    self
+    let mut team_state = self
       .team_state
       .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .snapshot(
-        self.root_thread_id.to_string(),
-        threads,
-        statuses,
-        Some(self.run_snapshot()),
-      )
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    team_state.snapshot(
+      self.root_thread_id.to_string(),
+      threads,
+      statuses,
+      Some(self.run_snapshot()),
+    )
   }
 
   pub(crate) fn run_snapshot(&self) -> WorkflowRuntimeSnapshot {
@@ -275,20 +288,29 @@ impl TeamRuntime {
     &self,
     title: String,
     details: Option<String>,
+    owner_thread_id: Option<String>,
     assignee_thread_id: Option<String>,
     workflow_run_id: Option<String>,
+    requested_scopes: Vec<ScopeRequest>,
+    blocking_reason: Option<String>,
   ) -> TeamTask {
     let task = self
       .team_state
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .create_task(title, details, assignee_thread_id.clone(), workflow_run_id);
-    if let Some(assignee_thread_id) = assignee_thread_id.as_deref() {
-      self
-        .run_state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .note_task_claim(&task, assignee_thread_id);
+      .create_task(
+        title,
+        details,
+        owner_thread_id,
+        assignee_thread_id.clone(),
+        workflow_run_id,
+        requested_scopes,
+        blocking_reason,
+      );
+    if let Some(assignee_thread_id) = assignee_thread_id.as_deref()
+      && matches!(task.status, TeamTaskStatus::InProgress)
+    {
+      self.note_task_claim(task.clone(), assignee_thread_id.to_string());
     }
     self.persist_states().await;
     task
@@ -372,21 +394,31 @@ impl TeamRuntime {
     task_id: &str,
     status: Option<TeamTaskStatus>,
     assignee_thread_id: Option<Option<String>>,
+    owner_thread_id: Option<Option<String>>,
     note: Option<String>,
+    requested_scopes: Option<Vec<ScopeRequest>>,
+    granted_scopes: Option<Vec<ScopeRequest>>,
+    review_state: Option<TeamTaskReviewState>,
   ) -> Option<TeamTask> {
     let task = self
       .team_state
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .update_task(task_id, status, assignee_thread_id, note);
+      .update_task(
+        task_id,
+        status,
+        assignee_thread_id,
+        owner_thread_id,
+        note,
+        requested_scopes,
+        granted_scopes,
+        review_state,
+      );
     if let Some(task) = &task
       && let Some(assignee_thread_id) = task.assignee_thread_id.as_deref()
+      && matches!(task.status, TeamTaskStatus::InProgress)
     {
-      self
-        .run_state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .note_task_claim(task, assignee_thread_id);
+      self.note_task_claim(task.clone(), assignee_thread_id.to_string());
     }
     self.persist_states().await;
     task
@@ -405,12 +437,9 @@ impl TeamRuntime {
       .assign_task(task_id, assignee_thread_id, note);
     if let Some(task) = &task
       && let Some(assignee_thread_id) = task.assignee_thread_id.as_deref()
+      && matches!(task.status, TeamTaskStatus::InProgress)
     {
-      self
-        .run_state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .note_task_claim(task, assignee_thread_id);
+      self.note_task_claim(task.clone(), assignee_thread_id.to_string());
     }
     self.persist_states().await;
     task
@@ -430,12 +459,53 @@ impl TeamRuntime {
       .handoff_task(task_id, to_thread_id, note, review_mode);
     if let Some(task) = &task
       && let Some(assignee_thread_id) = task.assignee_thread_id.as_deref()
+      && matches!(task.status, TeamTaskStatus::InProgress | TeamTaskStatus::Review)
     {
-      self
-        .run_state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .note_task_claim(task, assignee_thread_id);
+      self.note_task_claim(task.clone(), assignee_thread_id.to_string());
+    }
+    self.persist_states().await;
+    task
+  }
+
+  pub(crate) async fn claim_task(
+    &self,
+    task_id: &str,
+    claimer_thread_id: String,
+    note: Option<String>,
+  ) -> Option<TeamTask> {
+    let task = self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .claim_task(task_id, claimer_thread_id.clone(), note);
+    if let Some(task) = &task {
+      self.note_task_claim(task.clone(), claimer_thread_id);
+    }
+    self.persist_states().await;
+    task
+  }
+
+  pub(crate) async fn list_ready_tasks(&self, claimer_thread_id: &str) -> Vec<TeamTask> {
+    self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .list_ready_tasks(claimer_thread_id)
+  }
+
+  pub(crate) async fn claim_ready_task(
+    &self,
+    task_id: &str,
+    claimer_thread_id: String,
+    note: Option<String>,
+  ) -> Option<TeamTask> {
+    let task = self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .claim_ready_task(task_id, claimer_thread_id.clone(), note);
+    if let Some(task) = &task {
+      self.note_task_claim(task.clone(), claimer_thread_id);
     }
     self.persist_states().await;
     task
@@ -448,23 +518,78 @@ impl TeamRuntime {
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .claim_next_task(claimer_thread_id);
     if let Some(task) = &task {
-      self
-        .run_state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .note_task_claim(task, claimer_thread_id);
+      self.note_task_claim(task.clone(), claimer_thread_id.to_string());
     }
     self.persist_states().await;
     task
   }
 
+  pub(crate) async fn add_task_dependency(
+    &self,
+    task_id: &str,
+    dependency_task_id: &str,
+    reason: Option<String>,
+  ) -> Option<TeamTask> {
+    let task = self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .add_task_dependency(task_id, dependency_task_id, reason);
+    self.persist_states().await;
+    task
+  }
+
+  pub(crate) async fn remove_task_dependency(
+    &self,
+    task_id: &str,
+    dependency_task_id: &str,
+  ) -> Option<TeamTask> {
+    let task = self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove_task_dependency(task_id, dependency_task_id);
+    self.persist_states().await;
+    task
+  }
+
+  pub(crate) async fn block_task(&self, task_id: &str, reason: String) -> Option<TeamTask> {
+    let task = self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .block_task(task_id, reason);
+    self.persist_states().await;
+    task
+  }
+
+  pub(crate) async fn unblock_task(
+    &self,
+    task_id: &str,
+    blocker_id: Option<&str>,
+  ) -> Option<TeamTask> {
+    let task = self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .unblock_task(task_id, blocker_id);
+    self.persist_states().await;
+    task
+  }
+
+  #[allow(clippy::too_many_arguments)]
   pub(crate) async fn post_message(
     &self,
     sender_thread_id: String,
     recipient_thread_id: Option<String>,
     kind: TeamMessageKind,
     route_key: Option<String>,
+    delivery_mode: TeamMessageDeliveryMode,
+    priority: TeamMessagePriority,
+    correlation_id: Option<String>,
+    task_id: Option<String>,
     message: String,
+    expires_at: Option<i64>,
   ) -> TeamMessage {
     let message = self
       .team_state
@@ -475,10 +600,29 @@ impl TeamRuntime {
         recipient_thread_id,
         kind,
         route_key,
+        delivery_mode,
+        priority,
+        correlation_id,
+        task_id,
         message,
+        expires_at,
       );
-    self.persist_team_state().await;
+    self.persist_team_state_and_publish_mailbox().await;
     message
+  }
+
+  pub(crate) async fn peek_messages(
+    &self,
+    reader_thread_id: &str,
+    unread_only: bool,
+  ) -> Vec<TeamMessage> {
+    let messages = self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .peek_messages(reader_thread_id, unread_only);
+    self.persist_team_state_and_publish_mailbox().await;
+    messages
   }
 
   pub(crate) async fn read_messages(
@@ -491,7 +635,7 @@ impl TeamRuntime {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .read_messages(reader_thread_id, unread_only);
-    self.persist_team_state().await;
+    self.persist_team_state_and_publish_mailbox().await;
     messages
   }
 
@@ -506,8 +650,63 @@ impl TeamRuntime {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .claim_queue_messages(claimer_thread_id, queue_name, limit);
-    self.persist_team_state().await;
+    self.persist_team_state_and_publish_mailbox().await;
     messages
+  }
+
+  pub(crate) async fn ack_message(
+    &self,
+    acker_thread_id: &str,
+    message_id: &str,
+  ) -> Option<TeamMessage> {
+    let message = self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .ack_message(acker_thread_id, message_id);
+    self.persist_team_state_and_publish_mailbox().await;
+    message
+  }
+
+  pub(crate) async fn watch_inbox(
+    &self,
+    reader_thread_id: &str,
+    after_version: Option<u64>,
+    timeout_ms: Option<u64>,
+    unread_only: bool,
+  ) -> anyhow::Result<(u64, Vec<TeamMessage>, bool)> {
+    let after_version = after_version.unwrap_or_default();
+    let current_version = self.current_mailbox_version();
+    if current_version > after_version {
+      let messages = self.peek_messages(reader_thread_id, unread_only).await;
+      return Ok((self.current_mailbox_version(), messages, false));
+    }
+
+    let mut version_rx = self.mailbox_version_tx.subscribe();
+    if *version_rx.borrow() > after_version {
+      let messages = self.peek_messages(reader_thread_id, unread_only).await;
+      return Ok((self.current_mailbox_version(), messages, false));
+    }
+
+    let timeout_ms = timeout_ms.unwrap_or(30_000).clamp(1_000, 3_600_000);
+    let wait_result = timeout(Duration::from_millis(timeout_ms), async {
+      loop {
+        if version_rx.changed().await.is_err() {
+          break;
+        }
+        if *version_rx.borrow() > after_version {
+          break;
+        }
+      }
+    })
+    .await;
+
+    if wait_result.is_err() {
+      return Ok((self.current_mailbox_version(), Vec::new(), true));
+    }
+
+    let messages = self.peek_messages(reader_thread_id, unread_only).await;
+    Ok((self.current_mailbox_version(), messages, false))
   }
 
   pub(crate) async fn clear_state(&self) {
@@ -521,6 +720,7 @@ impl TeamRuntime {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .clear();
+    self.publish_mailbox_version();
     let _ = self.state_db.delete(&self.team_store_key).await;
     let _ = self.state_db.delete(&self.run_store_key).await;
     let _ = self.state_db.delete(&self.legacy_store_key).await;
@@ -691,6 +891,29 @@ impl TeamRuntime {
       .cloned()
   }
 
+  fn note_task_claim(&self, task: TeamTask, claimer_thread_id: String) {
+    self
+      .run_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .note_task_claim(&task, &claimer_thread_id);
+  }
+
+  fn current_mailbox_version(&self) -> u64 {
+    self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .mailbox_version()
+  }
+
+  fn publish_mailbox_version(&self) {
+    let mailbox_version = self.current_mailbox_version();
+    if *self.mailbox_version_tx.borrow() != mailbox_version {
+      let _ = self.mailbox_version_tx.send(mailbox_version);
+    }
+  }
+
   async fn persist_team_state(&self) {
     let snapshot = self
       .team_state
@@ -701,6 +924,11 @@ impl TeamRuntime {
       .state_db
       .save_json(&self.team_store_key, &snapshot)
       .await;
+  }
+
+  async fn persist_team_state_and_publish_mailbox(&self) {
+    self.persist_team_state().await;
+    self.publish_mailbox_version();
   }
 
   async fn persist_run_state(&self) {

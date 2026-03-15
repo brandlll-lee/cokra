@@ -1,9 +1,13 @@
 pub mod activate_tools;
+pub mod ack_team_message;
 pub mod active_tool_status;
+pub mod add_task_dependency;
 pub mod apply_patch;
 pub mod approve_team_plan;
 pub mod assign_team_task;
+pub mod block_task;
 pub mod claim_next_team_task;
+pub mod claim_ready_task;
 pub mod claim_team_messages;
 pub mod claim_team_task;
 pub mod cleanup_team;
@@ -22,6 +26,7 @@ pub mod inspect_tool;
 pub mod install_integration;
 pub mod integration_status;
 pub mod list_dir;
+pub mod list_ready_tasks;
 pub mod list_mcp_resource_templates;
 pub mod list_mcp_resources;
 pub mod lsp;
@@ -32,10 +37,12 @@ pub mod read_many_files;
 pub mod read_mcp_resource;
 pub mod read_team_messages;
 pub mod request_user_input;
+pub mod remove_task_dependency;
 pub mod reset_active_tools;
 pub mod save_memory;
 pub mod send_input;
 pub mod send_team_message;
+pub mod send_team_nudge;
 pub mod shell;
 pub mod skill;
 pub mod spawn_agent;
@@ -44,8 +51,10 @@ pub mod team_status;
 pub mod todo;
 pub mod tool_audit_log;
 pub mod update_team_task;
+pub mod unblock_task;
 pub mod view_image;
 pub mod wait;
+pub mod watch_team_inbox;
 pub mod web_fetch;
 pub mod web_page;
 pub mod web_search;
@@ -142,6 +151,10 @@ pub fn register_builtin_handlers(
     Arc::new(claim_next_team_task::ClaimNextTeamTaskHandler),
   );
   registry.register_handler(
+    "claim_ready_task",
+    Arc::new(claim_ready_task::ClaimReadyTaskHandler),
+  );
+  registry.register_handler(
     "assign_team_task",
     Arc::new(assign_team_task::AssignTeamTaskHandler),
   );
@@ -160,8 +173,20 @@ pub fn register_builtin_handlers(
   );
   registry.register_handler("team_status", Arc::new(team_status::TeamStatusHandler));
   registry.register_handler(
+    "ack_team_message",
+    Arc::new(ack_team_message::AckTeamMessageHandler),
+  );
+  registry.register_handler(
     "send_team_message",
     Arc::new(send_team_message::SendTeamMessageHandler),
+  );
+  registry.register_handler(
+    "send_team_nudge",
+    Arc::new(send_team_nudge::SendTeamNudgeHandler),
+  );
+  registry.register_handler(
+    "watch_team_inbox",
+    Arc::new(watch_team_inbox::WatchTeamInboxHandler),
   );
   registry.register_handler(
     "read_team_messages",
@@ -174,6 +199,20 @@ pub fn register_builtin_handlers(
   registry.register_handler(
     "update_team_task",
     Arc::new(update_team_task::UpdateTeamTaskHandler),
+  );
+  registry.register_handler(
+    "add_task_dependency",
+    Arc::new(add_task_dependency::AddTaskDependencyHandler),
+  );
+  registry.register_handler(
+    "remove_task_dependency",
+    Arc::new(remove_task_dependency::RemoveTaskDependencyHandler),
+  );
+  registry.register_handler("block_task", Arc::new(block_task::BlockTaskHandler));
+  registry.register_handler("unblock_task", Arc::new(unblock_task::UnblockTaskHandler));
+  registry.register_handler(
+    "list_ready_tasks",
+    Arc::new(list_ready_tasks::ListReadyTasksHandler),
   );
   registry.register_handler("plan", Arc::new(plan::PlanHandler));
   registry.register_handler(
