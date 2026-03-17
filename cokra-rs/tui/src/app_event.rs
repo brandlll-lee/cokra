@@ -6,6 +6,8 @@ use cokra_protocol::RequestUserInputEvent;
 use cokra_core::model::ProviderInfo;
 
 use crate::history_cell::HistoryCell;
+use crate::team_panel::TeamPanelMode;
+use crate::team_panel::TeamPanelTab;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiMode {
@@ -26,11 +28,43 @@ pub(crate) enum ExitMode {
   Immediate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TeamTaskOperation {
+  Reassign,
+  Handoff,
+  ReviewHandoff,
+  ReleaseLeases,
+}
+
 #[derive(Debug)]
 pub(crate) enum AppEvent {
   CodexOp(Op),
   SelectAgentThread {
     thread_id: String,
+  },
+  OpenTeamConsole,
+  ToggleTeamPanel,
+  SetTeamPanelMode {
+    mode: TeamPanelMode,
+  },
+  SetTeamPanelTab {
+    tab: TeamPanelTab,
+  },
+  OpenTeamTaskPicker {
+    operation: TeamTaskOperation,
+  },
+  OpenTeamLeasePicker,
+  OpenTeamMemberPicker {
+    task_id: String,
+    operation: TeamTaskOperation,
+  },
+  ExecuteTeamTaskOperation {
+    task_id: String,
+    member_thread_id: String,
+    operation: TeamTaskOperation,
+  },
+  ForceReleaseLease {
+    lease_id: String,
   },
   InsertHistoryCell(Box<dyn HistoryCell>),
   Exit(ExitMode),

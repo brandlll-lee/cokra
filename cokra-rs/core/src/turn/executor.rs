@@ -11,6 +11,7 @@ use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::agent::team_runtime::runtime_for_thread;
 use crate::compaction::CompactionSettings;
 use crate::model::Message as ModelMessage;
 use crate::model::ModelClient;
@@ -295,6 +296,16 @@ impl TurnExecutor {
       self.config.cwd.display()
     );
     prefix_messages.push(ModelMessage::User(env_context));
+
+    if let Some(thread_id) = self.session.thread_id().map(ToString::to_string)
+      && let Some(team_runtime) = runtime_for_thread(&thread_id)
+      && team_runtime.is_root_thread(&thread_id)
+    {
+      let snapshot = team_runtime.snapshot();
+      if snapshot.members.len() > 1 {
+        prefix_messages.push(ModelMessage::User(team_digest_prompt(&snapshot)));
+      }
+    }
 
     if let Some(summary) = self.build_runtime_tool_summary().await? {
       prefix_messages.push(ModelMessage::User(summary));
@@ -715,6 +726,330 @@ pub enum AttachmentKind {
   File,
   PDF,
   Audio,
+}
+
+fn team_digest_prompt(snapshot: &cokra_protocol::TeamSnapshot) -> String {
+  const MAX_TEAMMATES: usize = 6;
+  const MAX_TASKS: usize = 3;
+  const MAX_LOCKS: usize = 3;
+  const MAX_TEXT_CHARS: usize = 120;
+
+  fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+      return trimmed.to_string();
+    }
+    let mut out = trimmed
+      .chars()
+      .take(max_chars.saturating_sub(1))
+      .collect::<String>();
+    out.push('…');
+    out
+  }
+
+  fn short_thread_id(thread_id: &str) -> String {
+    let short = thread_id.chars().take(8).collect::<String>();
+    if short.is_empty() {
+      "agent".to_string()
+    } else {
+      short
+    }
+  }
+
+  fn is_task_closed(task: &cokra_protocol::TeamTask) -> bool {
+    matches!(
+      task.status,
+      cokra_protocol::TeamTaskStatus::Completed
+        | cokra_protocol::TeamTaskStatus::Failed
+        | cokra_protocol::TeamTaskStatus::Canceled
+    ) || matches!(
+      task.ready_state,
+      cokra_protocol::TeamTaskReadyState::Completed
+        | cokra_protocol::TeamTaskReadyState::Failed
+        | cokra_protocol::TeamTaskReadyState::Canceled
+    )
+  }
+
+  fn is_task_active(task: &cokra_protocol::TeamTask) -> bool {
+    matches!(
+      task.status,
+      cokra_protocol::TeamTaskStatus::InProgress | cokra_protocol::TeamTaskStatus::Review
+    ) || matches!(
+      task.ready_state,
+      cokra_protocol::TeamTaskReadyState::Claimed
+        | cokra_protocol::TeamTaskReadyState::Review
+        | cokra_protocol::TeamTaskReadyState::Blocked
+    )
+  }
+
+  fn task_activity_rank(task: &cokra_protocol::TeamTask) -> i32 {
+    use cokra_protocol::TeamTaskReadyState;
+    use cokra_protocol::TeamTaskStatus;
+
+    match (&task.status, &task.ready_state) {
+      (TeamTaskStatus::Review, _) | (_, TeamTaskReadyState::Review) => 60,
+      (TeamTaskStatus::InProgress, TeamTaskReadyState::Claimed) => 50,
+      (TeamTaskStatus::InProgress, _) => 45,
+      (_, TeamTaskReadyState::Blocked) => 40,
+      (TeamTaskStatus::Pending, TeamTaskReadyState::Ready) => 35,
+      (TeamTaskStatus::Pending, _) => 30,
+      _ if is_task_closed(task) => 10,
+      _ => 0,
+    }
+  }
+
+  fn access_label(access: &cokra_protocol::OwnershipAccessMode) -> &'static str {
+    match access {
+      cokra_protocol::OwnershipAccessMode::SharedRead => "shared-read",
+      cokra_protocol::OwnershipAccessMode::ExclusiveWrite => "exclusive-write",
+      cokra_protocol::OwnershipAccessMode::Review => "review",
+    }
+  }
+
+  let teammate_count = snapshot
+    .members
+    .iter()
+    .filter(|member| member.thread_id != snapshot.root_thread_id)
+    .count();
+
+  let mut active_tasks = 0usize;
+  let mut backlog_tasks = 0usize;
+  let mut closed_tasks = 0usize;
+  for task in &snapshot.tasks {
+    if is_task_closed(task) {
+      closed_tasks += 1;
+    } else if is_task_active(task) {
+      active_tasks += 1;
+    } else {
+      backlog_tasks += 1;
+    }
+  }
+  let unread_total = snapshot.unread_counts.values().copied().sum::<usize>();
+
+  let label_for = |thread_id: &str| -> String {
+    if thread_id == snapshot.root_thread_id {
+      return "@main".to_string();
+    }
+    snapshot
+      .members
+      .iter()
+      .find(|member| member.thread_id == thread_id)
+      .and_then(|member| {
+        member
+          .nickname
+          .as_deref()
+          .map(str::trim)
+          .filter(|it| !it.is_empty())
+      })
+      .map(|nickname| format!("@{nickname}"))
+      .unwrap_or_else(|| format!("@{}", short_thread_id(thread_id)))
+  };
+
+  let mut out = String::new();
+  use std::fmt::Write as _;
+
+  let _ = writeln!(out, "<team_digest>");
+  let _ = writeln!(
+    out,
+    "Team status: {teammate_count} teammate(s) | tasks: active {active_tasks}, backlog {backlog_tasks}, closed {closed_tasks} | locks {} | unread {unread_total}",
+    snapshot.ownership_leases.len(),
+  );
+
+  if teammate_count > 0 {
+    let _ = writeln!(out, "");
+    let _ = writeln!(out, "Teammates:");
+
+    let mut members = snapshot
+      .members
+      .iter()
+      .filter(|member| member.thread_id != snapshot.root_thread_id)
+      .collect::<Vec<_>>();
+    members.sort_by(|left, right| {
+      fn lifecycle_rank(lifecycle: &cokra_protocol::CollabAgentLifecycle) -> u8 {
+        match lifecycle {
+          cokra_protocol::CollabAgentLifecycle::Error => 0,
+          cokra_protocol::CollabAgentLifecycle::Busy => 1,
+          cokra_protocol::CollabAgentLifecycle::PendingInit => 2,
+          cokra_protocol::CollabAgentLifecycle::Ready => 3,
+          cokra_protocol::CollabAgentLifecycle::Shutdown => 4,
+          cokra_protocol::CollabAgentLifecycle::NotFound => 5,
+        }
+      }
+
+      lifecycle_rank(&left.state.lifecycle)
+        .cmp(&lifecycle_rank(&right.state.lifecycle))
+        .then_with(|| {
+          right
+            .state
+            .pending_wake_count
+            .cmp(&left.state.pending_wake_count)
+        })
+        .then_with(|| left.thread_id.cmp(&right.thread_id))
+    });
+
+    for member in members.into_iter().take(MAX_TEAMMATES) {
+      let nickname = member
+        .nickname
+        .as_deref()
+        .map(str::trim)
+        .filter(|it| !it.is_empty());
+      let role = member.role.trim();
+      let mut label = nickname
+        .map(|nickname| format!("@{nickname}"))
+        .unwrap_or_else(|| format!("@{}", short_thread_id(&member.thread_id)));
+      if !role.is_empty() && !role.eq_ignore_ascii_case("default") {
+        label.push_str(&format!(" [{role}]"));
+      }
+
+      let lifecycle = match member.state.lifecycle.clone() {
+        cokra_protocol::CollabAgentLifecycle::PendingInit => "PendingInit",
+        cokra_protocol::CollabAgentLifecycle::Ready => "Ready",
+        cokra_protocol::CollabAgentLifecycle::Busy => "Busy",
+        cokra_protocol::CollabAgentLifecycle::Error => "Error",
+        cokra_protocol::CollabAgentLifecycle::Shutdown => "Shutdown",
+        cokra_protocol::CollabAgentLifecycle::NotFound => "NotFound",
+      };
+
+      let mut line = format!("- {label}: {lifecycle}");
+
+      let unread = snapshot
+        .unread_counts
+        .get(&member.thread_id)
+        .copied()
+        .unwrap_or(0);
+      if unread > 0 {
+        line.push_str(&format!(" · {unread} unread"));
+      }
+      if member.state.pending_wake_count > 0 {
+        line.push_str(&format!(" · {} queued", member.state.pending_wake_count));
+      }
+
+      if let Some(reason) = member
+        .state
+        .attention_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|it| !it.is_empty())
+      {
+        line.push_str(&format!(
+          " · attention: {}",
+          truncate_chars(reason, MAX_TEXT_CHARS)
+        ));
+      } else {
+        let maybe_task = snapshot
+          .tasks
+          .iter()
+          .filter(|task| {
+            task.owner_thread_id.as_deref() == Some(&member.thread_id)
+              || task.assignee_thread_id.as_deref() == Some(&member.thread_id)
+              || task.reviewer_thread_id.as_deref() == Some(&member.thread_id)
+          })
+          .max_by_key(|task| (task_activity_rank(task), task.updated_at));
+
+        if let Some(task) = maybe_task.filter(|task| !is_task_closed(task)) {
+          if matches!(
+            task.ready_state,
+            cokra_protocol::TeamTaskReadyState::Blocked
+          ) {
+            line.push_str(&format!(
+              " · blocked: {}",
+              truncate_chars(
+                task.blocking_reason.as_deref().unwrap_or("blocked"),
+                MAX_TEXT_CHARS
+              )
+            ));
+          } else if matches!(task.status, cokra_protocol::TeamTaskStatus::Review)
+            || matches!(task.ready_state, cokra_protocol::TeamTaskReadyState::Review)
+            || matches!(
+              task.review_state,
+              cokra_protocol::TeamTaskReviewState::Requested
+            )
+          {
+            line.push_str(&format!(
+              " · reviewing #{id} {title}",
+              id = task.id,
+              title = truncate_chars(&task.title, 80)
+            ));
+          } else if matches!(task.status, cokra_protocol::TeamTaskStatus::InProgress)
+            || matches!(
+              task.ready_state,
+              cokra_protocol::TeamTaskReadyState::Claimed
+            )
+          {
+            line.push_str(&format!(
+              " · working #{id} {title}",
+              id = task.id,
+              title = truncate_chars(&task.title, 80)
+            ));
+          } else if matches!(task.ready_state, cokra_protocol::TeamTaskReadyState::Ready) {
+            line.push_str(&format!(
+              " · ready #{id} {title}",
+              id = task.id,
+              title = truncate_chars(&task.title, 80)
+            ));
+          }
+        }
+      }
+
+      let _ = writeln!(out, "{line}");
+    }
+
+    if snapshot.tasks.iter().any(|task| !is_task_closed(task)) {
+      let _ = writeln!(out, "");
+      let _ = writeln!(out, "Top tasks:");
+      let mut tasks = snapshot
+        .tasks
+        .iter()
+        .filter(|task| !is_task_closed(task))
+        .collect::<Vec<_>>();
+      tasks.sort_by(|left, right| {
+        task_activity_rank(right)
+          .cmp(&task_activity_rank(left))
+          .then_with(|| right.updated_at.cmp(&left.updated_at))
+          .then_with(|| left.id.cmp(&right.id))
+      });
+
+      for task in tasks.into_iter().take(MAX_TASKS) {
+        let owner = task
+          .owner_thread_id
+          .as_deref()
+          .map(label_for)
+          .unwrap_or_else(|| "unassigned".to_string());
+        let _ = writeln!(
+          out,
+          "- #{id} {status:?}/{ready_state:?} owner={owner} | {title}",
+          id = task.id,
+          status = task.status,
+          ready_state = task.ready_state,
+          title = truncate_chars(&task.title, 80),
+        );
+      }
+    }
+
+    if !snapshot.ownership_leases.is_empty() {
+      let _ = writeln!(out, "");
+      let _ = writeln!(out, "Active locks:");
+      for lease in snapshot.ownership_leases.iter().take(MAX_LOCKS) {
+        let owner = label_for(&lease.owner_thread_id);
+        let _ = writeln!(
+          out,
+          "- {access} {kind:?} {path} by {owner} (task {task_id})",
+          access = access_label(&lease.access),
+          kind = lease.scope.kind,
+          path = truncate_chars(&lease.scope.path, 80),
+          task_id = lease.task_id
+        );
+      }
+    }
+  }
+
+  let _ = writeln!(out, "");
+  let _ = writeln!(
+    out,
+    "Guidance: Prefer waiting for assigned teammates; avoid mutating paths you haven't claimed in the task graph."
+  );
+  let _ = writeln!(out, "</team_digest>");
+  out
 }
 
 #[cfg(test)]

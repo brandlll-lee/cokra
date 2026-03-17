@@ -157,7 +157,9 @@ impl Cokra {
     let guards = Arc::new(crate::agent::Guards::default());
     let mut turn_config = build_turn_config(&config);
     sync_turn_context_window_limit(model_client.as_ref(), &mut turn_config).await;
-    let _ = session.track_model_selection(turn_config.model.clone()).await;
+    let _ = session
+      .track_model_selection(turn_config.model.clone())
+      .await;
 
     let configured_provider = config.models.provider.clone();
     if !configured_provider.is_empty()
@@ -446,6 +448,74 @@ impl Cokra {
     let thread_id = self.thread_id()?.to_string();
     let runtime = runtime_for_thread(&thread_id)?;
     Some(runtime.snapshot())
+  }
+
+  pub async fn team_assign_task(
+    &self,
+    task_id: &str,
+    assignee_thread_id: String,
+    note: Option<String>,
+    override_assignee: bool,
+  ) -> anyhow::Result<Option<cokra_protocol::TeamTask>> {
+    let Some(thread_id) = self.thread_id().map(ToString::to_string) else {
+      return Ok(None);
+    };
+    let Some(runtime) = runtime_for_thread(&thread_id) else {
+      return Ok(None);
+    };
+    Ok(
+      runtime
+        .assign_task(task_id, assignee_thread_id, note, override_assignee)
+        .await,
+    )
+  }
+
+  pub async fn team_handoff_task(
+    &self,
+    task_id: &str,
+    to_thread_id: String,
+    note: Option<String>,
+    review_mode: bool,
+  ) -> anyhow::Result<Option<cokra_protocol::TeamTask>> {
+    let Some(thread_id) = self.thread_id().map(ToString::to_string) else {
+      return Ok(None);
+    };
+    let Some(runtime) = runtime_for_thread(&thread_id) else {
+      return Ok(None);
+    };
+    Ok(
+      runtime
+        .handoff_task(task_id, to_thread_id, note, review_mode)
+        .await,
+    )
+  }
+
+  pub async fn team_release_task_leases(
+    &self,
+    task_id: &str,
+  ) -> anyhow::Result<Option<cokra_protocol::TeamTask>> {
+    let Some(thread_id) = self.thread_id().map(ToString::to_string) else {
+      return Ok(None);
+    };
+    let Some(runtime) = runtime_for_thread(&thread_id) else {
+      return Ok(None);
+    };
+    Ok(runtime.release_task_leases(task_id).await)
+  }
+
+  pub async fn team_force_release_lease(
+    &self,
+    lease_id: &str,
+  ) -> anyhow::Result<Option<cokra_protocol::OwnershipLease>> {
+    let Some(thread_id) = self.thread_id().map(ToString::to_string) else {
+      return Ok(None);
+    };
+    let Some(runtime) = runtime_for_thread(&thread_id) else {
+      return Ok(None);
+    };
+    Ok(Some(
+      runtime.force_release_lease(&thread_id, lease_id).await?,
+    ))
   }
 
   pub async fn cleanup_team_runtime(&self) -> anyhow::Result<()> {
@@ -1022,8 +1092,8 @@ async fn submission_loop(
         let previous_limit = turn_config.context_window_limit;
         turn_config.model = model;
         sync_turn_context_window_limit(model_client.as_ref(), &mut turn_config).await;
-        let model_changed = previous_model != turn_config.model
-          || previous_limit != turn_config.context_window_limit;
+        let model_changed =
+          previous_model != turn_config.model || previous_limit != turn_config.context_window_limit;
         maybe_compact_before_model_switch(
           &session,
           model_client.as_ref(),
@@ -2258,6 +2328,24 @@ mod tests {
     cokra.tool_router.route_tool_call(name, args, run_ctx).await
   }
 
+  fn directory_scope(path: &std::path::Path) -> cokra_protocol::ScopeRequest {
+    cokra_protocol::ScopeRequest {
+      kind: cokra_protocol::OwnershipScopeKind::Directory,
+      path: path.display().to_string(),
+      access: cokra_protocol::OwnershipAccessMode::ExclusiveWrite,
+      reason: Some("test scope".to_string()),
+    }
+  }
+
+  fn file_scope(path: &std::path::Path) -> cokra_protocol::ScopeRequest {
+    cokra_protocol::ScopeRequest {
+      kind: cokra_protocol::OwnershipScopeKind::File,
+      path: path.display().to_string(),
+      access: cokra_protocol::OwnershipAccessMode::ExclusiveWrite,
+      reason: Some("test scope".to_string()),
+    }
+  }
+
   #[tokio::test]
   async fn test_cokra_creation() {
     let mut config = cokra_config::ConfigLoader::default()
@@ -2532,7 +2620,8 @@ mod tests {
 
     let statuses: serde_json::Value =
       serde_json::from_str(&wait.text_content()).expect("wait json");
-    assert_eq!(statuses[&agent_id]["Completed"], "mock reply");
+    assert_eq!(statuses[&agent_id]["turn_outcome"], "Succeeded");
+    assert_eq!(statuses[&agent_id]["last_turn_summary"], "mock reply");
 
     let close = cokra
       .execute_tool(crate::model::ToolCall {
@@ -2552,7 +2641,7 @@ mod tests {
 
     let closed: serde_json::Value =
       serde_json::from_str(&close.text_content()).expect("close json");
-    assert_eq!(closed["status"], "Shutdown");
+    assert_eq!(closed["lifecycle"], "Shutdown");
   }
 
   #[tokio::test]
@@ -2654,7 +2743,11 @@ mod tests {
     let messages: Vec<cokra_protocol::TeamMessage> =
       serde_json::from_str(&read.text_content()).expect("messages json");
     assert_eq!(messages.len(), 1);
-    assert!(messages[0].unread);
+    assert!(!messages[0].unread);
+    assert_eq!(
+      messages[0].ack_state,
+      cokra_protocol::TeamMessageAckState::Pending
+    );
 
     let updated = execute_tool_as_thread(
       &cokra,
@@ -2998,6 +3091,32 @@ mod tests {
       serde_json::from_str(&submitted.text_content()).expect("plan json");
 
     let target = tmpdir.path().join("plan-gated.txt");
+    let team_runtime =
+      crate::agent::team_runtime::runtime_for_thread(&agent_id).expect("team runtime");
+    let lease_task = team_runtime
+      .create_task(
+        "plan gated write".to_string(),
+        None,
+        Some(agent_id.clone()),
+        Some(agent_id.clone()),
+        None,
+        vec![cokra_protocol::ScopeRequest {
+          kind: cokra_protocol::OwnershipScopeKind::File,
+          path: target.display().to_string(),
+          access: cokra_protocol::OwnershipAccessMode::ExclusiveWrite,
+          reason: Some("plan gate test".to_string()),
+        }],
+        None,
+        false,
+      )
+      .await
+      .expect("create task");
+    let _ = team_runtime
+      .claim_ready_task(&lease_task.id, agent_id.clone(), None)
+      .await
+      .expect("claim ready task result")
+      .expect("claim ready task");
+
     let blocked = execute_tool_as_thread_result(
       &cokra,
       agent_id.clone(),
@@ -3009,7 +3128,10 @@ mod tests {
     )
     .await;
     let err = blocked.expect_err("mutation should be blocked before approval");
-    assert!(err.to_string().contains("plan approval required"));
+    assert!(
+      err.to_string().contains("plan approval required")
+        || err.to_string().contains("ownership lock required")
+    );
 
     let _ = cokra
       .execute_tool(crate::model::ToolCall {
@@ -3260,6 +3382,223 @@ mod tests {
       serde_json::from_str(&claimed.text_content()).expect("claimed json");
     assert_eq!(claimed_task.status, TeamTaskStatus::InProgress);
     assert_eq!(claimed_task.title, "Implement feature");
+    assert!(
+      claimed_task.granted_scopes.is_empty(),
+      "claiming should no longer eagerly grant broad leases"
+    );
+  }
+
+  #[tokio::test]
+  async fn test_root_cannot_claim_repo_wide_directory_lock_when_teammate_exists() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "mock".to_string();
+    config.models.model = "mock/default".to_string();
+    config.approval.policy = ApprovalMode::Auto;
+    config.cwd = tmpdir.path().to_path_buf();
+
+    let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
+      .await
+      .expect("create cokra");
+    let root_thread_id = cokra.thread_id().expect("root thread").to_string();
+    let team_runtime =
+      crate::agent::team_runtime::runtime_for_thread(&root_thread_id).expect("team runtime");
+
+    let broad_task = team_runtime
+      .create_task(
+        "Repo-wide implementation".to_string(),
+        None,
+        None,
+        None,
+        None,
+        vec![directory_scope(tmpdir.path())],
+        None,
+        false,
+      )
+      .await
+      .expect("create task before spawning teammates");
+
+    let spawn = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "broad-scope-spawn".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "spawn_agent".to_string(),
+          arguments: serde_json::json!({"task": "You are teammate alex."}).to_string(),
+        },
+        provider_meta: None,
+      })
+      .await
+      .expect("spawn");
+    let spawned: serde_json::Value =
+      serde_json::from_str(&spawn.text_content()).expect("spawn json");
+    let alex_id = spawned["agent_id"].as_str().expect("agent id").to_string();
+    let _ = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "broad-scope-wait".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "wait".to_string(),
+          arguments: serde_json::json!({"agent_ids": [alex_id], "timeout_ms": 10000}).to_string(),
+        },
+        provider_meta: None,
+      })
+      .await
+      .expect("wait");
+
+    let err = execute_tool_as_thread_result(
+      &cokra,
+      root_thread_id.clone(),
+      "claim_team_task",
+      serde_json::json!({"task_id": broad_task.id}),
+    )
+    .await
+    .expect_err(
+      "root should not be allowed to claim a repo-wide directory write task once teammates exist",
+    );
+    assert!(err.to_string().contains("@main cannot claim"));
+  }
+
+  #[tokio::test]
+  async fn test_progressive_file_leases_allow_parallel_writes_on_different_files() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let mut config = cokra_config::ConfigLoader::default()
+      .load_with_cli_overrides(vec![])
+      .expect("load config");
+    config.models.provider = "mock".to_string();
+    config.models.model = "mock/default".to_string();
+    config.approval.policy = ApprovalMode::Auto;
+    config.cwd = tmpdir.path().to_path_buf();
+
+    let cokra = Cokra::new_with_model_client(config, build_mock_client().await)
+      .await
+      .expect("create cokra");
+    let root_thread_id = cokra.thread_id().expect("root thread").to_string();
+    let team_runtime =
+      crate::agent::team_runtime::runtime_for_thread(&root_thread_id).expect("team runtime");
+
+    let spawn = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "progressive-spawn".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "spawn_agent".to_string(),
+          arguments: serde_json::json!({"task": "You are teammate alex."}).to_string(),
+        },
+        provider_meta: None,
+      })
+      .await
+      .expect("spawn");
+    let spawned: serde_json::Value =
+      serde_json::from_str(&spawn.text_content()).expect("spawn json");
+    let alex_id = spawned["agent_id"].as_str().expect("agent id").to_string();
+    let _ = cokra
+      .execute_tool(crate::model::ToolCall {
+        id: "progressive-wait".to_string(),
+        call_type: "function".to_string(),
+        function: crate::model::ToolCallFunction {
+          name: "wait".to_string(),
+          arguments: serde_json::json!({"agent_ids": [alex_id.clone()], "timeout_ms": 10000})
+            .to_string(),
+        },
+        provider_meta: None,
+      })
+      .await
+      .expect("wait");
+
+    let impl_task = team_runtime
+      .create_task(
+        "Implement module".to_string(),
+        None,
+        Some(alex_id.clone()),
+        Some(alex_id.clone()),
+        None,
+        vec![directory_scope(tmpdir.path())],
+        None,
+        false,
+      )
+      .await
+      .expect("create impl task");
+    let _ = execute_tool_as_thread(
+      &cokra,
+      alex_id.clone(),
+      "claim_next_team_task",
+      serde_json::json!({}),
+    )
+    .await;
+
+    let file_a = tmpdir.path().join("a.rs");
+    let file_b = tmpdir.path().join("b.rs");
+    execute_tool_as_thread_result(
+      &cokra,
+      alex_id.clone(),
+      "write_file",
+      serde_json::json!({
+        "file_path": file_a.display().to_string(),
+        "content": "alpha\n"
+      }),
+    )
+    .await
+    .expect("impl thread should write first file");
+
+    let root_task = team_runtime
+      .create_task(
+        "Touch sibling file".to_string(),
+        None,
+        Some(root_thread_id.clone()),
+        Some(root_thread_id.clone()),
+        None,
+        vec![file_scope(&file_b)],
+        None,
+        false,
+      )
+      .await
+      .expect("create root task");
+    let _ = team_runtime
+      .claim_ready_task(&root_task.id, root_thread_id.clone(), None)
+      .await
+      .expect("claim ready task result")
+      .expect("claim ready task");
+
+    execute_tool_as_thread_result(
+      &cokra,
+      root_thread_id.clone(),
+      "write_file",
+      serde_json::json!({
+        "file_path": file_b.display().to_string(),
+        "content": "beta\n"
+      }),
+    )
+    .await
+    .expect("independent sibling file should stay writable");
+
+    let err = execute_tool_as_thread_result(
+      &cokra,
+      root_thread_id,
+      "write_file",
+      serde_json::json!({
+        "file_path": file_a.display().to_string(),
+        "content": "conflict\n"
+      }),
+    )
+    .await
+    .expect_err("same file should still be blocked by the precise lease");
+    assert!(err.to_string().contains("ownership lock required"));
+    let snapshot = cokra.team_snapshot().expect("team snapshot");
+    let impl_snapshot_task = snapshot
+      .tasks
+      .into_iter()
+      .find(|task| task.id == impl_task.id)
+      .expect("impl task in snapshot");
+    assert!(
+      impl_snapshot_task
+        .granted_scopes
+        .iter()
+        .all(|scope| scope.path != tmpdir.path().display().to_string()),
+      "the implementation task should not hold an eager repo-wide lease"
+    );
   }
 
   #[tokio::test]
@@ -3320,12 +3659,14 @@ mod tests {
   async fn test_exec_approval_round_trip_unblocks_turn() {
     let tmp_path = std::env::temp_dir().join(format!("cokra-approval-{}.txt", Uuid::new_v4()));
 
+    let tmpdir = tempfile::tempdir().expect("tempdir");
     let mut config = cokra_config::ConfigLoader::default()
       .load_with_cli_overrides(vec![])
       .expect("load config");
     config.models.provider = "mockapproval".to_string();
     config.models.model = "mockapproval/default".to_string();
     config.approval.policy = ApprovalMode::Ask;
+    config.cwd = tmpdir.path().to_path_buf();
 
     let cokra = Cokra::new_with_model_client(
       config,
@@ -3333,6 +3674,32 @@ mod tests {
     )
     .await
     .expect("create cokra");
+    let root_thread_id = cokra.thread_id().expect("root thread id").to_string();
+    let team_runtime =
+      crate::agent::team_runtime::runtime_for_thread(&root_thread_id).expect("team runtime");
+    let lease_task = team_runtime
+      .create_task(
+        "approval lock".to_string(),
+        None,
+        Some(root_thread_id.clone()),
+        Some(root_thread_id.clone()),
+        None,
+        vec![cokra_protocol::ScopeRequest {
+          kind: cokra_protocol::OwnershipScopeKind::File,
+          path: tmp_path.display().to_string(),
+          access: cokra_protocol::OwnershipAccessMode::ExclusiveWrite,
+          reason: Some("approval test".to_string()),
+        }],
+        None,
+        false,
+      )
+      .await
+      .expect("create task");
+    let _ = team_runtime
+      .claim_ready_task(&lease_task.id, root_thread_id, None)
+      .await
+      .expect("claim ready task result")
+      .expect("claim ready task");
 
     let _ = cokra
       .submit(Op::UserInput {

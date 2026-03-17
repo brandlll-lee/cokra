@@ -1,15 +1,20 @@
 use async_trait::async_trait;
+use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
 
 use cokra_protocol::CollabAgentInteractionBeginEvent;
 use cokra_protocol::CollabAgentInteractionEndEvent;
+use cokra_protocol::CollabMailboxDeliveredEvent;
 use cokra_protocol::EventMsg;
+use cokra_protocol::TeamMessageDeliveryMode;
+use cokra_protocol::TeamMessageKind;
 
 use crate::agent::team_runtime::runtime_for_thread;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::team_selectors::resolve_required_agent_selector;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 
@@ -46,9 +51,7 @@ impl ToolHandler for SendInputHandler {
     let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
       FunctionCallError::Execution("send_input runtime is not configured".to_string())
     })?;
-    let agent_id = team_runtime
-      .resolve_agent_selector(&args.agent_id)
-      .ok_or_else(|| FunctionCallError::Execution(format!("agent not found: {}", args.agent_id)))?;
+    let agent_id = resolve_required_agent_selector(&team_runtime, &args.agent_id, "agent_id")?;
     let receiver = team_runtime.collab_agent_ref(&agent_id);
     let outbound_message = args.message.clone();
 
@@ -70,6 +73,30 @@ impl ToolHandler for SendInputHandler {
       .send_input(&agent_id, args.message)
       .await
       .map_err(|err| FunctionCallError::Execution(err.to_string()))?;
+    let state = team_runtime.wait_state(&agent_id).unwrap_or_default();
+
+    if let Some(tx_event) = &runtime.tx_event {
+      let sender = team_runtime.collab_agent_ref(&runtime.thread_id);
+      let recipient = team_runtime.collab_agent_ref(&agent_id);
+      let _ = tx_event
+        .send(EventMsg::CollabMailboxDelivered(
+          CollabMailboxDeliveredEvent {
+            thread_id: agent_id.clone(),
+            sender_thread_id: runtime.thread_id.clone(),
+            sender_nickname: sender.as_ref().and_then(|agent| agent.nickname.clone()),
+            sender_role: sender.as_ref().and_then(|agent| agent.role.clone()),
+            recipient_thread_id: agent_id.clone(),
+            recipient_nickname: recipient.as_ref().and_then(|agent| agent.nickname.clone()),
+            recipient_role: recipient.as_ref().and_then(|agent| agent.role.clone()),
+            message: outbound_message.clone(),
+            task_id: None,
+            delivery_mode: TeamMessageDeliveryMode::EphemeralNudge,
+            kind: TeamMessageKind::Direct,
+            created_at: Utc::now().timestamp(),
+          },
+        ))
+        .await;
+    }
 
     if let Some(tx_event) = &runtime.tx_event {
       let _ = tx_event
@@ -80,9 +107,11 @@ impl ToolHandler for SendInputHandler {
             nickname: receiver.as_ref().and_then(|agent| agent.nickname.clone()),
             role: receiver.and_then(|agent| agent.role),
             message: outbound_message,
-            // Tradeoff: `send_input` queues work asynchronously, so we report the best-known
-            // status instead of blocking here just to fetch a newer state.
-            status: cokra_protocol::AgentStatus::Running,
+            lifecycle: state.lifecycle,
+            turn_outcome: state.turn_outcome,
+            last_turn_summary: state.last_turn_summary,
+            attention_reason: state.attention_reason,
+            pending_wake_count: state.pending_wake_count,
           },
         ))
         .await;

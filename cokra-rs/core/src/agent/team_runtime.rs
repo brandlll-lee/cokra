@@ -1,21 +1,29 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::Context;
-use cokra_protocol::BackgroundEventEvent;
+use chrono::Utc;
 use cokra_protocol::EventMsg;
-use tokio::time::timeout;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
+use tokio::time::timeout;
 use uuid::Uuid;
 
 use cokra_config::Config;
-use cokra_protocol::AgentStatus as CollabAgentStatus;
+use cokra_protocol::CollabAgentLifecycle;
 use cokra_protocol::CollabAgentRef;
+use cokra_protocol::CollabAgentStateChangedEvent;
 use cokra_protocol::CollabAgentStatusEntry;
+use cokra_protocol::CollabAgentWaitState;
+use cokra_protocol::CollabTurnOutcome;
+use cokra_protocol::OwnershipAccessMode;
+use cokra_protocol::OwnershipLease;
+use cokra_protocol::OwnershipScopeKind;
 use cokra_protocol::ScopeRequest;
 use cokra_protocol::TeamMessage;
 use cokra_protocol::TeamMessageDeliveryMode;
@@ -45,6 +53,7 @@ use super::team_state::TeamState;
 
 const CHILD_COMMAND_CHANNEL_CAPACITY: usize = 32;
 const CHILD_EVENT_CHANNEL_CAPACITY: usize = 512;
+const LEASE_STALE_AFTER_SECS: i64 = 300;
 
 #[derive(Debug)]
 enum ChildCommand {
@@ -52,16 +61,57 @@ enum ChildCommand {
   Shutdown,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ManagedAgentState {
+  pub(crate) lifecycle: CollabAgentLifecycle,
+  pub(crate) turn_outcome: CollabTurnOutcome,
+  pub(crate) last_turn_summary: Option<String>,
+  pub(crate) attention_reason: Option<String>,
+  pub(crate) pending_wake_count: usize,
+  pub(crate) scheduled_generation: u64,
+  pub(crate) inflight_generation: u64,
+  pub(crate) settled_generation: u64,
+}
+
+impl ManagedAgentState {
+  pub(crate) fn wait_state(&self) -> CollabAgentWaitState {
+    CollabAgentWaitState {
+      lifecycle: self.lifecycle.clone(),
+      turn_outcome: self.turn_outcome.clone(),
+      last_turn_summary: self.last_turn_summary.clone(),
+      attention_reason: self.attention_reason.clone(),
+      pending_wake_count: self.pending_wake_count,
+    }
+  }
+}
+
+#[derive(Debug, Clone)]
+enum WakeReason {
+  UserInput,
+  TaskAssigned { task_id: String },
+  TaskHandedOff { task_id: String },
+  ReviewRequested { task_id: String },
+  MailboxUnread,
+}
+
+#[derive(Debug, Clone)]
+struct WakeRequest {
+  message: String,
+  reason: WakeReason,
+}
+
 #[derive(Clone)]
 pub(crate) struct ManagedAgentHandle {
   thread_id: ThreadId,
   session: Arc<Session>,
   tx_cmd: mpsc::Sender<ChildCommand>,
-  status_rx: watch::Receiver<CollabAgentStatus>,
+  state_tx: watch::Sender<ManagedAgentState>,
+  state_rx: watch::Receiver<ManagedAgentState>,
+  wake_queue: Arc<Mutex<VecDeque<WakeRequest>>>,
 }
 
 impl ManagedAgentHandle {
-  pub(crate) async fn send_input(&self, message: String) -> anyhow::Result<()> {
+  pub(crate) async fn send_turn_now(&self, message: String) -> anyhow::Result<()> {
     self
       .tx_cmd
       .send(ChildCommand::UserTurn { message })
@@ -77,12 +127,72 @@ impl ManagedAgentHandle {
       .map_err(|_| anyhow::anyhow!("agent loop terminated"))
   }
 
-  pub(crate) fn subscribe_status(&self) -> watch::Receiver<CollabAgentStatus> {
-    self.status_rx.clone()
+  pub(crate) fn subscribe_state(&self) -> watch::Receiver<ManagedAgentState> {
+    self.state_rx.clone()
   }
 
   pub(crate) fn thread_id(&self) -> &ThreadId {
     &self.thread_id
+  }
+
+  pub(crate) fn state(&self) -> ManagedAgentState {
+    self.state_rx.borrow().clone()
+  }
+
+  pub(crate) fn update_state<F>(&self, mutator: F) -> ManagedAgentState
+  where
+    F: FnOnce(&mut ManagedAgentState),
+  {
+    let mut state = self.state();
+    mutator(&mut state);
+    let _ = self.state_tx.send(state.clone());
+    state
+  }
+
+  fn enqueue_wake(&self, request: WakeRequest) -> usize {
+    let queue_len = {
+      let mut wake_queue = self
+        .wake_queue
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      wake_queue.push_back(request);
+      wake_queue.len()
+    };
+    self.update_state(|state| {
+      state.pending_wake_count = queue_len;
+    });
+    queue_len
+  }
+
+  fn dequeue_wake(&self) -> Option<WakeRequest> {
+    let (request, queue_len) = {
+      let mut wake_queue = self
+        .wake_queue
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      let request = wake_queue.pop_front();
+      (request, wake_queue.len())
+    };
+    if request.is_some() {
+      self.update_state(|state| {
+        state.pending_wake_count = queue_len;
+      });
+    }
+    request
+  }
+
+  fn clear_wakes(&self) {
+    let cleared = {
+      let mut wake_queue = self
+        .wake_queue
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      wake_queue.clear();
+      wake_queue.len()
+    };
+    self.update_state(|state| {
+      state.pending_wake_count = cleared;
+    });
   }
 
   pub(crate) async fn notify_exec_approval(
@@ -117,8 +227,8 @@ pub(crate) struct TeamRuntime {
   manager: Arc<ThreadManagerState>,
   root_tx_event: mpsc::Sender<EventMsg>,
   handles: Mutex<HashMap<String, Arc<ManagedAgentHandle>>>,
-  team_state: Mutex<TeamState>,
-  run_state: Mutex<TeamRunState>,
+  team_state: Arc<Mutex<TeamState>>,
+  run_state: Arc<Mutex<TeamRunState>>,
   mailbox_version_tx: watch::Sender<u64>,
   state_db: Arc<StateDb>,
 }
@@ -127,6 +237,24 @@ static TEAM_RUNTIMES: OnceLock<Mutex<Vec<Arc<TeamRuntime>>>> = OnceLock::new();
 
 fn runtime_registry() -> &'static Mutex<Vec<Arc<TeamRuntime>>> {
   TEAM_RUNTIMES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn lexically_normalize_path(path: std::path::PathBuf) -> std::path::PathBuf {
+  use std::path::Component;
+
+  let mut normalized = std::path::PathBuf::new();
+  for component in path.components() {
+    match component {
+      Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+      Component::RootDir => normalized.push(std::path::MAIN_SEPARATOR.to_string()),
+      Component::CurDir => {}
+      Component::ParentDir => {
+        normalized.pop();
+      }
+      Component::Normal(segment) => normalized.push(segment),
+    }
+  }
+  normalized
 }
 
 pub(crate) async fn register_team_runtime(
@@ -162,8 +290,8 @@ pub(crate) async fn register_team_runtime(
     manager,
     root_tx_event,
     handles: Mutex::new(HashMap::new()),
-    team_state: Mutex::new(persisted.unwrap_or_default()),
-    run_state: Mutex::new(run_state.unwrap_or_default()),
+    team_state: Arc::new(Mutex::new(persisted.unwrap_or_default())),
+    run_state: Arc::new(Mutex::new(run_state.unwrap_or_default())),
     mailbox_version_tx,
     state_db,
   });
@@ -231,6 +359,7 @@ impl TeamRuntime {
   }
 
   pub(crate) fn snapshot(&self) -> TeamSnapshot {
+    self.maintain_leases_inline();
     let threads = self
       .manager
       .list_thread_ids()
@@ -241,15 +370,15 @@ impl TeamRuntime {
       .iter()
       .map(|thread| {
         let status = if thread.thread_id == self.root_thread_id {
-          CollabAgentStatus::Running
+          self.root_wait_state()
         } else {
           self
-            .handles
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&thread.thread_id.to_string())
-            .map(|handle| handle.status_rx.borrow().clone())
-            .unwrap_or(CollabAgentStatus::NotFound)
+            .handle_for(&thread.thread_id.to_string())
+            .map(|handle| handle.state().wait_state())
+            .unwrap_or(CollabAgentWaitState {
+              lifecycle: CollabAgentLifecycle::NotFound,
+              ..Default::default()
+            })
         };
         (thread.thread_id.to_string(), status)
       })
@@ -293,7 +422,14 @@ impl TeamRuntime {
     workflow_run_id: Option<String>,
     requested_scopes: Vec<ScopeRequest>,
     blocking_reason: Option<String>,
-  ) -> TeamTask {
+    scope_policy_override: bool,
+  ) -> anyhow::Result<TeamTask> {
+    let requested_scopes = self.normalize_scope_requests(requested_scopes);
+    self.validate_task_scope_policy(
+      assignee_thread_id.as_deref().or(owner_thread_id.as_deref()),
+      &requested_scopes,
+      scope_policy_override,
+    )?;
     let task = self
       .team_state
       .lock()
@@ -306,6 +442,7 @@ impl TeamRuntime {
         workflow_run_id,
         requested_scopes,
         blocking_reason,
+        scope_policy_override,
       );
     if let Some(assignee_thread_id) = assignee_thread_id.as_deref()
       && matches!(task.status, TeamTaskStatus::InProgress)
@@ -313,7 +450,25 @@ impl TeamRuntime {
       self.note_task_claim(task.clone(), assignee_thread_id.to_string());
     }
     self.persist_states().await;
-    task
+    if let Some(assignee_thread_id) = task.assignee_thread_id.as_deref()
+      && !matches!(
+        task.ready_state,
+        cokra_protocol::TeamTaskReadyState::Blocked
+      )
+    {
+      let _ = self
+        .schedule_turn(
+          assignee_thread_id,
+          wake_message(&WakeReason::TaskAssigned {
+            task_id: task.id.clone(),
+          }),
+          WakeReason::TaskAssigned {
+            task_id: task.id.clone(),
+          },
+        )
+        .await;
+    }
+    Ok(task)
   }
 
   pub(crate) async fn submit_plan(
@@ -395,11 +550,34 @@ impl TeamRuntime {
     status: Option<TeamTaskStatus>,
     assignee_thread_id: Option<Option<String>>,
     owner_thread_id: Option<Option<String>>,
+    reviewer_thread_id: Option<Option<String>>,
     note: Option<String>,
     requested_scopes: Option<Vec<ScopeRequest>>,
     granted_scopes: Option<Vec<ScopeRequest>>,
     review_state: Option<TeamTaskReviewState>,
-  ) -> Option<TeamTask> {
+    scope_policy_override: Option<bool>,
+  ) -> anyhow::Result<Option<TeamTask>> {
+    let requested_scopes = requested_scopes.map(|scopes| self.normalize_scope_requests(scopes));
+    let granted_scopes = granted_scopes.map(|scopes| self.normalize_scope_requests(scopes));
+    if let Some(current) = self.task(task_id) {
+      let effective_owner = owner_thread_id
+        .as_ref()
+        .and_then(|owner| owner.as_deref())
+        .or(current.owner_thread_id.as_deref());
+      let effective_assignee = assignee_thread_id
+        .as_ref()
+        .and_then(|assignee| assignee.as_deref())
+        .or(current.assignee_thread_id.as_deref());
+      let effective_scopes = requested_scopes
+        .as_deref()
+        .unwrap_or(&current.requested_scopes);
+      let effective_override = scope_policy_override.unwrap_or(current.scope_policy_override);
+      self.validate_task_scope_policy(
+        effective_assignee.or(effective_owner),
+        effective_scopes,
+        effective_override,
+      )?;
+    }
     let task = self
       .team_state
       .lock()
@@ -409,10 +587,12 @@ impl TeamRuntime {
         status,
         assignee_thread_id,
         owner_thread_id,
+        reviewer_thread_id,
         note,
         requested_scopes,
         granted_scopes,
         review_state,
+        scope_policy_override,
       );
     if let Some(task) = &task
       && let Some(assignee_thread_id) = task.assignee_thread_id.as_deref()
@@ -421,7 +601,10 @@ impl TeamRuntime {
       self.note_task_claim(task.clone(), assignee_thread_id.to_string());
     }
     self.persist_states().await;
-    task
+    if let Some(task) = &task {
+      self.nudge_task_participants(task).await;
+    }
+    Ok(task)
   }
 
   pub(crate) async fn assign_task(
@@ -429,7 +612,15 @@ impl TeamRuntime {
     task_id: &str,
     assignee_thread_id: String,
     note: Option<String>,
+    override_assignee: bool,
   ) -> Option<TeamTask> {
+    if !override_assignee
+      && let Some(existing) = self.task(task_id)
+      && let Some(current_assignee) = existing.assignee_thread_id
+      && current_assignee != assignee_thread_id
+    {
+      return None;
+    }
     let task = self
       .team_state
       .lock()
@@ -442,6 +633,9 @@ impl TeamRuntime {
       self.note_task_claim(task.clone(), assignee_thread_id.to_string());
     }
     self.persist_states().await;
+    if let Some(task) = &task {
+      self.nudge_task_participants(task).await;
+    }
     task
   }
 
@@ -459,11 +653,30 @@ impl TeamRuntime {
       .handoff_task(task_id, to_thread_id, note, review_mode);
     if let Some(task) = &task
       && let Some(assignee_thread_id) = task.assignee_thread_id.as_deref()
-      && matches!(task.status, TeamTaskStatus::InProgress | TeamTaskStatus::Review)
+      && matches!(
+        task.status,
+        TeamTaskStatus::InProgress | TeamTaskStatus::Review
+      )
     {
       self.note_task_claim(task.clone(), assignee_thread_id.to_string());
     }
     self.persist_states().await;
+    if let Some(task) = &task
+      && let Some(assignee_thread_id) = task.assignee_thread_id.as_deref()
+    {
+      let reason = if review_mode {
+        WakeReason::ReviewRequested {
+          task_id: task.id.clone(),
+        }
+      } else {
+        WakeReason::TaskHandedOff {
+          task_id: task.id.clone(),
+        }
+      };
+      let _ = self
+        .schedule_turn(assignee_thread_id, wake_message(&reason), reason)
+        .await;
+    }
     task
   }
 
@@ -472,7 +685,10 @@ impl TeamRuntime {
     task_id: &str,
     claimer_thread_id: String,
     note: Option<String>,
-  ) -> Option<TeamTask> {
+  ) -> anyhow::Result<Option<TeamTask>> {
+    if let Some(task) = self.task(task_id) {
+      self.validate_claim_scope_policy(&claimer_thread_id, &task)?;
+    }
     let task = self
       .team_state
       .lock()
@@ -482,7 +698,7 @@ impl TeamRuntime {
       self.note_task_claim(task.clone(), claimer_thread_id);
     }
     self.persist_states().await;
-    task
+    Ok(task)
   }
 
   pub(crate) async fn list_ready_tasks(&self, claimer_thread_id: &str) -> Vec<TeamTask> {
@@ -498,7 +714,10 @@ impl TeamRuntime {
     task_id: &str,
     claimer_thread_id: String,
     note: Option<String>,
-  ) -> Option<TeamTask> {
+  ) -> anyhow::Result<Option<TeamTask>> {
+    if let Some(task) = self.task(task_id) {
+      self.validate_claim_scope_policy(&claimer_thread_id, &task)?;
+    }
     let task = self
       .team_state
       .lock()
@@ -508,20 +727,40 @@ impl TeamRuntime {
       self.note_task_claim(task.clone(), claimer_thread_id);
     }
     self.persist_states().await;
-    task
+    Ok(task)
   }
 
-  pub(crate) async fn claim_next_task(&self, claimer_thread_id: &str) -> Option<TeamTask> {
-    let task = self
+  pub(crate) async fn claim_next_task(
+    &self,
+    claimer_thread_id: &str,
+  ) -> anyhow::Result<Option<TeamTask>> {
+    let ready_tasks = self
       .team_state
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .claim_next_task(claimer_thread_id);
+      .list_ready_tasks(claimer_thread_id);
+    let mut task = None;
+    for candidate in ready_tasks {
+      if self
+        .validate_claim_scope_policy(claimer_thread_id, &candidate)
+        .is_err()
+      {
+        continue;
+      }
+      task = self
+        .team_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .claim_ready_task(&candidate.id, claimer_thread_id.to_string(), None);
+      if task.is_some() {
+        break;
+      }
+    }
     if let Some(task) = &task {
       self.note_task_claim(task.clone(), claimer_thread_id.to_string());
     }
     self.persist_states().await;
-    task
+    Ok(task)
   }
 
   pub(crate) async fn add_task_dependency(
@@ -577,6 +816,103 @@ impl TeamRuntime {
     task
   }
 
+  pub(crate) async fn release_task_leases(&self, task_id: &str) -> Option<TeamTask> {
+    let task = self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .release_task_leases(task_id);
+    self.persist_states().await;
+    task
+  }
+
+  pub(crate) async fn force_release_lease(
+    &self,
+    actor_thread_id: &str,
+    lease_id: &str,
+  ) -> anyhow::Result<OwnershipLease> {
+    if !self.is_root_thread(actor_thread_id) {
+      anyhow::bail!("only @main can force release ownership leases");
+    }
+    let lease = self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .force_release_lease(lease_id)
+      .ok_or_else(|| anyhow::anyhow!("unknown lease id: {lease_id}"))?;
+    self.persist_states().await;
+    Ok(lease)
+  }
+
+  pub(crate) async fn ensure_mutation_paths_owned(
+    &self,
+    thread_id: &str,
+    paths: &[String],
+  ) -> anyhow::Result<()> {
+    self.maintain_leases().await;
+    let paths = paths
+      .iter()
+      .map(|path| self.normalize_scope_path(&OwnershipScopeKind::File, path))
+      .collect::<Vec<_>>();
+    let granted = {
+      let mut team_state = self
+        .team_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      team_state.ensure_write_paths_owned(thread_id, &paths)
+    };
+    match granted {
+      Ok(inserted) => {
+        if inserted > 0 {
+          self.persist_team_state().await;
+        }
+      }
+      Err(failures) => {
+        let details = failures
+          .into_iter()
+          .map(|failure| match failure {
+            super::team_state::WriteOwnershipFailure::Blocked { path, lease } => format!(
+              "{path} is locked by {} via task {} ({})",
+              lease.owner_thread_id,
+              lease.task_id,
+              Self::access_label(&lease.access)
+            ),
+            super::team_state::WriteOwnershipFailure::MissingClaim { path } => {
+              format!("{path} has no claimed task with an exclusive-write scope covering it")
+            }
+            super::team_state::WriteOwnershipFailure::ClaimedByOther {
+              path,
+              task_id,
+              owner_thread_id,
+            } => {
+              let owner_label = self
+                .collab_agent_ref(&owner_thread_id)
+                .and_then(|agent| agent.nickname)
+                .map(|nickname| format!("@{nickname}"))
+                .unwrap_or(owner_thread_id);
+              format!("{path} is claimed by {owner_label} via task {task_id} (exclusive-write)")
+            }
+            super::team_state::WriteOwnershipFailure::AmbiguousClaim { path, task_ids } => format!(
+              "{path} matches multiple claimed tasks: {}",
+              task_ids.join(", ")
+            ),
+          })
+          .collect::<Vec<_>>()
+          .join("; ");
+        anyhow::bail!("ownership lock required before mutating paths: {details}");
+      }
+    }
+    let touched = self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .touch_thread_leases(thread_id);
+    if touched > 0 {
+      self.persist_team_state().await;
+    }
+    Ok(())
+  }
+
   #[allow(clippy::too_many_arguments)]
   pub(crate) async fn post_message(
     &self,
@@ -608,6 +944,7 @@ impl TeamRuntime {
         expires_at,
       );
     self.persist_team_state_and_publish_mailbox().await;
+    self.nudge_message_recipients(&message).await;
     message
   }
 
@@ -743,23 +1080,39 @@ impl TeamRuntime {
   }
 
   pub(crate) fn resolve_agent_selector(&self, selector: &str) -> Option<String> {
+    self.resolve_agent_selector_strict(selector).ok()
+  }
+
+  pub(crate) fn resolve_agent_selector_strict(&self, selector: &str) -> Result<String, String> {
     let selector = selector.trim();
     if selector.is_empty() {
-      return None;
+      return Err("selector cannot be empty".to_string());
     }
+    let selector = selector.strip_prefix('@').unwrap_or(selector);
 
     if self.resolve_thread_id(selector).is_some() {
-      return Some(selector.to_string());
+      return Ok(selector.to_string());
+    }
+    if selector == "main" {
+      return Ok(self.root_thread_id.to_string());
     }
 
-    // Fallback: resolve by nickname (Codex-style teams often refer to agents by name).
-    self
+    let matches = self
       .manager
       .list_thread_ids()
       .into_iter()
       .filter_map(|thread_id| self.manager.get_thread(&thread_id))
-      .find(|info| info.nickname.as_deref() == Some(selector))
+      .filter(|info| info.nickname.as_deref() == Some(selector))
       .map(|info| info.thread_id.to_string())
+      .collect::<Vec<_>>();
+    match matches.as_slice() {
+      [thread_id] => Ok(thread_id.clone()),
+      [] => Err(format!("agent not found: {selector}")),
+      _ => Err(format!(
+        "selector {selector} is ambiguous; matching thread ids: {}",
+        matches.join(", ")
+      )),
+    }
   }
 
   pub(crate) async fn spawn_agent(
@@ -794,13 +1147,12 @@ impl TeamRuntime {
   }
 
   pub(crate) async fn send_input(&self, agent_id: &str, message: String) -> anyhow::Result<()> {
-    let handle = self
-      .handle_for(agent_id)
-      .ok_or_else(|| anyhow::anyhow!("agent not found: {agent_id}"))?;
-    handle.send_input(message).await
+    self
+      .schedule_turn(agent_id, message, WakeReason::UserInput)
+      .await
   }
 
-  pub(crate) async fn close_agent(&self, agent_id: &str) -> anyhow::Result<CollabAgentStatus> {
+  pub(crate) async fn close_agent(&self, agent_id: &str) -> anyhow::Result<CollabAgentLifecycle> {
     let handle = {
       let mut handles = self
         .handles
@@ -810,23 +1162,51 @@ impl TeamRuntime {
     };
 
     let Some(handle) = handle else {
-      return Ok(CollabAgentStatus::NotFound);
+      return Ok(CollabAgentLifecycle::NotFound);
     };
 
+    handle.update_state(|state| {
+      state.lifecycle = CollabAgentLifecycle::Shutdown;
+      state.pending_wake_count = 0;
+      state.attention_reason = None;
+    });
+    handle.clear_wakes();
     let _ = handle.shutdown().await;
     self
       .agent_control
       .shutdown_spawned_agent(handle.thread_id().clone())?;
-    Ok(CollabAgentStatus::Shutdown)
+    if self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .release_thread_leases(agent_id)
+      > 0
+    {
+      self.persist_states().await;
+    }
+    self.emit_agent_state_changed(agent_id).await;
+    Ok(CollabAgentLifecycle::Shutdown)
   }
 
-  pub(crate) fn subscribe_status(
+  pub(crate) fn subscribe_state(
     &self,
     agent_id: &str,
-  ) -> Option<watch::Receiver<CollabAgentStatus>> {
+  ) -> Option<watch::Receiver<ManagedAgentState>> {
     self
       .handle_for(agent_id)
-      .map(|handle| handle.subscribe_status())
+      .map(|handle| handle.subscribe_state())
+  }
+
+  pub(crate) fn wait_target_generation(&self, agent_id: &str) -> Option<u64> {
+    self
+      .handle_for(agent_id)
+      .map(|handle| handle.state().scheduled_generation)
+  }
+
+  pub(crate) fn wait_state(&self, agent_id: &str) -> Option<CollabAgentWaitState> {
+    self
+      .handle_for(agent_id)
+      .map(|handle| handle.state().wait_state())
   }
 
   pub(crate) fn collab_agent_ref(&self, agent_id: &str) -> Option<CollabAgentRef> {
@@ -847,7 +1227,7 @@ impl TeamRuntime {
 
   pub(crate) fn collab_agent_status_entries(
     &self,
-    statuses: &HashMap<String, CollabAgentStatus>,
+    statuses: &HashMap<String, CollabAgentWaitState>,
   ) -> Vec<CollabAgentStatusEntry> {
     let mut entries = statuses
       .iter()
@@ -857,7 +1237,7 @@ impl TeamRuntime {
           thread_id: thread_id.clone(),
           nickname: thread.as_ref().and_then(|info| info.nickname.clone()),
           role: thread.map(|info| info.role),
-          status: status.clone(),
+          state: status.clone(),
         }
       })
       .collect::<Vec<_>>();
@@ -891,12 +1271,339 @@ impl TeamRuntime {
       .cloned()
   }
 
+  fn root_wait_state(&self) -> CollabAgentWaitState {
+    let lifecycle = match self.agent_control.subscribe_status().borrow().clone() {
+      crate::agent::AgentStatus::PendingInit | crate::agent::AgentStatus::Initializing => {
+        CollabAgentLifecycle::PendingInit
+      }
+      crate::agent::AgentStatus::Ready => CollabAgentLifecycle::Ready,
+      crate::agent::AgentStatus::Busy => CollabAgentLifecycle::Busy,
+      crate::agent::AgentStatus::Error(_) => CollabAgentLifecycle::Error,
+      crate::agent::AgentStatus::Shutdown => CollabAgentLifecycle::Shutdown,
+    };
+    CollabAgentWaitState {
+      lifecycle,
+      turn_outcome: CollabTurnOutcome::NoneYet,
+      last_turn_summary: None,
+      attention_reason: None,
+      pending_wake_count: 0,
+    }
+  }
+
   fn note_task_claim(&self, task: TeamTask, claimer_thread_id: String) {
     self
       .run_state
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .note_task_claim(&task, &claimer_thread_id);
+  }
+
+  pub(crate) fn note_attention(&self, thread_id: &str, reason: impl Into<String>) {
+    if let Some(handle) = self.handle_for(thread_id) {
+      let reason = reason.into();
+      handle.update_state(|state| {
+        state.attention_reason = Some(reason.clone());
+      });
+      if let Some(thread_info) = self.find_thread_info(thread_id) {
+        let _ = self.root_tx_event.try_send(agent_state_changed_event(
+          &self.team_state,
+          Some(&thread_info),
+          thread_id,
+          &handle.state(),
+        ));
+      }
+    }
+  }
+
+  pub(crate) fn clear_attention(&self, thread_id: &str) {
+    if let Some(handle) = self.handle_for(thread_id) {
+      handle.update_state(|state| {
+        state.attention_reason = None;
+      });
+      if let Some(thread_info) = self.find_thread_info(thread_id) {
+        let _ = self.root_tx_event.try_send(agent_state_changed_event(
+          &self.team_state,
+          Some(&thread_info),
+          thread_id,
+          &handle.state(),
+        ));
+      }
+    }
+  }
+
+  fn task(&self, task_id: &str) -> Option<TeamTask> {
+    self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .task(task_id)
+  }
+
+  async fn schedule_turn(
+    &self,
+    agent_id: &str,
+    message: String,
+    reason: WakeReason,
+  ) -> anyhow::Result<()> {
+    let handle = self
+      .handle_for(agent_id)
+      .ok_or_else(|| anyhow::anyhow!("agent not found: {agent_id}"))?;
+    self.clear_attention(agent_id);
+    match handle.state().lifecycle {
+      CollabAgentLifecycle::Ready => {
+        handle.update_state(|state| {
+          state.scheduled_generation = state.scheduled_generation.saturating_add(1);
+          state.inflight_generation = state.scheduled_generation;
+          state.lifecycle = CollabAgentLifecycle::Busy;
+          state.turn_outcome = CollabTurnOutcome::NoneYet;
+        });
+        if let Err(err) = handle.send_turn_now(message).await {
+          let error = err.to_string();
+          handle.clear_wakes();
+          handle.update_state(|state| {
+            state.lifecycle = CollabAgentLifecycle::Error;
+            state.turn_outcome = CollabTurnOutcome::Errored;
+            state.last_turn_summary = Some(error.clone());
+            state.attention_reason = Some(error.clone());
+            state.settled_generation = state.scheduled_generation;
+          });
+          self.emit_agent_state_changed(agent_id).await;
+          return Err(err);
+        }
+      }
+      CollabAgentLifecycle::PendingInit | CollabAgentLifecycle::Busy => {
+        let queue_len = handle.enqueue_wake(WakeRequest { message, reason });
+        handle.update_state(|state| {
+          state.scheduled_generation = state.scheduled_generation.saturating_add(1);
+          state.pending_wake_count = queue_len;
+        });
+      }
+      CollabAgentLifecycle::Error => {
+        anyhow::bail!("agent {agent_id} is in an error state and cannot accept new work")
+      }
+      CollabAgentLifecycle::Shutdown | CollabAgentLifecycle::NotFound => {
+        anyhow::bail!("agent {agent_id} is not available")
+      }
+    }
+    self.emit_agent_state_changed(agent_id).await;
+    Ok(())
+  }
+
+  async fn nudge_task_participants(&self, task: &TeamTask) {
+    if matches!(
+      task.ready_state,
+      cokra_protocol::TeamTaskReadyState::Blocked
+    ) {
+      return;
+    }
+    if matches!(task.status, TeamTaskStatus::Review) {
+      if let Some(reviewer_thread_id) = task.reviewer_thread_id.as_deref() {
+        let reason = WakeReason::ReviewRequested {
+          task_id: task.id.clone(),
+        };
+        let _ = self
+          .schedule_turn(reviewer_thread_id, wake_message(&reason), reason)
+          .await;
+      }
+      return;
+    }
+
+    if let Some(assignee_thread_id) = task.assignee_thread_id.as_deref()
+      && !matches!(
+        task.status,
+        TeamTaskStatus::Completed | TeamTaskStatus::Failed | TeamTaskStatus::Canceled
+      )
+    {
+      let reason = WakeReason::TaskAssigned {
+        task_id: task.id.clone(),
+      };
+      let _ = self
+        .schedule_turn(assignee_thread_id, wake_message(&reason), reason)
+        .await;
+    }
+  }
+
+  async fn nudge_message_recipients(&self, message: &TeamMessage) {
+    if let Some(recipient_thread_id) = message.recipient_thread_id.as_deref() {
+      let reason = WakeReason::MailboxUnread;
+      let _ = self
+        .schedule_turn(recipient_thread_id, wake_message(&reason), reason)
+        .await;
+      return;
+    }
+
+    if matches!(
+      message.kind,
+      TeamMessageKind::Broadcast | TeamMessageKind::Channel
+    ) {
+      for agent_id in self.list_spawned_agent_ids() {
+        if agent_id == message.sender_thread_id.as_str() {
+          continue;
+        }
+        let reason = WakeReason::MailboxUnread;
+        let _ = self
+          .schedule_turn(&agent_id, wake_message(&reason), reason)
+          .await;
+      }
+    }
+  }
+
+  async fn emit_agent_state_changed(&self, thread_id: &str) {
+    let Some(handle) = self.handle_for(thread_id) else {
+      return;
+    };
+    let Some(thread) = self.find_thread_info(thread_id) else {
+      return;
+    };
+    let state = handle.state();
+    let (open_task_count, unread_count) = {
+      let team_state = self
+        .team_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      (
+        team_state.open_task_count_for_thread(thread_id),
+        team_state.unread_count_for(thread_id),
+      )
+    };
+    let _ = self
+      .root_tx_event
+      .send(EventMsg::CollabAgentStateChanged(
+        CollabAgentStateChangedEvent {
+          thread_id: thread_id.to_string(),
+          nickname: thread.nickname,
+          role: Some(thread.role),
+          lifecycle: state.lifecycle,
+          turn_outcome: state.turn_outcome,
+          last_turn_summary: state.last_turn_summary,
+          attention_reason: state.attention_reason,
+          pending_wake_count: state.pending_wake_count,
+          open_task_count,
+          unread_count,
+        },
+      ))
+      .await;
+  }
+
+  fn normalize_scope_requests(&self, scopes: Vec<ScopeRequest>) -> Vec<ScopeRequest> {
+    scopes
+      .into_iter()
+      .map(|scope| ScopeRequest {
+        kind: scope.kind.clone(),
+        path: self.normalize_scope_path(&scope.kind, &scope.path),
+        access: scope.access,
+        reason: scope.reason,
+      })
+      .collect()
+  }
+
+  fn validate_task_scope_policy(
+    &self,
+    primary_owner_thread_id: Option<&str>,
+    requested_scopes: &[ScopeRequest],
+    scope_policy_override: bool,
+  ) -> anyhow::Result<()> {
+    if scope_policy_override || !self.has_spawned_teammates() {
+      return Ok(());
+    }
+
+    let is_root_claim =
+      primary_owner_thread_id.is_none_or(|thread_id| self.is_root_thread(thread_id));
+    if !is_root_claim {
+      return Ok(());
+    }
+
+    if requested_scopes
+      .iter()
+      .any(|scope| self.is_repo_root_directory_write_scope(scope))
+    {
+      anyhow::bail!(
+        "@main cannot claim or stage a repo-root exclusive-write directory scope while teammates exist; assign the task to a teammate or set scope_policy_override=true"
+      );
+    }
+
+    Ok(())
+  }
+
+  fn validate_claim_scope_policy(
+    &self,
+    claimer_thread_id: &str,
+    task: &TeamTask,
+  ) -> anyhow::Result<()> {
+    self.validate_task_scope_policy(
+      Some(claimer_thread_id),
+      &task.requested_scopes,
+      task.scope_policy_override,
+    )
+  }
+
+  fn normalize_scope_path(&self, kind: &OwnershipScopeKind, path: &str) -> String {
+    if matches!(kind, OwnershipScopeKind::Module) {
+      return path.trim().to_string();
+    }
+    let path_buf = std::path::PathBuf::from(path);
+    let joined = if path_buf.is_absolute() {
+      path_buf
+    } else {
+      self.config.cwd.join(path_buf)
+    };
+    lexically_normalize_path(joined).display().to_string()
+  }
+
+  fn has_spawned_teammates(&self) -> bool {
+    self
+      .manager
+      .list_thread_ids()
+      .into_iter()
+      .any(|thread_id| thread_id != self.root_thread_id)
+  }
+
+  fn is_repo_root_directory_write_scope(&self, scope: &ScopeRequest) -> bool {
+    matches!(scope.kind, OwnershipScopeKind::Directory)
+      && matches!(scope.access, OwnershipAccessMode::ExclusiveWrite)
+      && scope.path == self.config.cwd.display().to_string()
+  }
+
+  fn active_lease_owner_ids(&self) -> HashSet<String> {
+    let mut active_thread_ids = HashSet::from([self.root_thread_id.to_string()]);
+    let handles = self
+      .handles
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (thread_id, handle) in handles.iter() {
+      if !matches!(
+        handle.state().lifecycle,
+        CollabAgentLifecycle::Shutdown | CollabAgentLifecycle::NotFound
+      ) {
+        active_thread_ids.insert(thread_id.clone());
+      }
+    }
+    active_thread_ids
+  }
+
+  fn maintain_leases_inline(&self) -> usize {
+    let active_thread_ids = self.active_lease_owner_ids();
+    let stale_before = Utc::now().timestamp() - LEASE_STALE_AFTER_SECS;
+    self
+      .team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .cleanup_stale_leases(&active_thread_ids, stale_before)
+      .len()
+  }
+
+  async fn maintain_leases(&self) {
+    if self.maintain_leases_inline() > 0 {
+      self.persist_team_state().await;
+    }
+  }
+
+  fn access_label(access: &OwnershipAccessMode) -> &'static str {
+    match access {
+      OwnershipAccessMode::SharedRead => "shared-read",
+      OwnershipAccessMode::ExclusiveWrite => "exclusive-write",
+      OwnershipAccessMode::Review => "review",
+    }
   }
 
   fn current_mailbox_version(&self) -> u64 {
@@ -1045,33 +1752,50 @@ impl TeamRuntime {
       .context("failed to start spawned agent")?;
 
     let (tx_cmd, mut rx_cmd) = mpsc::channel(CHILD_COMMAND_CHANNEL_CAPACITY);
-    let (status_tx, status_rx) = watch::channel(CollabAgentStatus::PendingInit);
+    let initial_state = ManagedAgentState {
+      lifecycle: CollabAgentLifecycle::Ready,
+      ..Default::default()
+    };
+    let (state_tx, state_rx) = watch::channel(initial_state);
     let handle = Arc::new(ManagedAgentHandle {
       thread_id: thread_id.clone(),
       session: session.clone(),
       tx_cmd: tx_cmd.clone(),
-      status_rx,
+      state_tx,
+      state_rx,
+      wake_queue: Arc::new(Mutex::new(VecDeque::new())),
     });
 
     self
       .handles
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .insert(thread_id.to_string(), handle);
+      .insert(thread_id.to_string(), handle.clone());
 
-    let root_tx_event_for_bg = self.root_tx_event.clone();
-    let nickname_display = thread_info
-      .as_ref()
-      .and_then(|info| info.nickname.clone())
-      .map(|value| value.trim().to_string())
-      .filter(|value| !value.is_empty())
-      .unwrap_or_else(|| "agent".to_string());
+    let root_tx_event_for_state = self.root_tx_event.clone();
+    let team_state_for_events = self.team_state.clone();
+    let handle_for_loop = handle.clone();
+    let thread_info_for_loop = thread_info.clone();
+    let thread_id_for_loop = thread_id.to_string();
+    let tx_cmd_loop = tx_cmd.clone();
 
     tokio::spawn(async move {
       while let Some(command) = rx_cmd.recv().await {
         match command {
           ChildCommand::UserTurn { message } => {
-            let _ = status_tx.send(CollabAgentStatus::Running);
+            handle_for_loop.update_state(|state| {
+              state.lifecycle = CollabAgentLifecycle::Busy;
+              state.attention_reason = None;
+              state.turn_outcome = CollabTurnOutcome::NoneYet;
+            });
+            let _ = root_tx_event_for_state
+              .send(agent_state_changed_event(
+                &team_state_for_events,
+                thread_info_for_loop.as_ref(),
+                &thread_id_for_loop,
+                &handle_for_loop.state(),
+              ))
+              .await;
             let turn = Turn {
               turn_id: Uuid::new_v4().to_string(),
               user_message: message,
@@ -1080,33 +1804,99 @@ impl TeamRuntime {
               Ok(result) => {
                 let has_output = !result.content.trim().is_empty();
                 let final_message = has_output.then_some(result.content);
-                let _ = status_tx.send(CollabAgentStatus::Completed(final_message));
-                let bg_msg = if has_output {
-                  format!("@{nickname_display} completed task")
-                } else {
-                  format!("@{nickname_display} completed (no output)")
-                };
-                let _ = root_tx_event_for_bg
-                  .send(EventMsg::BackgroundEvent(BackgroundEventEvent {
-                    message: bg_msg,
-                  }))
+                handle_for_loop.update_state(|state| {
+                  state.lifecycle = CollabAgentLifecycle::Ready;
+                  state.turn_outcome = CollabTurnOutcome::Succeeded;
+                  state.last_turn_summary = final_message.clone();
+                  state.attention_reason = None;
+                  state.settled_generation = state.inflight_generation;
+                });
+                let _ = root_tx_event_for_state
+                  .send(agent_state_changed_event(
+                    &team_state_for_events,
+                    thread_info_for_loop.as_ref(),
+                    &thread_id_for_loop,
+                    &handle_for_loop.state(),
+                  ))
                   .await;
+                if let Some(next_wake) = handle_for_loop.dequeue_wake() {
+                  handle_for_loop.update_state(|state| {
+                    state.lifecycle = CollabAgentLifecycle::Busy;
+                    state.inflight_generation = state.settled_generation.saturating_add(1);
+                    state.turn_outcome = CollabTurnOutcome::NoneYet;
+                  });
+                  let _ = root_tx_event_for_state
+                    .send(agent_state_changed_event(
+                      &team_state_for_events,
+                      thread_info_for_loop.as_ref(),
+                      &thread_id_for_loop,
+                      &handle_for_loop.state(),
+                    ))
+                    .await;
+                  if tx_cmd_loop
+                    .send(ChildCommand::UserTurn {
+                      message: next_wake.message,
+                    })
+                    .await
+                    .is_err()
+                  {
+                    handle_for_loop.clear_wakes();
+                    handle_for_loop.update_state(|state| {
+                      state.lifecycle = CollabAgentLifecycle::Error;
+                      state.turn_outcome = CollabTurnOutcome::Errored;
+                      state.last_turn_summary =
+                        Some("agent loop terminated while dispatching queued work".to_string());
+                      state.attention_reason =
+                        Some("agent loop terminated while dispatching queued work".to_string());
+                      state.settled_generation = state.scheduled_generation;
+                    });
+                    let _ = root_tx_event_for_state
+                      .send(agent_state_changed_event(
+                        &team_state_for_events,
+                        thread_info_for_loop.as_ref(),
+                        &thread_id_for_loop,
+                        &handle_for_loop.state(),
+                      ))
+                      .await;
+                  }
+                }
               }
               Err(err) => {
                 let err = err.to_string();
-                let _ = status_tx.send(CollabAgentStatus::Errored(err.clone()));
-                let bg_msg = format!("@{nickname_display} errored: {err}");
-                let _ = root_tx_event_for_bg
-                  .send(EventMsg::BackgroundEvent(BackgroundEventEvent {
-                    message: bg_msg,
-                  }))
+                handle_for_loop.clear_wakes();
+                handle_for_loop.update_state(|state| {
+                  state.lifecycle = CollabAgentLifecycle::Error;
+                  state.turn_outcome = CollabTurnOutcome::Errored;
+                  state.last_turn_summary = Some(err.clone());
+                  state.attention_reason = Some(err.clone());
+                  state.settled_generation = state.scheduled_generation;
+                });
+                let _ = root_tx_event_for_state
+                  .send(agent_state_changed_event(
+                    &team_state_for_events,
+                    thread_info_for_loop.as_ref(),
+                    &thread_id_for_loop,
+                    &handle_for_loop.state(),
+                  ))
                   .await;
               }
             }
           }
           ChildCommand::Shutdown => {
             let _ = agent_control.stop().await;
-            let _ = status_tx.send(CollabAgentStatus::Shutdown);
+            handle_for_loop.update_state(|state| {
+              state.lifecycle = CollabAgentLifecycle::Shutdown;
+              state.pending_wake_count = 0;
+              state.attention_reason = None;
+            });
+            let _ = root_tx_event_for_state
+              .send(agent_state_changed_event(
+                &team_state_for_events,
+                thread_info_for_loop.as_ref(),
+                &thread_id_for_loop,
+                &handle_for_loop.state(),
+              ))
+              .await;
             break;
           }
         }
@@ -1116,6 +1906,14 @@ impl TeamRuntime {
       let _ = session.shutdown().await;
     });
 
+    handle.update_state(|state| {
+      state.scheduled_generation = 1;
+      state.inflight_generation = 1;
+      state.lifecycle = CollabAgentLifecycle::Busy;
+      state.turn_outcome = CollabTurnOutcome::NoneYet;
+    });
+    let thread_id_string = thread_id.to_string();
+    self.emit_agent_state_changed(&thread_id_string).await;
     tx_cmd
       .send(ChildCommand::UserTurn {
         message: initial_message,
@@ -1125,6 +1923,63 @@ impl TeamRuntime {
 
     Ok(())
   }
+}
+
+fn wake_message(reason: &WakeReason) -> String {
+  match reason {
+    WakeReason::UserInput => {
+      "You have new coordinator input. Process it now and continue the team workflow."
+        .to_string()
+    }
+    WakeReason::TaskAssigned { task_id } => {
+      format!(
+        "You have a newly assigned team task ({task_id}). Check team_status, claim it if ready, and continue."
+      )
+    }
+    WakeReason::TaskHandedOff { task_id } => {
+      format!(
+        "A team task ({task_id}) was handed off to you. Check team_status, claim or continue it, and report progress through team tools."
+      )
+    }
+    WakeReason::ReviewRequested { task_id } => {
+      format!(
+        "A review task ({task_id}) is waiting for you. Check team_status, review the handoff, and record the result."
+      )
+    }
+    WakeReason::MailboxUnread => {
+      "You have unread team mailbox messages. Read your team messages and act on any newly assigned work."
+        .to_string()
+    }
+  }
+}
+
+fn agent_state_changed_event(
+  team_state: &Arc<Mutex<TeamState>>,
+  thread_info: Option<&ThreadInfo>,
+  thread_id: &str,
+  state: &ManagedAgentState,
+) -> EventMsg {
+  let (open_task_count, unread_count) = {
+    let team_state = team_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (
+      team_state.open_task_count_for_thread(thread_id),
+      team_state.unread_count_for(thread_id),
+    )
+  };
+  EventMsg::CollabAgentStateChanged(CollabAgentStateChangedEvent {
+    thread_id: thread_id.to_string(),
+    nickname: thread_info.and_then(|info| info.nickname.clone()),
+    role: thread_info.map(|info| info.role.clone()),
+    lifecycle: state.lifecycle.clone(),
+    turn_outcome: state.turn_outcome.clone(),
+    last_turn_summary: state.last_turn_summary.clone(),
+    attention_reason: state.attention_reason.clone(),
+    pending_wake_count: state.pending_wake_count,
+    open_task_count,
+    unread_count,
+  })
 }
 
 fn build_spawned_agent_system_prompt(base: &str, nickname: Option<&str>, role: &str) -> String {

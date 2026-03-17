@@ -43,7 +43,9 @@ impl ToolHandler for AckTeamMessageHandler {
       })?;
 
     let out = ToolOutput::success(serde_json::to_string(&message).map_err(|err| {
-      FunctionCallError::Fatal(format!("failed to serialize acknowledged team message: {err}"))
+      FunctionCallError::Fatal(format!(
+        "failed to serialize acknowledged team message: {err}"
+      ))
     })?);
     Ok(out.with_id(invocation.id))
   }

@@ -27,7 +27,7 @@ use crate::exec_cell::new_active_exec_command;
 use crate::render::renderable::Renderable;
 use crate::status_indicator_widget::fmt_elapsed_compact;
 use crate::style::user_message_style;
-use crate::ui_consts::LIVE_PREFIX_COLS;
+use crate::terminal_palette::agent_accent;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_lines;
 
@@ -263,6 +263,117 @@ impl UserHistoryCell {
   }
 }
 
+fn render_prefixed_message_lines(
+  width: u16,
+  message: &str,
+  text_elements: &[TextElement],
+  remote_image_urls: &[String],
+  initial_prefix: Line<'static>,
+  subsequent_prefix: Line<'static>,
+  style: Style,
+  element_style: Style,
+) -> Vec<Line<'static>> {
+  let prefix_cols = initial_prefix.width().max(subsequent_prefix.width()) as u16;
+  let wrap_width = width.saturating_sub(prefix_cols.saturating_add(1)).max(1);
+
+  let wrapped_remote_images = if remote_image_urls.is_empty() {
+    None
+  } else {
+    Some(word_wrap_lines(
+      remote_image_urls
+        .iter()
+        .enumerate()
+        .map(|(idx, _url)| Line::from(format!("[image {}]", idx + 1)).style(element_style)),
+      RtOptions::new(wrap_width as usize),
+    ))
+  };
+
+  let wrapped_message = if message.is_empty() && text_elements.is_empty() {
+    None
+  } else if text_elements.is_empty() {
+    let msg = message.trim_end_matches(['\r', '\n']);
+    let wrapped = word_wrap_lines(
+      msg
+        .split('\n')
+        .map(|line| Line::from(line.to_string()).style(style)),
+      RtOptions::new(wrap_width as usize),
+    );
+    let wrapped = trim_trailing_blank_lines(wrapped);
+    (!wrapped.is_empty()).then_some(wrapped)
+  } else {
+    let raw_lines =
+      build_user_message_lines_with_elements(message, text_elements, style, element_style);
+    let wrapped = word_wrap_lines(raw_lines, RtOptions::new(wrap_width as usize));
+    let wrapped = trim_trailing_blank_lines(wrapped);
+    (!wrapped.is_empty()).then_some(wrapped)
+  };
+
+  if wrapped_remote_images.is_none() && wrapped_message.is_none() {
+    return Vec::new();
+  }
+
+  let mut out: Vec<Line<'static>> = Vec::new();
+  if let Some(imgs) = wrapped_remote_images {
+    out.extend(prefix_lines(
+      imgs,
+      subsequent_prefix.clone(),
+      subsequent_prefix.clone(),
+    ));
+  }
+  if let Some(msg) = wrapped_message {
+    if !out.is_empty() {
+      out.push(Line::from("").style(style));
+    }
+    out.extend(prefix_lines(msg, initial_prefix, subsequent_prefix));
+  }
+  out
+}
+
+#[derive(Debug)]
+pub(crate) struct PeerMailboxHistoryCell {
+  sender_label: String,
+  sender_thread_id: String,
+  message: String,
+}
+
+impl PeerMailboxHistoryCell {
+  pub(crate) fn new(sender_label: String, sender_thread_id: String, message: String) -> Self {
+    Self {
+      sender_label,
+      sender_thread_id,
+      message,
+    }
+  }
+}
+
+#[derive(Debug)]
+pub(crate) struct CollabSummaryHistoryCell {
+  lines: Vec<Line<'static>>,
+}
+
+impl CollabSummaryHistoryCell {
+  pub(crate) fn from_plain_lines(lines: Vec<String>) -> Self {
+    Self {
+      lines: lines
+        .into_iter()
+        .enumerate()
+        .map(|(idx, line)| {
+          if idx == 0 && line.contains("Agent Teams Done") {
+            return Line::from(vec!["✓ ".green(), "Agent Teams Done".green().bold()]);
+          }
+          if idx == 0 && line.contains("Agent Teams Attention") {
+            return Line::from(vec!["! ".yellow(), "Agent Teams Attention".yellow().bold()]);
+          }
+          if idx == 0 && line == "Agent teams working..." {
+            return Line::from("Agent teams working...".bold());
+          }
+          Line::from(line)
+        })
+        .collect(),
+    }
+  }
+}
+
 /// 1:1 codex: Build logical lines for a user message with styled text elements.
 ///
 /// Preserves explicit newlines while interleaving element spans; skips
@@ -336,19 +447,20 @@ fn trim_trailing_blank_lines(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>
 /// 1:1 codex: prefix_lines adds a gutter prefix to each line.
 fn prefix_lines(
   lines: Vec<Line<'static>>,
-  first_prefix: Span<'static>,
-  continuation_prefix: Span<'static>,
+  first_prefix: Line<'static>,
+  continuation_prefix: Line<'static>,
 ) -> Vec<Line<'static>> {
   lines
     .into_iter()
     .enumerate()
     .map(|(i, mut line)| {
-      let prefix = if i == 0 {
+      let mut prefix = if i == 0 {
         first_prefix.clone()
       } else {
         continuation_prefix.clone()
       };
-      line.spans.insert(0, prefix);
+      prefix.spans.append(&mut line.spans);
+      line.spans = prefix.spans;
       line
     })
     .collect()
@@ -369,7 +481,11 @@ fn wrap_with_prefix(
     .into_iter()
     .map(|segment| Line::from(Span::styled(segment.to_string(), style)))
     .collect::<Vec<_>>();
-  prefix_lines(lines, initial_prefix, subsequent_prefix)
+  prefix_lines(
+    lines,
+    Line::from(initial_prefix),
+    Line::from(subsequent_prefix),
+  )
 }
 
 fn split_request_user_input_answer(
@@ -449,71 +565,18 @@ fn fill_user_message_bar_lines_with_gutter(
 
 impl HistoryCell for UserHistoryCell {
   fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-    let wrap_width = width
-      .saturating_sub(
-        LIVE_PREFIX_COLS + 1, /* keep a one-column right margin for wrapping */
-      )
-      .max(1);
-
     let style = user_message_style();
     let element_style = style.fg(Color::Cyan);
-
-    let wrapped_remote_images = if self.remote_image_urls.is_empty() {
-      None
-    } else {
-      Some(word_wrap_lines(
-        self
-          .remote_image_urls
-          .iter()
-          .enumerate()
-          .map(|(idx, _url)| Line::from(format!("[image {}]", idx + 1)).style(element_style)),
-        RtOptions::new(wrap_width as usize),
-      ))
-    };
-
-    let wrapped_message = if self.message.is_empty() && self.text_elements.is_empty() {
-      None
-    } else if self.text_elements.is_empty() {
-      let msg = self.message.trim_end_matches(['\r', '\n']);
-      let wrapped = word_wrap_lines(
-        msg
-          .split('\n')
-          .map(|line| Line::from(line.to_string()).style(style)),
-        RtOptions::new(wrap_width as usize),
-      );
-      let wrapped = trim_trailing_blank_lines(wrapped);
-      (!wrapped.is_empty()).then_some(wrapped)
-    } else {
-      let raw_lines = build_user_message_lines_with_elements(
-        &self.message,
-        &self.text_elements,
-        style,
-        element_style,
-      );
-      let wrapped = word_wrap_lines(raw_lines, RtOptions::new(wrap_width as usize));
-      let wrapped = trim_trailing_blank_lines(wrapped);
-      (!wrapped.is_empty()).then_some(wrapped)
-    };
-
-    if wrapped_remote_images.is_none() && wrapped_message.is_none() {
-      return Vec::new();
-    }
-
-    // Match Codex's simpler, more robust submitted-message rendering. The
-    // previous full-width filled-bar path looked nice in screenshots, but in
-    // inline scrollback it could corrupt long mixed CJK/ASCII messages because
-    // we padded and re-truncated already wrapped lines before terminal insertion.
-    let mut out: Vec<Line<'static>> = Vec::new();
-    if let Some(imgs) = wrapped_remote_images {
-      out.extend(prefix_lines(imgs, "  ".into(), "  ".into()));
-    }
-    if let Some(msg) = wrapped_message {
-      if !out.is_empty() {
-        out.push(Line::from("").style(style));
-      }
-      out.extend(prefix_lines(msg, "> ".bold().dim(), "  ".into()));
-    }
-    out
+    render_prefixed_message_lines(
+      width,
+      &self.message,
+      &self.text_elements,
+      &self.remote_image_urls,
+      "> ".bold().dim().into(),
+      "  ".into(),
+      style,
+      element_style,
+    )
   }
 
   fn desired_height(&self, width: u16) -> u16 {
@@ -522,6 +585,35 @@ impl HistoryCell for UserHistoryCell {
       .len()
       .try_into()
       .unwrap_or(u16::MAX)
+  }
+}
+
+impl HistoryCell for PeerMailboxHistoryCell {
+  fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    let style = user_message_style();
+    let prefix_text = format!("{} > ", self.sender_label);
+    let prefix = Line::from(
+      Span::from(prefix_text)
+        .fg(agent_accent(&self.sender_thread_id))
+        .bold(),
+    );
+    let continuation = Line::from(" ".repeat(prefix.width()));
+    render_prefixed_message_lines(
+      width,
+      &self.message,
+      &[],
+      &[],
+      prefix,
+      continuation,
+      style,
+      style.fg(Color::Cyan),
+    )
+  }
+}
+
+impl HistoryCell for CollabSummaryHistoryCell {
+  fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    AgentMessageCell::new(self.lines.clone(), true).display_lines(width)
   }
 }
 
@@ -785,8 +877,8 @@ impl HistoryCell for CollabWaitStatusTreeCell {
           "No completed statuses yet".to_string(),
           dim,
         ))],
-        Span::styled("   └─ ".to_string(), dim),
-        Span::styled("      ".to_string(), dim),
+        Line::from(Span::styled("   └─ ".to_string(), dim)),
+        Line::from(Span::styled("      ".to_string(), dim)),
       ));
       return lines;
     }
@@ -803,8 +895,8 @@ impl HistoryCell for CollabWaitStatusTreeCell {
 
       lines.extend(prefix_lines(
         vec![entry.label.clone()],
-        Span::styled(branch_prefix.to_string(), dim),
-        Span::styled(branch_prefix.to_string(), dim),
+        Line::from(Span::styled(branch_prefix.to_string(), dim)),
+        Line::from(Span::styled(branch_prefix.to_string(), dim)),
       ));
       lines.extend(word_wrap_lines(
         vec![entry.summary.clone()],
@@ -1045,39 +1137,69 @@ impl TodoUpdateCell {
 }
 
 impl HistoryCell for TodoUpdateCell {
-  fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+  fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+    use crate::bottom_pane::selection_popup_common::truncate_line_to_width;
     use cokra_protocol::TodoItemStatus;
 
+    let width = width.max(1) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Header: `• Todo` (Codex "• Updated Plan" pattern)
-    lines.push(vec!["• ".dim(), "Todo".bold()].into());
-
     if self.todos.is_empty() {
-      lines.push(Line::from("  (empty)".dim().italic()));
+      lines.push(truncate_line_to_width(
+        Line::from(vec!["● ".dim(), "Todo".bold(), " (empty)".dim()]),
+        width,
+      ));
       return lines;
     }
 
-    // Summary: `  N tasks (M done, K open)` (Claude Code pattern)
     let done = self
       .todos
       .iter()
       .filter(|t| t.status == TodoItemStatus::Completed)
       .count();
     let open = self.todos.len() - done;
-    lines.push(Line::from(
-      format!(
-        "  {} tasks ({} done, {} open)",
-        self.todos.len(),
-        done,
-        open
-      )
-      .dim()
-      .italic(),
-    ));
 
-    // Items with checkbox icons (OpenCode + Codex fusion)
-    for item in &self.todos {
+    // Header: include current task name when available, or "(all done)".
+    if done == self.todos.len() {
+      lines.push(truncate_line_to_width(
+        Line::from(vec![
+          Span::from("✓ ").green(),
+          Span::from("Todo").green().bold(),
+          Span::from(" (all done)").green().dim(),
+        ]),
+        width,
+      ));
+    } else {
+      let current = self
+        .todos
+        .iter()
+        .find(|t| t.status == TodoItemStatus::InProgress)
+        .or_else(|| {
+          self
+            .todos
+            .iter()
+            .find(|t| t.status == TodoItemStatus::Pending)
+        });
+      let mut header = vec![Span::from("● ").dim()];
+      if let Some(task) = current {
+        // Truncate long task names to keep header on one line.
+        let max_name = 40usize.min(width.saturating_sub(24));
+        let name = &task.content;
+        let truncated = if name.chars().count() > max_name {
+          format!("{}...", name.chars().take(max_name).collect::<String>())
+        } else {
+          name.clone()
+        };
+        header.push(Span::from(format!("Todo-{truncated}")).bold());
+      } else {
+        header.push(Span::from("Todo").bold());
+      }
+      header.push(Span::from(format!(" ({done} done, {open} open)")).dim());
+      lines.push(truncate_line_to_width(Line::from(header), width));
+    }
+
+    // Items: first uses ⎿ prefix for tree-branch visual.
+    for (i, item) in self.todos.iter().enumerate() {
       let (icon, item_style) = match item.status {
         TodoItemStatus::InProgress => (
           "[•] ",
@@ -1088,23 +1210,106 @@ impl HistoryCell for TodoUpdateCell {
         TodoItemStatus::Pending => ("[ ] ", Style::default().dim()),
         TodoItemStatus::Completed => (
           "[✓] ",
-          Style::default().dim().add_modifier(Modifier::CROSSED_OUT),
+          Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::CROSSED_OUT),
         ),
         TodoItemStatus::Cancelled => (
           "[✗] ",
-          Style::default().dim().add_modifier(Modifier::CROSSED_OUT),
+          Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::CROSSED_OUT),
         ),
       };
 
-      let content = &item.content;
-      lines.push(Line::from(vec![
-        Span::styled(format!("  {icon}"), item_style),
-        Span::styled(content.clone(), item_style),
-      ]));
+      let prefix = if i == 0 { "⎿" } else { " " };
+      let wrapped = wrap_with_prefix(
+        &item.content,
+        width,
+        Span::styled(format!("{prefix}{icon}"), item_style),
+        Span::styled("     ".to_string(), item_style),
+        item_style,
+      );
+      lines.extend(wrapped);
     }
 
     lines
   }
+}
+
+impl Renderable for TodoUpdateCell {
+  fn render(&self, area: Rect, buf: &mut Buffer) {
+    let lines = self.display_lines(area.width);
+    let y = if area.height == 0 {
+      0
+    } else {
+      let overflow = lines.len().saturating_sub(usize::from(area.height));
+      u16::try_from(overflow).unwrap_or(u16::MAX)
+    };
+    Paragraph::new(Text::from(lines))
+      .scroll((y, 0))
+      .render(area, buf);
+  }
+
+  fn desired_height(&self, width: u16) -> u16 {
+    HistoryCell::desired_height(self, width)
+  }
+}
+
+// ── Border Utility ──────────────────────────────────────────────────────────
+// 1:1 codex: Wraps lines in a Unicode box-drawing border (╭╮╰╯).
+
+/// Wrap `lines` in a bordered box where the inner width matches the widest
+/// content line. Callers that have already clamped content to a known width
+/// can use this variant to avoid re-measuring.
+pub(crate) fn with_border_with_inner_width(
+  lines: Vec<Line<'static>>,
+  inner_width: usize,
+) -> Vec<Line<'static>> {
+  with_border_internal(lines, Some(inner_width))
+}
+
+fn with_border_internal(
+  lines: Vec<Line<'static>>,
+  forced_inner_width: Option<usize>,
+) -> Vec<Line<'static>> {
+  let max_line_width = lines
+    .iter()
+    .map(|line| {
+      line
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum::<usize>()
+    })
+    .max()
+    .unwrap_or(0);
+  let content_width = forced_inner_width
+    .unwrap_or(max_line_width)
+    .max(max_line_width);
+
+  let mut out = Vec::with_capacity(lines.len() + 2);
+  let border_inner_width = content_width + 2;
+  out.push(vec![format!("╭{}╮", "─".repeat(border_inner_width)).dim()].into());
+
+  for line in lines.into_iter() {
+    let used_width: usize = line
+      .iter()
+      .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+      .sum();
+    let span_count = line.spans.len();
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(span_count + 4);
+    spans.push(Span::from("│ ").dim());
+    spans.extend(line.into_iter());
+    if used_width < content_width {
+      spans.push(Span::from(" ".repeat(content_width - used_width)).dim());
+    }
+    spans.push(Span::from(" │").dim());
+    out.push(Line::from(spans));
+  }
+
+  out.push(vec![format!("╰{}╯", "─".repeat(border_inner_width)).dim()].into());
+
+  out
 }
 
 #[cfg(test)]
@@ -1362,6 +1567,54 @@ mod tests {
   }
 
   #[test]
+  fn peer_mailbox_history_cell_renders_sender_prefix() {
+    let cell = PeerMailboxHistoryCell::new(
+      "@main".to_string(),
+      "root-thread".to_string(),
+      "Please review the latest task handoff.".to_string(),
+    );
+
+    let rendered = lines_to_string(&cell.display_lines(80));
+    assert!(rendered.contains("@main > Please review the latest task handoff."));
+  }
+
+  #[test]
+  fn peer_mailbox_history_cell_wraps_within_viewport_width() {
+    let sender_label = "@reviewer-team";
+    let cell = PeerMailboxHistoryCell::new(
+      sender_label.to_string(),
+      "review-thread".to_string(),
+      "This is a longer teammate message that confirms mailbox bubbles still wrap correctly in a narrow viewport without overflowing when the sender prefix is wider than the default user prompt."
+        .to_string(),
+    );
+
+    let lines = cell.display_lines(28);
+    assert!(!lines.is_empty());
+    assert!(
+      lines.iter().all(|line| line.width() <= 28),
+      "rendered lines exceeded viewport width: {:?}",
+      lines
+    );
+    assert!(
+      lines_to_string(&lines).contains(&format!("{sender_label} >")),
+      "expected peer mailbox prefix to remain visible"
+    );
+  }
+
+  #[test]
+  fn collab_summary_history_cell_restyles_terminal_headers() {
+    let cell = CollabSummaryHistoryCell::from_plain_lines(vec![
+      "✓ Agent Teams Done".to_string(),
+      " └─ @reviewer [general]".to_string(),
+      "    ⎿ idle".to_string(),
+    ]);
+
+    let rendered = lines_to_string(&cell.display_lines(80));
+    assert!(rendered.contains("✓ Agent Teams Done"));
+    assert!(rendered.contains("@reviewer [general]"));
+  }
+
+  #[test]
   fn exploring_exec_cell_keeps_header_visible_when_inline_height_is_tight() {
     let cell: Box<dyn HistoryCell> = Box::new(new_active_exec_command(
       "call-1".to_string(),
@@ -1426,9 +1679,21 @@ mod tests {
       ),
     ]);
     let rendered = lines_to_string(&cell.display_lines(80));
-    assert!(rendered.contains("3 tasks"));
     assert!(rendered.contains("1 done"));
     assert!(rendered.contains("2 open"));
+    // Header includes the current in-progress task name
+    assert!(rendered.contains("Todo-Active task"));
+  }
+
+  #[test]
+  fn todo_update_cell_renders_all_done() {
+    let cell = TodoUpdateCell::new(vec![
+      make_todo("1", "First", cokra_protocol::TodoItemStatus::Completed),
+      make_todo("2", "Second", cokra_protocol::TodoItemStatus::Completed),
+    ]);
+    let rendered = lines_to_string(&cell.display_lines(80));
+    assert!(rendered.contains("all done"));
+    assert!(rendered.contains("✓"));
   }
 
   #[test]
@@ -1456,5 +1721,24 @@ mod tests {
     assert!(rendered.contains("active item"));
     assert!(rendered.contains("done item"));
     assert!(rendered.contains("cancelled item"));
+  }
+
+  #[test]
+  fn todo_update_cell_wraps_long_items_with_alignment() {
+    let cell = TodoUpdateCell::new(vec![make_todo(
+      "1",
+      "这是一个很长很长的待办事项，用来验证在窄宽度下也会换行，而且后续行还能和正文对齐。",
+      cokra_protocol::TodoItemStatus::InProgress,
+    )]);
+
+    let lines = cell.display_lines(24);
+    assert!(
+      lines.iter().all(|line| line.width() <= 24),
+      "todo lines should stay within viewport width: {:?}",
+      lines
+    );
+    let rendered = lines_to_string(&lines);
+    assert!(rendered.contains("["));
+    assert!(rendered.contains("待办事项"));
   }
 }

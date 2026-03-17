@@ -130,6 +130,27 @@ fn classify_mutation(command: &[String]) -> CommandMutationClass {
     return CommandMutationClass::Unknown;
   };
 
+  if cmd0 == "sed"
+    && command
+      .iter()
+      .skip(1)
+      .any(|arg| arg == "-i" || arg.starts_with("-i"))
+  {
+    return CommandMutationClass::WritesFiles;
+  }
+
+  if cmd0 == "patch" {
+    return CommandMutationClass::WritesFiles;
+  }
+
+  if cmd0 == "git" {
+    return match command.get(1).map(String::as_str) {
+      Some("apply" | "checkout" | "restore" | "mv") => CommandMutationClass::WritesFiles,
+      Some("rm") => CommandMutationClass::Destructive,
+      _ => CommandMutationClass::Unknown,
+    };
+  }
+
   match cmd0 {
     "cat" | "cd" | "echo" | "find" | "grep" | "head" | "ls" | "nl" | "pwd" | "rg" | "sed"
     | "tail" | "wc" => CommandMutationClass::ReadOnly,
@@ -144,6 +165,58 @@ fn collect_path_intents(command: &[String], cwd: &Path) -> Vec<PathIntent> {
   let Some(cmd0) = command.first().map(|value| basename(value)) else {
     return Vec::new();
   };
+
+  if cmd0 == "git"
+    && let Some(subcommand) = command.get(1).map(String::as_str)
+    && matches!(subcommand, "rm" | "mv" | "checkout" | "restore")
+  {
+    let path_start = if matches!(subcommand, "checkout" | "restore") {
+      command
+        .iter()
+        .position(|arg| arg == "--")
+        .map(|idx| idx + 1)
+        .unwrap_or(command.len())
+    } else {
+      2
+    };
+    return command
+      .iter()
+      .skip(path_start)
+      .filter(|arg| !arg.starts_with('-'))
+      .map(|arg| {
+        let normalized = normalize_path(arg, cwd);
+        let external_to_cwd = !normalized.starts_with(cwd);
+        PathIntent {
+          operation: subcommand.to_string(),
+          path: normalized.display().to_string(),
+          external_to_cwd,
+        }
+      })
+      .collect();
+  }
+
+  if cmd0 == "sed"
+    && command
+      .iter()
+      .skip(1)
+      .any(|arg| arg == "-i" || arg.starts_with("-i"))
+  {
+    return command
+      .iter()
+      .skip(2)
+      .filter(|arg| !arg.starts_with('-'))
+      .skip(1)
+      .map(|arg| {
+        let normalized = normalize_path(arg, cwd);
+        let external_to_cwd = !normalized.starts_with(cwd);
+        PathIntent {
+          operation: "sed".to_string(),
+          path: normalized.display().to_string(),
+          external_to_cwd,
+        }
+      })
+      .collect();
+  }
 
   let mut start_idx = 1usize;
   if matches!(cmd0, "chmod" | "chown" | "chgrp") {

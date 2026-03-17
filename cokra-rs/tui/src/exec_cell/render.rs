@@ -20,8 +20,6 @@ use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
 use crate::wrapping::word_wrap_lines;
 
-pub(crate) const TOOL_CALL_MAX_LINES: usize = 5;
-const SHELL_TOOL_CALL_MAX_LINES: usize = 2;
 const EXPLORING_SUMMARY_MAX_ITEMS: usize = 3;
 const EXPLORING_LIVE_MAX_HEIGHT: u16 = 6;
 
@@ -152,6 +150,25 @@ fn format_duration_human(duration: Duration) -> String {
   format!("{hours}h {rem_mins:02}m {rem:02}s")
 }
 
+fn is_compact_tool_call(tool_name: &str) -> bool {
+  matches!(tool_name, "todo_write")
+}
+
+/// Tools whose visual representation is fully managed by a dedicated active
+/// widget in the viewport. These tools should not create ExecCell entries —
+/// their begin/end events are silently consumed. Currently:
+/// - `todo_write` → managed by the `active_todo` live widget.
+pub(crate) fn is_ui_handled_tool(tool_name: &str) -> bool {
+  matches!(tool_name, "todo_write")
+}
+
+/// Returns true for tools whose output body should be collapsed in the
+/// scrollback display. Only `shell` keeps full output visible; all other
+/// non-compact, non-exploring tools show just the header + command summary.
+fn is_collapsed_output_call(tool_name: &str) -> bool {
+  tool_name != "shell"
+}
+
 impl HistoryCell for ExecCell {
   fn is_stream_continuation(&self) -> bool {
     self.is_continuation
@@ -197,6 +214,10 @@ impl HistoryCell for ExecCell {
       }
       lines.push(header);
 
+      if is_compact_tool_call(&call.tool_name) {
+        continue;
+      }
+
       // Shell tool: render command with "$ " prefix and bash highlighting.
       // Non-shell tools: render the command/args with "› " prefix, no bash highlighting.
       if call.tool_name == "shell" {
@@ -219,23 +240,39 @@ impl HistoryCell for ExecCell {
         lines.extend(wrapped_cmd);
       }
 
-      let line_limit = if call.tool_name == "shell" {
-        SHELL_TOOL_CALL_MAX_LINES
+      // Collapsed output: non-shell tools only show header + command, no
+      // output body. Shell keeps full output for user visibility.
+      if is_collapsed_output_call(&call.tool_name) {
+        // Show only stderr/error output for failed non-shell calls so users
+        // can still see why a tool failed.
+        if call
+          .output
+          .as_ref()
+          .is_some_and(|output| output.exit_code != 0)
+        {
+          let rendered = output_lines(
+            call.output.as_ref(),
+            OutputLinesParams {
+              line_limit: 5,
+              only_err: false,
+              include_angle_pipe: true,
+              include_prefix: true,
+            },
+          );
+          lines.extend(rendered.lines);
+        }
       } else {
-        TOOL_CALL_MAX_LINES
-      };
-      let rendered = output_lines(
-        call.output.as_ref(),
-        OutputLinesParams {
-          line_limit,
-          only_err: false,
-          include_angle_pipe: true,
-          include_prefix: true,
-        },
-      );
-      lines.extend(rendered.lines);
-
-      // 1:1 codex: Don't show trailing "✓ • Xs" - redundant and not in codex
+        let rendered = output_lines(
+          call.output.as_ref(),
+          OutputLinesParams {
+            line_limit: usize::MAX / 4,
+            only_err: false,
+            include_angle_pipe: true,
+            include_prefix: true,
+          },
+        );
+        lines.extend(rendered.lines);
+      }
     }
 
     lines
@@ -250,6 +287,35 @@ impl HistoryCell for ExecCell {
     for (idx, call) in self.iter_calls().enumerate() {
       if idx > 0 {
         lines.push(Line::from(""));
+      }
+
+      if is_compact_tool_call(&call.tool_name) {
+        let (icon, status_text, duration_ms): (Span<'static>, &str, Option<u128>) =
+          match (&call.output, call.duration) {
+            (Some(output), Some(dur)) => {
+              let ms = dur.as_millis();
+              if output.exit_code == 0 {
+                ("✓".green().bold(), "", Some(ms))
+              } else {
+                ("✗".red().bold(), "", Some(ms))
+              }
+            }
+            _ => {
+              let mut s = crate::exec_cell::spinner(call.start_time, self.animations_enabled());
+              s.content = format!("{} ", s.content).into();
+              (s, "Running", None)
+            }
+          };
+        let mut header = Line::from(vec![icon]);
+        header.push_span(call.tool_name.clone().bold());
+        if !status_text.is_empty() {
+          header.push_span(format!(" {status_text}").dim());
+        }
+        if let Some(ms) = duration_ms {
+          header.push_span(format!(" ({ms}ms)").dim());
+        }
+        lines.push(header);
+        continue;
       }
 
       if call.tool_name == "shell" {
@@ -272,7 +338,23 @@ impl HistoryCell for ExecCell {
         lines.extend(wrapped_cmd);
       }
 
-      if let Some(output) = call.output.as_ref() {
+      // Collapsed output in transcript: non-shell tools skip output body.
+      // Shell keeps full transcript. Failed non-shell tools show truncated error.
+      if is_collapsed_output_call(&call.tool_name) {
+        if call
+          .output
+          .as_ref()
+          .is_some_and(|output| output.exit_code != 0)
+        {
+          if let Some(output) = call.output.as_ref() {
+            for raw in output.output.lines().take(5) {
+              let line = Line::from(raw.to_string());
+              let wrapped = word_wrap_line(&line, RtOptions::new(width.max(1) as usize));
+              push_owned_lines(&wrapped, &mut lines);
+            }
+          }
+        }
+      } else if let Some(output) = call.output.as_ref() {
         for raw in output.output.lines() {
           let line = Line::from(raw.to_string());
           let wrapped = word_wrap_line(&line, RtOptions::new(width.max(1) as usize));
@@ -532,6 +614,22 @@ mod tests {
     }
   }
 
+  fn completed_todo_write_call() -> ExecCall {
+    ExecCall {
+      command_id: "call-4".to_string(),
+      tool_name: "todo_write".to_string(),
+      command: "todo_write".to_string(),
+      cwd: PathBuf::from("/home/user/project"),
+      output: Some(CommandOutput {
+        exit_code: 0,
+        output: "[{\"id\":\"1\",\"content\":\"ship ui cleanup\",\"status\":\"completed\"}]"
+          .to_string(),
+      }),
+      start_time: None,
+      duration: Some(Duration::from_millis(9)),
+    }
+  }
+
   #[test]
   fn snapshot_shell_tool_completed() {
     let cell = ExecCell::new(completed_shell_call(), false);
@@ -585,7 +683,32 @@ mod tests {
   }
 
   #[test]
-  fn shell_output_uses_compact_preview_limit() {
+  fn todo_write_display_is_compact() {
+    let cell = ExecCell::new(completed_todo_write_call(), false);
+    let rendered = cell
+      .display_lines(80)
+      .iter()
+      .map(Line::to_string)
+      .collect::<Vec<_>>();
+
+    assert_eq!(rendered, vec!["✓ todo_write (9ms)".to_string()]);
+  }
+
+  #[test]
+  fn todo_write_transcript_is_compact() {
+    let cell = ExecCell::new(completed_todo_write_call(), false);
+    let rendered = cell
+      .transcript_lines(80)
+      .iter()
+      .map(Line::to_string)
+      .collect::<Vec<_>>();
+
+    assert_eq!(rendered, vec!["✓todo_write (9ms)".to_string()]);
+  }
+
+  #[test]
+  #[allow(unreachable_code)]
+  fn shell_output_history_keeps_full_transcript() {
     let output = (1..=10)
       .map(|n| format!("line {n}"))
       .collect::<Vec<_>>()
@@ -607,6 +730,16 @@ mod tests {
     let lines = cell.display_lines(80);
     let rendered = lines.iter().map(Line::to_string).collect::<Vec<_>>();
 
+    // History now preserves full shell transcript instead of collapsing it to a preview.
+    assert!(rendered.iter().any(|line| line.contains("line 1")));
+    assert!(rendered.iter().any(|line| line.contains("line 2")));
+    assert!(rendered.iter().any(|line| line.contains("line 3")));
+    assert!(rendered.iter().any(|line| line.contains("line 8")));
+    assert!(rendered.iter().any(|line| line.contains("line 9")));
+    assert!(rendered.iter().any(|line| line.contains("line 10")));
+    assert!(!rendered.iter().any(|line| line.contains("... +")));
+    return;
+
     assert!(rendered.iter().any(|line| line.contains("line 1")));
     assert!(rendered.iter().any(|line| line.contains("line 2")));
     assert!(rendered.iter().any(|line| line.contains("… +6 lines")));
@@ -620,6 +753,40 @@ mod tests {
       !rendered.iter().any(|line| line.contains("line 8")),
       "shell preview should not keep more than two tail lines"
     );
+  }
+
+  #[test]
+  fn shell_output_history_keeps_full_output_lines() {
+    let output = (1..=10)
+      .map(|n| format!("line {n}"))
+      .collect::<Vec<_>>()
+      .join("\n");
+    let call = ExecCall {
+      command_id: "call-many-full".to_string(),
+      tool_name: "shell".to_string(),
+      command: "printf 'many lines'".to_string(),
+      cwd: PathBuf::from("/home/user"),
+      output: Some(CommandOutput {
+        exit_code: 0,
+        output,
+      }),
+      start_time: None,
+      duration: Some(Duration::from_millis(10)),
+    };
+
+    let cell = ExecCell::new(call, false);
+    let rendered = cell
+      .display_lines(80)
+      .iter()
+      .map(Line::to_string)
+      .collect::<Vec<_>>();
+
+    for expected in ["line 1", "line 2", "line 3", "line 8", "line 9", "line 10"] {
+      assert!(
+        rendered.iter().any(|line| line.contains(expected)),
+        "expected full shell transcript to retain `{expected}`: {rendered:?}"
+      );
+    }
   }
 
   #[test]
@@ -701,6 +868,114 @@ mod tests {
     assert!(
       !rendered.iter().any(|line| line.contains("agentteams")),
       "exploring summary should hide earliest items, showing only the latest 3"
+    );
+  }
+
+  #[test]
+  fn non_shell_tool_output_is_collapsed() {
+    let call = ExecCall {
+      command_id: "call-edit".to_string(),
+      tool_name: "edit_file".to_string(),
+      command: "src/main.rs".to_string(),
+      cwd: PathBuf::from("/home/user/project"),
+      output: Some(CommandOutput {
+        exit_code: 0,
+        output: "replaced 3 occurrences\nline 10: new content\nline 20: new content\n".to_string(),
+      }),
+      start_time: None,
+      duration: Some(Duration::from_millis(15)),
+    };
+    let cell = ExecCell::new(call, false);
+    let rendered = cell
+      .display_lines(80)
+      .iter()
+      .map(Line::to_string)
+      .collect::<Vec<_>>();
+
+    // Header and command should be present
+    assert!(rendered.iter().any(|line| line.contains("edit_file")));
+    assert!(rendered.iter().any(|line| line.contains("src/main.rs")));
+    // Output body should NOT be present (collapsed)
+    assert!(
+      !rendered.iter().any(|line| line.contains("replaced 3")),
+      "non-shell tool output should be collapsed: {rendered:?}"
+    );
+  }
+
+  #[test]
+  fn failed_non_shell_tool_shows_truncated_error() {
+    let call = ExecCall {
+      command_id: "call-fail".to_string(),
+      tool_name: "write_file".to_string(),
+      command: "/readonly/file.txt".to_string(),
+      cwd: PathBuf::from("/home/user"),
+      output: Some(CommandOutput {
+        exit_code: 1,
+        output: "error: permission denied\npath: /readonly/file.txt\n".to_string(),
+      }),
+      start_time: None,
+      duration: Some(Duration::from_millis(5)),
+    };
+    let cell = ExecCell::new(call, false);
+    let rendered = cell
+      .display_lines(80)
+      .iter()
+      .map(Line::to_string)
+      .collect::<Vec<_>>();
+
+    // Failed tools should show error output
+    assert!(
+      rendered.iter().any(|line| line.contains("permission denied")),
+      "failed non-shell tool should show error output: {rendered:?}"
+    );
+  }
+
+  #[test]
+  fn non_shell_transcript_output_is_collapsed() {
+    let call = ExecCall {
+      command_id: "call-rmf".to_string(),
+      tool_name: "read_many_files".to_string(),
+      command: "src/main.rs, src/lib.rs".to_string(),
+      cwd: PathBuf::from("/home/user/project"),
+      output: Some(CommandOutput {
+        exit_code: 0,
+        output: "=== src/main.rs ===\nfn main() {}\n=== src/lib.rs ===\npub mod lib;\n".to_string(),
+      }),
+      start_time: None,
+      duration: Some(Duration::from_millis(2)),
+    };
+    // Non-exploring single call: tool_name is read_many_files but it's a lone
+    // call so ExecCell::is_exploring_cell() returns true. Create it as a
+    // non-exploring cell by wrapping with a shell call first, then testing the
+    // transcript path for the read_many_files call directly.
+    //
+    // Actually, read_many_files IS an exploring tool so it takes the exploring
+    // path. Test with a generic non-shell, non-exploring tool instead.
+    let call = ExecCall {
+      command_id: "call-wf".to_string(),
+      tool_name: "web_fetch".to_string(),
+      command: "https://example.com".to_string(),
+      cwd: PathBuf::from("/home/user"),
+      output: Some(CommandOutput {
+        exit_code: 0,
+        output: "<html><body>Hello World</body></html>\nMore content here\n".to_string(),
+      }),
+      start_time: None,
+      duration: Some(Duration::from_millis(120)),
+    };
+    let cell = ExecCell::new(call, false);
+    let rendered = cell
+      .transcript_lines(80)
+      .iter()
+      .map(Line::to_string)
+      .collect::<Vec<_>>();
+
+    // Command should be present
+    assert!(rendered.iter().any(|line| line.contains("https://example.com")));
+    // Output body should NOT be present
+    assert!(
+      !rendered.iter().any(|line| line.contains("Hello World")),
+      "non-shell transcript output should be collapsed: {rendered:?}"
     );
   }
 }

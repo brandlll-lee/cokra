@@ -49,7 +49,7 @@ Tip: use `/model` to connect providers via OAuth (GitHub Copilot, Google, etc.) 
 
 ## What You Get
 
-- **Agent Teams**: spawn sub-agents, message them, wait for completion, and coordinate work.
+- **Agent Teams**: spawn persistent teammates, message them, wait for scheduled work to settle, and coordinate work through a shared mailbox and task board.
 - **Safe-by-default tool execution**: approvals + sandbox policies before shell or patches run.
 - **Terminal UI (TUI)**: a focused coding workflow designed for long sessions.
 - **Multi-provider model routing**: API key and OAuth connections across providers.
@@ -62,7 +62,7 @@ Tip: use `/model` to connect providers via OAuth (GitHub Copilot, Google, etc.) 
 Cokra supports a lightweight agent-teams workflow:
 
 - `spawn_agent`, `send_input`, `wait`, `close_agent`
-- mailbox and task board tools (team messages, tasks, plans)
+- mailbox and task board tools (team messages, tasks, plans, ownership-aware handoff/review)
 
 In the UI:
 

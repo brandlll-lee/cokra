@@ -56,7 +56,10 @@ fn claim_next_team_task_tool() -> ToolSpec {
 
 fn add_task_dependency_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
-  props.insert("task_id".to_string(), str_field("Task id to be blocked by another task."));
+  props.insert(
+    "task_id".to_string(),
+    str_field("Task id to be blocked by another task."),
+  );
   props.insert(
     "dependency_task_id".to_string(),
     str_field("Blocking dependency task id."),
@@ -88,7 +91,10 @@ fn remove_task_dependency_tool() -> ToolSpec {
 
 fn block_task_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
-  props.insert("task_id".to_string(), str_field("Task id to manually block."));
+  props.insert(
+    "task_id".to_string(),
+    str_field("Task id to manually block."),
+  );
   props.insert("reason".to_string(), str_field("Manual blocking reason."));
   workflow_tool(
     "block_task",

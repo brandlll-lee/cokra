@@ -57,6 +57,7 @@ pub(super) struct SessionState {
   pub(super) last_wait_end_fingerprint: Option<u64>,
   pub(super) reasoning_buffer: String,
   pub(super) collab_wait_status: Option<StatusSnapshot>,
+  pub(super) collab_compact_mode: bool,
   pub(super) active_status_override: Option<StatusSnapshot>,
   pub(super) mcp_starting_servers: BTreeSet<String>,
 }

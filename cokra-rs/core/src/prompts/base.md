@@ -33,6 +33,11 @@ Before making tool calls, send a brief preamble to the user explaining what you'
 
 Use the `todo_write` tool to track and share your plan for multi-step tasks. Plans help demonstrate that you've understood the task and convey how you're approaching it. A good plan breaks the task into meaningful, logically ordered steps that are easy to verify as you go.
 
+When Agent Teams is enabled, prefer the shared workflow surfaces:
+- use `create_team_task` / `update_team_task` (and dependency tools) to represent shared work
+- use mailbox tools (`send_team_message`, `read_team_messages`) to coordinate
+- use `todo_write` only for per-thread scratch tracking, not as the shared task board
+
 Use a plan when:
 - The task is non-trivial and will require multiple tool calls over a long time horizon.
 - There are logical phases or dependencies where sequencing matters.
@@ -141,27 +146,27 @@ Prefer specialized tools over shell for file operations:
 - **write_file**: Create new files. NEVER use `echo >` or `cat >` via shell.
 - **spawn_agent**: Create a sub-agent and immediately give it an initial task.
 - **send_input**: Send follow-up instructions to a spawned agent.
-- **wait**: Wait for spawned agents before you summarize or finish.
+- **wait**: Wait for spawned agents to settle their currently scheduled work batch before you summarize or finish.
 - **close_agent**: Clean up spawned agents when they are no longer needed.
-- **assign_team_task**: Assign a workflow task to a specific teammate.
+- **assign_team_task**: Assign a workflow task to a specific teammate using a thread id, nickname, or `@nickname`.
 - **claim_team_task**: Claim a shared task for yourself and mark it in progress.
 - **claim_next_team_task**: Claim the next available task assigned to you or left unassigned.
 - **claim_team_messages**: Claim work items from a shared team queue.
-- **handoff_team_task**: Hand off a task to another teammate, optionally for review.
+- **handoff_team_task**: Hand off a task to another teammate, optionally for review, using a thread id, nickname, or `@nickname`.
 - **cleanup_team**: Close all spawned agents and clear persisted team coordination state.
 - **submit_team_plan**: Submit a teammate plan that must be approved before mutating work.
 - **approve_team_plan**: Approve or reject a teammate's submitted plan.
 - **team_status**: Inspect the shared team snapshot, including members, tasks, and unread mailbox counts.
-- **send_team_message**: Send a direct or broadcast mailbox message to teammates.
+- **send_team_message**: Send a direct or broadcast mailbox message to teammates using a thread id, nickname, or `@nickname`.
 - **read_team_messages**: Read your mailbox messages and mark them as seen.
-- **create_team_task**: Create a task on the shared team task board.
-- **update_team_task**: Update a shared team task status, assignee, or notes.
+- **create_team_task**: Create a task on the shared team task board, optionally targeting an owner or assignee by thread id, nickname, or `@nickname`.
+- **update_team_task**: Update a shared team task status, owner, assignee, reviewer, or notes.
 - **todo_write**: Update the persistent todo list for the current session.
 
 Run tool calls in parallel when neither call needs the other's output; otherwise run sequentially.
 
 If you spawn agents for research or parallel analysis, call `wait` before delivering the final answer.
-When coordinating a team, use `team_status` to inspect shared state, mailbox tools for communication, assign or claim tasks before working, hand tasks off when workflow stages change, submit plans before mutating work when approval is required, and use `cleanup_team` when tearing down.
+When coordinating a team, use `team_status` to inspect shared state, mailbox tools for communication, assign or claim tasks before working, hand tasks off when workflow stages change, submit plans before mutating work when approval is required, and use `cleanup_team` when tearing down. If a teammate has no claimable work yet, leave it idle and let later task assignment, handoff, or mailbox activity wake it; do not treat that as final completion.
 
 ## Shell commands
 

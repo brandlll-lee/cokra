@@ -56,7 +56,9 @@ impl ToolHandler for RemoveTaskDependencyHandler {
     }
 
     let out = ToolOutput::success(serde_json::to_string(&task).map_err(|err| {
-      FunctionCallError::Fatal(format!("failed to serialize updated task graph node: {err}"))
+      FunctionCallError::Fatal(format!(
+        "failed to serialize updated task graph node: {err}"
+      ))
     })?);
     Ok(out.with_id(invocation.id))
   }

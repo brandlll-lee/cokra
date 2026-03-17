@@ -59,7 +59,9 @@ impl ToolHandler for WatchTeamInboxHandler {
         messages,
       })
       .map_err(|err| {
-        FunctionCallError::Fatal(format!("failed to serialize watch_team_inbox result: {err}"))
+        FunctionCallError::Fatal(format!(
+          "failed to serialize watch_team_inbox result: {err}"
+        ))
       })?,
     );
     Ok(out.with_id(invocation.id))

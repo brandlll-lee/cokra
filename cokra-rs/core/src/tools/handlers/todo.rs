@@ -147,7 +147,10 @@ impl ToolHandler for TodoWriteHandler {
         .collect();
       let _ = tx
         .send(cokra_protocol::EventMsg::TodoUpdate(
-          cokra_protocol::TodoUpdateEvent { todos: event_todos },
+          cokra_protocol::TodoUpdateEvent {
+            thread_id: rt.thread_id.clone(),
+            todos: event_todos,
+          },
         ))
         .await;
     }

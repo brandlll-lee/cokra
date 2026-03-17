@@ -17,6 +17,14 @@ You have access to agent teams tools for spawning and managing teammate agents.
 
 6. **Clean up**: Use `close_agent` or `cleanup_team` when the team's work is complete.
 
+## Shared workflow rules:
+
+- Use the shared task graph as the coordination backbone: `create_team_task`, `update_team_task`, `add_task_dependency`, and `claim_next_team_task`.
+- Assign ownership explicitly (owner/assignee/reviewer) so teammates know what to do next without extra back-and-forth.
+- Keep the task graph tidy: as you finish work, update tasks to `Completed` (or `Failed`/`Canceled`). Do not leave stray `Pending` tasks when you are done.
+- Use mailbox tools (`send_team_message`) when you need durable coordination; use `send_input` for direct follow-ups.
+- When teammates exist, do not let `@main` claim repo-root exclusive write scopes for implementation work. Create the task, assign it to the implementer, and let that teammate claim it.
+
 ## Tool usage pattern:
 1. `spawn_agent` with `task` parameter → returns agent_id
 2. `wait` with agent_ids → returns status + output when agents complete

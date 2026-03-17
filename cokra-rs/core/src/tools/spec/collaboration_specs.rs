@@ -31,6 +31,8 @@ pub(crate) fn build_specs() -> Vec<ToolSpec> {
     read_team_messages_tool(),
     create_team_task_tool(),
     update_team_task_tool(),
+    release_task_leases_tool(),
+    force_release_lease_tool(),
   ]
 }
 
@@ -59,7 +61,10 @@ fn scope_request_schema(description: &str) -> JsonSchema {
     "kind".to_string(),
     str_field("Ownership scope kind: File, Directory, Glob, or Module."),
   );
-  props.insert("path".to_string(), str_field("Scope path or module identifier."));
+  props.insert(
+    "path".to_string(),
+    str_field("Scope path or module identifier."),
+  );
   props.insert(
     "access".to_string(),
     str_field("Requested access mode: SharedRead, ExclusiveWrite, or Review."),
@@ -79,10 +84,6 @@ fn spawn_agent_tool() -> ToolSpec {
   props.insert(
     "task".to_string(),
     str_field("Initial task text for the spawned agent."),
-  );
-  props.insert(
-    "message".to_string(),
-    str_field("Alias of task for Codex-style compatibility."),
   );
   props.insert(
     "nickname".to_string(),
@@ -105,7 +106,7 @@ fn send_input_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
   props.insert(
     "agent_id".to_string(),
-    str_field("Target spawned agent id."),
+    str_field("Target spawned agent selector: thread id, nickname, or @nickname."),
   );
   props.insert(
     "message".to_string(),
@@ -113,7 +114,7 @@ fn send_input_tool() -> ToolSpec {
   );
   collaboration_tool(
     "send_input",
-    "Send another message to a running or completed spawned agent.",
+    "Send another message to a teammate using a thread id, nickname, or @nickname.",
     obj(props, &["agent_id", "message"]),
   )
   .with_permission_key("agent")
@@ -124,7 +125,9 @@ fn wait_tool() -> ToolSpec {
   props.insert(
     "agent_ids".to_string(),
     JsonSchema::Array {
-      items: Box::new(str_field("Spawned agent id.")),
+      items: Box::new(str_field(
+        "Spawned agent selector: thread id, nickname, or @nickname.",
+      )),
       description: Some(
         "Optional spawned agent ids to wait on. Defaults to all known spawned agents.".to_string(),
       ),
@@ -136,7 +139,7 @@ fn wait_tool() -> ToolSpec {
   );
   collaboration_tool(
     "wait",
-    "Wait for spawned agents to finish before continuing.",
+    "Wait for spawned agents to settle their currently scheduled work batch before continuing.",
     obj(props, &[]),
   )
   .with_permission_key("agent")
@@ -147,7 +150,7 @@ fn close_agent_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
   props.insert(
     "agent_id".to_string(),
-    str_field("Target spawned agent id."),
+    str_field("Target spawned agent selector: thread id, nickname, or @nickname."),
   );
   collaboration_tool(
     "close_agent",
@@ -162,9 +165,13 @@ fn assign_team_task_tool() -> ToolSpec {
   props.insert("task_id".to_string(), str_field("Task id to assign."));
   props.insert(
     "assignee_thread_id".to_string(),
-    str_field("Thread id of the teammate who should own the task."),
+    str_field("Teammate selector receiving the task: thread id, nickname, or @nickname."),
   );
   props.insert("note".to_string(), str_field("Optional assignment note."));
+  props.insert(
+    "override_assignee".to_string(),
+    bool_field("When true, explicitly reassigns a task away from its current assignee."),
+  );
   collaboration_tool(
     "assign_team_task",
     "Assign a shared team task to a specific teammate without auto-claiming it.",
@@ -208,7 +215,7 @@ fn handoff_team_task_tool() -> ToolSpec {
   props.insert("task_id".to_string(), str_field("Task id to hand off."));
   props.insert(
     "to_thread_id".to_string(),
-    str_field("Teammate thread id receiving the task."),
+    str_field("Teammate selector receiving the task: thread id, nickname, or @nickname."),
   );
   props.insert("note".to_string(), str_field("Optional handoff note."));
   props.insert(
@@ -289,7 +296,7 @@ fn send_team_message_tool() -> ToolSpec {
   props.insert("message".to_string(), str_field("Message body to send."));
   props.insert(
     "recipient_thread_id".to_string(),
-    str_field("Optional teammate thread id. Omit to broadcast to the whole team."),
+    str_field("Optional teammate selector. Accepts thread id, nickname, or @nickname. Omit to broadcast to the whole team."),
   );
   props.insert(
     "channel".to_string(),
@@ -320,10 +327,13 @@ fn send_team_message_tool() -> ToolSpec {
 
 fn send_team_nudge_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
-  props.insert("message".to_string(), str_field("Ephemeral nudge body to send."));
+  props.insert(
+    "message".to_string(),
+    str_field("Ephemeral nudge body to send."),
+  );
   props.insert(
     "recipient_thread_id".to_string(),
-    str_field("Optional teammate thread id. Omit to nudge a channel or the team."),
+    str_field("Optional teammate selector. Accepts thread id, nickname, or @nickname. Omit to nudge a channel or the team."),
   );
   props.insert(
     "channel".to_string(),
@@ -358,7 +368,10 @@ fn send_team_nudge_tool() -> ToolSpec {
 
 fn ack_team_message_tool() -> ToolSpec {
   let mut props = BTreeMap::new();
-  props.insert("message_id".to_string(), str_field("Mailbox message id to acknowledge."));
+  props.insert(
+    "message_id".to_string(),
+    str_field("Mailbox message id to acknowledge."),
+  );
   collaboration_tool(
     "ack_team_message",
     "Acknowledge receipt of a team mailbox message that requires ack.",
@@ -412,11 +425,11 @@ fn create_team_task_tool() -> ToolSpec {
   );
   props.insert(
     "owner_thread_id".to_string(),
-    str_field("Optional teammate thread id owning the task."),
+    str_field("Optional owner selector: thread id, nickname, or @nickname."),
   );
   props.insert(
     "assignee_thread_id".to_string(),
-    str_field("Optional teammate thread id to assign immediately."),
+    str_field("Optional assignee selector: thread id, nickname, or @nickname."),
   );
   props.insert(
     "workflow_run_id".to_string(),
@@ -429,6 +442,10 @@ fn create_team_task_tool() -> ToolSpec {
   props.insert(
     "blocking_reason".to_string(),
     str_field("Optional manual blocking reason to create the task in a blocked state."),
+  );
+  props.insert(
+    "scope_policy_override".to_string(),
+    bool_field("Override shared scope policy safeguards for this task."),
   );
   collaboration_tool(
     "create_team_task",
@@ -451,7 +468,7 @@ fn update_team_task_tool() -> ToolSpec {
   );
   props.insert(
     "owner_thread_id".to_string(),
-    str_field("Optional new owner thread id."),
+    str_field("Optional new owner selector: thread id, nickname, or @nickname."),
   );
   props.insert(
     "clear_owner".to_string(),
@@ -459,7 +476,15 @@ fn update_team_task_tool() -> ToolSpec {
   );
   props.insert(
     "assignee_thread_id".to_string(),
-    str_field("Optional new assignee thread id."),
+    str_field("Optional new assignee selector: thread id, nickname, or @nickname."),
+  );
+  props.insert(
+    "reviewer_thread_id".to_string(),
+    str_field("Optional reviewer selector: thread id, nickname, or @nickname."),
+  );
+  props.insert(
+    "clear_reviewer".to_string(),
+    bool_field("When true, clears the current reviewer."),
   );
   props.insert(
     "clear_assignee".to_string(),
@@ -481,9 +506,39 @@ fn update_team_task_tool() -> ToolSpec {
     "review_state".to_string(),
     str_field("Optional review state: NotRequested, Requested, Approved, or ChangesRequested."),
   );
+  props.insert(
+    "scope_policy_override".to_string(),
+    bool_field("Override shared scope policy safeguards for this task."),
+  );
   collaboration_tool(
     "update_team_task",
     "Update a shared team task node status, ownership, scopes, or notes.",
     obj(props, &["task_id"]),
+  )
+}
+
+fn release_task_leases_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "task_id".to_string(),
+    str_field("Task id whose ownership leases should be released."),
+  );
+  collaboration_tool(
+    "release_task_leases",
+    "Release all ownership leases currently granted to a team task.",
+    obj(props, &["task_id"]),
+  )
+}
+
+fn force_release_lease_tool() -> ToolSpec {
+  let mut props = BTreeMap::new();
+  props.insert(
+    "lease_id".to_string(),
+    str_field("Ownership lease id to force release. Only @main may do this."),
+  );
+  collaboration_tool(
+    "force_release_lease",
+    "Force release a specific ownership lease when @main needs to recover a stale lock.",
+    obj(props, &["lease_id"]),
   )
 }

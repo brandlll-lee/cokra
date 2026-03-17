@@ -29,7 +29,7 @@ impl ChatWidget {
     let is_new = self.transcript.stream_controller.is_none();
     let wrap_width = self.streaming_wrap_width();
     if is_new {
-      self.flush_active_exec_cell();
+      self.flush_active_exec_cell_if_inactive();
       self.sync_status_indicator();
     }
     let controller = self
@@ -122,7 +122,7 @@ mod tests {
   use tokio::sync::mpsc::unbounded_channel;
 
   #[test]
-  fn animated_preview_flushes_exec_cell_before_agent_text() {
+  fn animated_preview_absorbs_completed_exploring_exec_into_summary_before_agent_text() {
     let (tx, mut rx) = unbounded_channel();
     let sender = AppEventSender::new(tx);
     let mut widget = ChatWidget::new(
@@ -157,11 +157,9 @@ mod tests {
     // First agent delta should trigger flush of exec cell to history
     widget.on_agent_message_delta("item-1", "Here is the answer");
 
-    let Some(AppEvent::InsertHistoryCell(exec_cell)) = rx.try_recv().ok() else {
-      panic!("expected exec cell to flush to history when agent text starts");
-    };
-    let exec_rendered = exec_cell
-      .display_lines(80)
+    let rendered = widget
+      .active_cell_transcript_lines(80)
+      .expect("active transcript should include summary and preview")
       .iter()
       .map(|line| {
         line
@@ -172,7 +170,9 @@ mod tests {
       })
       .collect::<Vec<_>>()
       .join("\n");
-    assert!(exec_rendered.contains("Read src/main.rs"));
+    assert!(rendered.contains("Explored"), "expected exploring summary: {rendered}");
+    assert!(rendered.contains("read 1 file"), "expected read count: {rendered}");
+    assert!(rendered.contains("Here is the answer"), "expected agent preview: {rendered}");
 
     // Exec cell should no longer be active
     assert!(
@@ -180,12 +180,53 @@ mod tests {
       "exec cell should be flushed after agent text starts"
     );
 
-    // Subsequent deltas should not flush again (only commit animation events are allowed)
+    let first_event = rx.try_recv().ok();
+    assert!(
+      matches!(first_event, Some(AppEvent::StartCommitAnimation)),
+      "first event should start commit animation, got {first_event:?}"
+    );
+
+    // Subsequent deltas should not emit history cells again once exploring work is summarized live.
     widget.on_agent_message_delta("item-1", " and more text");
     while let Ok(event) = rx.try_recv() {
       assert!(
-        matches!(event, AppEvent::StartCommitAnimation),
-        "subsequent deltas should only emit StartCommitAnimation, got {event:?}"
+        !matches!(event, AppEvent::InsertHistoryCell(_)),
+        "streaming deltas should not emit history cells here; got {event:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn agent_delta_does_not_flush_running_exec_cell() {
+    let (tx, mut rx) = unbounded_channel();
+    let sender = AppEventSender::new(tx);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::AnimatedPreview,
+    );
+
+    widget.handle_exec_begin_now(&cokra_protocol::ExecCommandBeginEvent {
+      thread_id: "thread-1".to_string(),
+      turn_id: "turn-1".to_string(),
+      command_id: "call-1".to_string(),
+      tool_name: "shell".to_string(),
+      command: "echo hi".to_string(),
+      cwd: PathBuf::from("/tmp/project"),
+    });
+
+    widget.on_agent_message_delta("item-1", "Here is the answer");
+
+    assert!(
+      widget.transcript.active_exec_cell.is_some(),
+      "running exec cell should stay live; flushing would strand a 'Running' row in history"
+    );
+
+    while let Ok(event) = rx.try_recv() {
+      assert!(
+        !matches!(event, AppEvent::InsertHistoryCell(_)),
+        "should not flush a running exec cell into scrollback; got {event:?}"
       );
     }
   }
@@ -283,7 +324,7 @@ mod tests {
   }
 
   #[test]
-  fn scrollback_first_flushes_active_exec_before_agent_history_chunks() {
+  fn scrollback_first_summarizes_completed_exploring_exec_before_agent_history_chunks() {
     let (tx, mut rx) = unbounded_channel();
     let sender = AppEventSender::new(tx);
     let mut widget = ChatWidget::new(
@@ -310,25 +351,8 @@ mod tests {
     });
     widget.on_agent_message_delta("item-1", "answer line\nnext line");
 
-    let Some(AppEvent::InsertHistoryCell(exec_cell)) = rx.try_recv().ok() else {
-      panic!("expected exec cell to flush before agent text");
-    };
-    let exec_rendered = exec_cell
-      .display_lines(80)
-      .iter()
-      .map(|line| {
-        line
-          .spans
-          .iter()
-          .map(|span| span.content.clone())
-          .collect::<String>()
-      })
-      .collect::<Vec<_>>()
-      .join("\n");
-    assert!(exec_rendered.contains("List core/src"));
-
     let Some(AppEvent::InsertHistoryCell(agent_cell)) = rx.try_recv().ok() else {
-      panic!("expected committed agent text after exec cell");
+      panic!("expected committed agent text after completed exploring work is summarized live");
     };
     let agent_rendered = agent_cell
       .display_lines(80)
@@ -343,5 +367,31 @@ mod tests {
       .collect::<Vec<_>>()
       .join("\n");
     assert!(agent_rendered.contains("answer line"));
+
+    let live_rendered = widget
+      .active_cell_transcript_lines(80)
+      .expect("active transcript should keep exploring summary and uncommitted tail")
+      .iter()
+      .map(|line| {
+        line
+          .spans
+          .iter()
+          .map(|span| span.content.clone())
+          .collect::<String>()
+      })
+      .collect::<Vec<_>>()
+      .join("\n");
+    assert!(
+      live_rendered.contains("Explored"),
+      "expected exploring summary: {live_rendered}"
+    );
+    assert!(
+      live_rendered.contains("listed 1 dir"),
+      "expected list count: {live_rendered}"
+    );
+    assert!(
+      live_rendered.contains("next line"),
+      "expected uncommitted tail: {live_rendered}"
+    );
   }
 }

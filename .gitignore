@@ -112,3 +112,8 @@ cokra-rs/cokra_tui_*capture*.txt
 # Local persisted Cokra runtime state
 cokra-rs/.cokra/
 cokra-rs/core/.cokra/
+
+# Local analysis and generated scratch files
+cokra-rs/.tmp-toolcheck/
+cokra-rs/ARCHITECTURE_SUMMARY.md
+cokra-rs/core/tests/*.pending-snap

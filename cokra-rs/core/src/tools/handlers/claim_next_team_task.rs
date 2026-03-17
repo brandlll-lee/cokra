@@ -28,12 +28,20 @@ impl ToolHandler for ClaimNextTeamTaskHandler {
     let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
       FunctionCallError::Execution("claim_next_team_task runtime is not configured".to_string())
     })?;
-    let task = team_runtime
+    let Some(task) = team_runtime
       .claim_next_task(&runtime.thread_id)
       .await
-      .ok_or_else(|| {
-        FunctionCallError::RespondToModel("no claimable team task found".to_string())
-      })?;
+      .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?
+    else {
+      team_runtime.note_attention(
+        &runtime.thread_id,
+        "no claimable team task is assigned or ready yet",
+      );
+      return Err(FunctionCallError::RespondToModel(
+        "no claimable team task found".to_string(),
+      ));
+    };
+    team_runtime.clear_attention(&runtime.thread_id);
 
     if let Some(tx_event) = &runtime.tx_event {
       let _ = tx_event

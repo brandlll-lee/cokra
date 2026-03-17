@@ -11,6 +11,7 @@ use crate::agent::team_runtime::runtime_for_thread;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::team_selectors::resolve_optional_agent_selector;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 
@@ -24,10 +25,13 @@ struct UpdateTeamTaskArgs {
   clear_owner: Option<bool>,
   assignee_thread_id: Option<String>,
   clear_assignee: Option<bool>,
+  reviewer_thread_id: Option<String>,
+  clear_reviewer: Option<bool>,
   note: Option<String>,
   requested_scopes: Option<Vec<ScopeRequest>>,
   granted_scopes: Option<Vec<ScopeRequest>>,
   review_state: Option<TeamTaskReviewState>,
+  scope_policy_override: Option<bool>,
 }
 
 #[async_trait]
@@ -50,12 +54,20 @@ impl ToolHandler for UpdateTeamTaskHandler {
     let assignee_thread_id = if args.clear_assignee.unwrap_or(false) {
       Some(None)
     } else {
-      args.assignee_thread_id.map(Some)
+      resolve_optional_agent_selector(&team_runtime, args.assignee_thread_id, "assignee_thread_id")?
+        .map(Some)
     };
     let owner_thread_id = if args.clear_owner.unwrap_or(false) {
       Some(None)
     } else {
-      args.owner_thread_id.map(Some)
+      resolve_optional_agent_selector(&team_runtime, args.owner_thread_id, "owner_thread_id")?
+        .map(Some)
+    };
+    let reviewer_thread_id = if args.clear_reviewer.unwrap_or(false) {
+      Some(None)
+    } else {
+      resolve_optional_agent_selector(&team_runtime, args.reviewer_thread_id, "reviewer_thread_id")?
+        .map(Some)
     };
     let task = team_runtime
       .update_task(
@@ -63,12 +75,15 @@ impl ToolHandler for UpdateTeamTaskHandler {
         args.status,
         assignee_thread_id,
         owner_thread_id,
+        reviewer_thread_id,
         args.note,
         args.requested_scopes,
         args.granted_scopes,
         args.review_state,
+        args.scope_policy_override,
       )
       .await
+      .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?
       .ok_or_else(|| {
         FunctionCallError::RespondToModel(format!("unknown task id: {}", args.task_id))
       })?;

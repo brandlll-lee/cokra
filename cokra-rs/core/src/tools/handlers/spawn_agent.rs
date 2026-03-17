@@ -1,6 +1,12 @@
 use async_trait::async_trait;
+use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
+
+use cokra_protocol::CollabMailboxDeliveredEvent;
+use cokra_protocol::EventMsg;
+use cokra_protocol::TeamMessageDeliveryMode;
+use cokra_protocol::TeamMessageKind;
 
 use crate::agent::team_runtime::runtime_for_thread;
 use crate::tools::context::FunctionCallError;
@@ -107,9 +113,9 @@ fn resolve_message(
 
   let message = match (task, message) {
     (Some(task), Some(message)) if !task.is_empty() && !message.is_empty() => {
-      return Err(FunctionCallError::RespondToModel(
-        "spawn_agent accepts either `task` or `message`, not both".to_string(),
-      ));
+      // Prefer `task` when both are present; `message` is a compatibility alias.
+      let _ = message;
+      task
     }
     (Some(task), _) if !task.is_empty() => task,
     (_, Some(message)) if !message.is_empty() => message,
@@ -154,10 +160,34 @@ impl ToolHandler for SpawnAgentHandler {
       FunctionCallError::Execution("spawn_agent runtime is not configured".to_string())
     })?;
     let (message, nickname, role) = resolve_message(args)?;
+    let initial_message = message.clone();
     let thread_id = team_runtime
       .spawn_agent(&runtime.thread_id, message, nickname.clone(), role.clone())
       .await
       .map_err(|err| FunctionCallError::Execution(err.to_string()))?;
+
+    if let Some(tx_event) = &runtime.tx_event {
+      let sender = team_runtime.collab_agent_ref(&runtime.thread_id);
+      let recipient = team_runtime.collab_agent_ref(&thread_id.to_string());
+      let _ = tx_event
+        .send(EventMsg::CollabMailboxDelivered(
+          CollabMailboxDeliveredEvent {
+            thread_id: thread_id.to_string(),
+            sender_thread_id: runtime.thread_id.clone(),
+            sender_nickname: sender.as_ref().and_then(|agent| agent.nickname.clone()),
+            sender_role: sender.as_ref().and_then(|agent| agent.role.clone()),
+            recipient_thread_id: thread_id.to_string(),
+            recipient_nickname: recipient.as_ref().and_then(|agent| agent.nickname.clone()),
+            recipient_role: recipient.as_ref().and_then(|agent| agent.role.clone()),
+            message: initial_message,
+            task_id: None,
+            delivery_mode: TeamMessageDeliveryMode::EphemeralNudge,
+            kind: TeamMessageKind::Direct,
+            created_at: Utc::now().timestamp(),
+          },
+        ))
+        .await;
+    }
 
     let out = ToolOutput::success(
       serde_json::to_string(&SpawnAgentResult {

@@ -8,6 +8,7 @@ use crate::agent::team_runtime::runtime_for_thread;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::team_selectors::resolve_required_agent_selector;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 
@@ -18,6 +19,7 @@ struct AssignTeamTaskArgs {
   task_id: String,
   assignee_thread_id: String,
   note: Option<String>,
+  override_assignee: Option<bool>,
 }
 
 #[async_trait]
@@ -37,11 +39,24 @@ impl ToolHandler for AssignTeamTaskHandler {
     let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
       FunctionCallError::Execution("assign_team_task runtime is not configured".to_string())
     })?;
+    let assignee_thread_id = resolve_required_agent_selector(
+      &team_runtime,
+      &args.assignee_thread_id,
+      "assignee_thread_id",
+    )?;
     let task = team_runtime
-      .assign_task(&args.task_id, args.assignee_thread_id, args.note)
+      .assign_task(
+        &args.task_id,
+        assignee_thread_id,
+        args.note,
+        args.override_assignee.unwrap_or(false),
+      )
       .await
       .ok_or_else(|| {
-        FunctionCallError::RespondToModel(format!("unknown task id: {}", args.task_id))
+        FunctionCallError::RespondToModel(format!(
+          "task {} is unknown or already assigned to a different teammate",
+          args.task_id
+        ))
       })?;
 
     if let Some(tx_event) = &runtime.tx_event {

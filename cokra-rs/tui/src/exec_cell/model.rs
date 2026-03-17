@@ -99,6 +99,16 @@ impl ExecCell {
           self.exploring_visible_since
         },
       })
+    } else if self.is_active() {
+      let mut calls = self.calls.clone();
+      calls.push(call);
+      Some(Self {
+        calls,
+        animations_enabled: self.animations_enabled,
+        is_continuation: self.is_continuation,
+        exploring_since: None,
+        exploring_visible_since: None,
+      })
     } else {
       None
     }
@@ -307,5 +317,36 @@ mod tests {
     );
 
     assert!(cell.is_exploring_cell());
+  }
+
+  #[test]
+  fn active_non_exploring_cells_merge_new_calls_until_all_settle() {
+    let active = ExecCell::new(
+      ExecCall {
+        command_id: "c1".to_string(),
+        tool_name: "write_file".to_string(),
+        command: "write_file".to_string(),
+        cwd: PathBuf::from("."),
+        output: None,
+        start_time: Some(Instant::now()),
+        duration: None,
+      },
+      false,
+    );
+
+    let merged = active
+      .with_added_call(ExecCall {
+        command_id: "c2".to_string(),
+        tool_name: "write_file".to_string(),
+        command: "write_file".to_string(),
+        cwd: PathBuf::from("."),
+        output: None,
+        start_time: Some(Instant::now()),
+        duration: None,
+      })
+      .expect("active non-exploring cell should merge");
+
+    assert_eq!(merged.calls.len(), 2);
+    assert!(!merged.is_exploring_cell());
   }
 }

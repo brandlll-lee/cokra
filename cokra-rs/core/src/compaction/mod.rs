@@ -81,7 +81,7 @@ Use this EXACT format:
 Keep the summary concise, factual, and continuation-ready."#;
 
 #[derive(Debug, Clone)]
-pub(crate) struct CompactionSettings {
+pub struct CompactionSettings {
   pub enabled: bool,
   pub reserve_tokens: usize,
   pub keep_recent_tokens: usize,

@@ -34,6 +34,40 @@ pub enum AgentStatus {
   NotFound,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+pub enum CollabAgentLifecycle {
+  #[default]
+  PendingInit,
+  Ready,
+  Busy,
+  Error,
+  Shutdown,
+  NotFound,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+pub enum CollabTurnOutcome {
+  #[default]
+  NoneYet,
+  Succeeded,
+  Errored,
+  Interrupted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CollabAgentWaitState {
+  #[serde(default)]
+  pub lifecycle: CollabAgentLifecycle,
+  #[serde(default)]
+  pub turn_outcome: CollabTurnOutcome,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub last_turn_summary: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub attention_reason: Option<String>,
+  #[serde(default)]
+  pub pending_wake_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TeamTaskStatus {
   Pending,
@@ -68,6 +102,7 @@ pub enum TeamTaskReviewState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum TaskBlockerKind {
   Dependency,
+  LeaseConflict,
   #[default]
   Manual,
 }
@@ -122,6 +157,13 @@ pub enum OwnershipAccessMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwnershipScope {
+  #[serde(default)]
+  pub kind: OwnershipScopeKind,
+  pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScopeRequest {
   #[serde(default)]
   pub kind: OwnershipScopeKind,
@@ -130,6 +172,20 @@ pub struct ScopeRequest {
   pub access: OwnershipAccessMode,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwnershipLease {
+  pub id: String,
+  pub task_id: String,
+  pub owner_thread_id: String,
+  pub scope: OwnershipScope,
+  #[serde(default)]
+  pub access: OwnershipAccessMode,
+  pub acquired_at: i64,
+  pub heartbeat_at: i64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -157,8 +213,12 @@ pub struct TaskNode {
   pub requested_scopes: Vec<ScopeRequest>,
   #[serde(default)]
   pub granted_scopes: Vec<ScopeRequest>,
+  #[serde(default)]
+  pub scope_policy_override: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub assignee_thread_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub reviewer_thread_id: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub workflow_run_id: Option<String>,
   pub created_at: i64,
@@ -244,7 +304,8 @@ pub struct TeamMember {
   pub role: String,
   pub task: String,
   pub depth: usize,
-  pub status: AgentStatus,
+  #[serde(flatten)]
+  pub state: CollabAgentWaitState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -258,6 +319,10 @@ pub struct TeamSnapshot {
   pub unread_counts: HashMap<String, usize>,
   #[serde(default)]
   pub mailbox_version: u64,
+  #[serde(default)]
+  pub recent_messages: Vec<TeamMessage>,
+  #[serde(default)]
+  pub ownership_leases: Vec<OwnershipLease>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub workflow: Option<WorkflowRuntimeSnapshot>,
 }

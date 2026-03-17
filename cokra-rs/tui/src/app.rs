@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Result;
 use crossterm::event::KeyCode;
@@ -36,11 +37,13 @@ use cokra_protocol::ExecApprovalRequestEvent;
 use cokra_protocol::Op;
 use cokra_protocol::RequestUserInputEvent;
 use cokra_protocol::ReviewDecision;
+use cokra_protocol::TeamSnapshot;
 use cokra_protocol::UserInput;
 
 use crate::app_event::AppEvent;
 use crate::app_event::ExitMode;
 use crate::app_event::StatusLineMode;
+use crate::app_event::TeamTaskOperation;
 use crate::app_event::UiMode;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPaneAction;
@@ -58,6 +61,11 @@ use crate::history_cell::PlainHistoryCell;
 use crate::path_utils::get_git_branch;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
+use crate::team_panel::TeamPanel;
+use crate::team_panel::TeamPanelMode;
+use crate::team_panel::TeamPanelTab;
+use crate::transcript::ThreadTranscriptStore;
+use crate::transcript::TranscriptRenderMode;
 use crate::tui::FrameRequester;
 use crate::tui::InlineViewportSizing;
 use crate::tui::Tui;
@@ -105,12 +113,20 @@ pub struct App {
   primary_active_turn_id: Option<String>,
   status_line_agent_selector_active: bool,
   thread_event_stores: HashMap<String, ThreadEventStore>,
+  thread_transcript_stores: HashMap<String, ThreadTranscriptStore>,
   agent_picker_threads: HashMap<String, crate::multi_agents::AgentPickerThreadEntry>,
   background_pending_threads: HashMap<String, BackgroundPending>,
   background_approval_requests: HashMap<String, Vec<ExecApprovalRequestEvent>>,
   background_user_input_requests: HashMap<String, Vec<RequestUserInputEvent>>,
   pending_oauth_flows: HashMap<String, PendingOAuthFlowState>,
   did_show_welcome: bool,
+  last_collab_summary_phase: Option<crate::multi_agents::CollabSummaryPhase>,
+  last_collab_checkpoint_fingerprint: Option<u64>,
+  collab_done_candidate_since: Option<Instant>,
+  collab_done_candidate_fingerprint: Option<u64>,
+  latest_team_snapshot: Option<TeamSnapshot>,
+  team_panel_mode: TeamPanelMode,
+  team_panel_tab: TeamPanelTab,
 }
 
 #[derive(Debug, Clone)]
@@ -164,9 +180,9 @@ impl ThreadEventStore {
     }
 
     self.buffer.push_back(event);
-    // Tradeoff: keep the full per-thread event log so switching agent views can
-    // faithfully rebuild the entire transcript instead of silently dropping
-    // early history once a long discussion exceeds a ring-buffer cap.
+    // Legacy replay only: canonical transcript now owns the primary history model.
+    // This buffer keeps only the subset of raw events that still replay through
+    // ChatWidget side-effects (approvals, review-mode notices, MCP/web/etc.).
   }
 
   fn snapshot(&self) -> ThreadEventSnapshot {
@@ -272,8 +288,9 @@ impl App {
       .thread_id()
       .map(ToString::to_string)
       .unwrap_or_else(|| "main".to_string());
-    let mut thread_event_stores = HashMap::new();
-    thread_event_stores.insert(primary_thread_id.clone(), ThreadEventStore::new());
+    let thread_event_stores = HashMap::new();
+    let mut thread_transcript_stores = HashMap::new();
+    thread_transcript_stores.insert(primary_thread_id.clone(), ThreadTranscriptStore::default());
 
     let mut app = Self {
       cokra,
@@ -318,12 +335,20 @@ impl App {
       primary_active_turn_id: None,
       status_line_agent_selector_active: false,
       thread_event_stores,
+      thread_transcript_stores,
       agent_picker_threads: HashMap::new(),
       background_pending_threads: HashMap::new(),
       background_approval_requests: HashMap::new(),
       background_user_input_requests: HashMap::new(),
       pending_oauth_flows: HashMap::new(),
       did_show_welcome: false,
+      last_collab_summary_phase: None,
+      last_collab_checkpoint_fingerprint: None,
+      collab_done_candidate_since: None,
+      collab_done_candidate_fingerprint: None,
+      latest_team_snapshot: None,
+      team_panel_mode: TeamPanelMode::Hidden,
+      team_panel_tab: TeamPanelTab::Summary,
     };
 
     app.remember_agent_thread(
@@ -334,7 +359,10 @@ impl App {
     );
 
     // Claude Code-style footer by default (no status line).
+    app.refresh_team_snapshot_cache();
     app.refresh_status_line();
+    app.chat_widget.set_collab_compact_mode(true);
+    app.refresh_live_collab_summary();
 
     app
   }
@@ -407,10 +435,14 @@ impl App {
   fn draw(&mut self, tui: &mut Tui) -> Result<()> {
     let width = tui.terminal.size().map(|s| s.width).unwrap_or(80);
     self.history_width = width;
+    let panel_height = self.team_panel_height(width);
     if self.ui_mode == UiMode::AltScreen && self.transcript_cache_width != width {
       self.rebuild_transcript_cache(width);
     }
-    let requested_height = self.chat_widget.desired_height(width);
+    let requested_height = self
+      .chat_widget
+      .desired_height(width)
+      .saturating_add(panel_height);
     let height = if self.ui_mode == UiMode::Inline {
       if self.task_running {
         self.inline_stable_height = self.inline_stable_height.max(requested_height);
@@ -867,6 +899,40 @@ impl App {
       }
       AppEvent::SelectAgentThread { thread_id } => {
         self.select_agent_thread(tui, thread_id)?;
+      }
+      AppEvent::OpenTeamConsole => {
+        self.refresh_team_snapshot_cache();
+        self.open_team_console();
+      }
+      AppEvent::ToggleTeamPanel => {
+        self.toggle_team_panel();
+      }
+      AppEvent::SetTeamPanelMode { mode } => {
+        self.team_panel_mode = mode;
+      }
+      AppEvent::SetTeamPanelTab { tab } => {
+        self.team_panel_tab = tab;
+      }
+      AppEvent::OpenTeamTaskPicker { operation } => {
+        self.open_team_task_picker(operation);
+      }
+      AppEvent::OpenTeamLeasePicker => {
+        self.open_team_lease_picker();
+      }
+      AppEvent::OpenTeamMemberPicker { task_id, operation } => {
+        self.open_team_member_picker(task_id, operation);
+      }
+      AppEvent::ExecuteTeamTaskOperation {
+        task_id,
+        member_thread_id,
+        operation,
+      } => {
+        self
+          .execute_team_task_operation(task_id, member_thread_id, operation)
+          .await?;
+      }
+      AppEvent::ForceReleaseLease { lease_id } => {
+        self.force_release_team_lease(lease_id).await?;
       }
       AppEvent::OpenAllModelsPopup { providers } => {
         self.open_all_models_popup(providers).await?;
@@ -1441,6 +1507,12 @@ impl App {
       return Ok(());
     }
 
+    if matches!(key.code, KeyCode::Char('o')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+      self.refresh_team_snapshot_cache();
+      self.open_team_console();
+      return Ok(());
+    }
+
     match self.chat_widget.bottom_pane.handle_key(key) {
       BottomPaneAction::None => {}
       BottomPaneAction::Interrupt => {
@@ -1582,6 +1654,30 @@ impl App {
       .or_insert_with(ThreadEventStore::new)
   }
 
+  fn ensure_thread_transcript(&mut self, thread_id: &str) -> &mut ThreadTranscriptStore {
+    self
+      .thread_transcript_stores
+      .entry(thread_id.to_string())
+      .or_default()
+  }
+
+  fn push_local_thread_event(&mut self, thread_id: String, msg: EventMsg) {
+    let event = Event {
+      id: format!("local-{}-{}", thread_id, self.transcript_cells.len()),
+      msg: msg.clone(),
+    };
+    if legacy_replay_needed(&msg) {
+      self.ensure_thread_store(&thread_id).push_event(event);
+    }
+    let enriched = self.enrich_collab_event(&msg);
+    self
+      .ensure_thread_transcript(&thread_id)
+      .apply_event(&enriched);
+    if thread_id == self.active_thread_id {
+      let _ = self.chat_widget.handle_event(&enriched);
+    }
+  }
+
   fn remember_agent_thread(
     &mut self,
     thread_id: String,
@@ -1589,7 +1685,7 @@ impl App {
     role: Option<String>,
     is_closed: bool,
   ) {
-    self.ensure_thread_store(&thread_id);
+    self.ensure_thread_transcript(&thread_id);
     let entry = self.agent_picker_threads.entry(thread_id).or_insert(
       crate::multi_agents::AgentPickerThreadEntry {
         nickname: None,
@@ -1607,12 +1703,16 @@ impl App {
   }
 
   fn remember_threads_from_snapshot(&mut self) {
-    let Some(snapshot) = self.cokra.team_snapshot() else {
+    let Some(snapshot) = self.latest_team_snapshot.clone() else {
       return;
     };
 
     for member in snapshot.members {
-      let is_closed = matches!(member.status, cokra_protocol::AgentStatus::Completed(_));
+      let is_closed = matches!(
+        member.state.lifecycle.clone(),
+        cokra_protocol::CollabAgentLifecycle::Shutdown
+          | cokra_protocol::CollabAgentLifecycle::NotFound
+      );
       self.remember_agent_thread(
         member.thread_id,
         member.nickname,
@@ -1629,7 +1729,39 @@ impl App {
           ev.agent_id.clone(),
           ev.nickname.clone(),
           ev.role.clone(),
-          matches!(ev.status, cokra_protocol::AgentStatus::Completed(_)),
+          matches!(
+            ev.lifecycle,
+            cokra_protocol::CollabAgentLifecycle::Shutdown
+              | cokra_protocol::CollabAgentLifecycle::NotFound
+          ),
+        );
+        true
+      }
+      EventMsg::CollabAgentStateChanged(ev) => {
+        self.remember_agent_thread(
+          ev.thread_id.clone(),
+          ev.nickname.clone(),
+          ev.role.clone(),
+          matches!(
+            ev.lifecycle,
+            cokra_protocol::CollabAgentLifecycle::Shutdown
+              | cokra_protocol::CollabAgentLifecycle::NotFound
+          ),
+        );
+        true
+      }
+      EventMsg::CollabMailboxDelivered(ev) => {
+        self.remember_agent_thread(
+          ev.sender_thread_id.clone(),
+          ev.sender_nickname.clone(),
+          ev.sender_role.clone(),
+          false,
+        );
+        self.remember_agent_thread(
+          ev.recipient_thread_id.clone(),
+          ev.recipient_nickname.clone(),
+          ev.recipient_role.clone(),
+          false,
         );
         true
       }
@@ -1648,7 +1780,11 @@ impl App {
             agent.thread_id.clone(),
             agent.nickname.clone(),
             agent.role.clone(),
-            matches!(agent.status, cokra_protocol::AgentStatus::Completed(_)),
+            matches!(
+              agent.state.lifecycle.clone(),
+              cokra_protocol::CollabAgentLifecycle::Shutdown
+                | cokra_protocol::CollabAgentLifecycle::NotFound
+            ),
           );
         }
         true
@@ -1719,7 +1855,7 @@ impl App {
                 thread_id: thread_id.clone(),
                 nickname: entry.and_then(|it| it.nickname.clone()),
                 role: entry.and_then(|it| it.role.clone()),
-                status: status.clone(),
+                state: status.clone(),
               }
             })
             .collect::<Vec<_>>()
@@ -1759,7 +1895,7 @@ impl App {
             .receiver_role
             .clone()
             .or_else(|| entry.and_then(|it| it.role.clone())),
-          status: ev.status.clone(),
+          lifecycle: ev.lifecycle.clone(),
         })
       }
       EventMsg::CollabMessagePosted(ev) => {
@@ -1784,6 +1920,32 @@ impl App {
           recipient_nickname: recipient.as_ref().and_then(|agent| agent.nickname.clone()),
           recipient_role: recipient.as_ref().and_then(|agent| agent.role.clone()),
           message: ev.message.clone(),
+        })
+      }
+      EventMsg::CollabMailboxDelivered(ev) => {
+        let sender = self.known_agent_ref(
+          &ev.sender_thread_id,
+          ev.sender_nickname.clone(),
+          ev.sender_role.clone(),
+        );
+        let recipient = self.known_agent_ref(
+          &ev.recipient_thread_id,
+          ev.recipient_nickname.clone(),
+          ev.recipient_role.clone(),
+        );
+        EventMsg::CollabMailboxDelivered(cokra_protocol::CollabMailboxDeliveredEvent {
+          thread_id: ev.thread_id.clone(),
+          sender_thread_id: ev.sender_thread_id.clone(),
+          sender_nickname: sender.nickname,
+          sender_role: sender.role,
+          recipient_thread_id: ev.recipient_thread_id.clone(),
+          recipient_nickname: recipient.nickname,
+          recipient_role: recipient.role,
+          message: ev.message.clone(),
+          task_id: ev.task_id.clone(),
+          delivery_mode: ev.delivery_mode.clone(),
+          kind: ev.kind.clone(),
+          created_at: ev.created_at,
         })
       }
       EventMsg::CollabMessagesRead(ev) => {
@@ -1839,17 +2001,34 @@ impl App {
     }
   }
 
-  fn replay_thread_snapshot(&mut self, snapshot: ThreadEventSnapshot, width: u16) {
-    if let Some(event) = snapshot.session_configured {
+  fn replay_thread_snapshot_for_legacy_gaps(&mut self, snapshot: ThreadEventSnapshot, width: u16) {
+    if let Some(event) = snapshot
+      .session_configured
+      .filter(|event| legacy_replay_needed(&event.msg))
+    {
       let enriched = self.enrich_collab_event(&event.msg);
       let _ = self.chat_widget.handle_event(&enriched);
       self.drain_replay_history_cells(width);
     }
 
-    for event in snapshot.events {
+    for event in snapshot
+      .events
+      .into_iter()
+      .filter(|event| legacy_replay_needed(&event.msg))
+    {
       let enriched = self.enrich_collab_event(&event.msg);
       let _ = self.chat_widget.handle_event(&enriched);
       self.drain_replay_history_cells(width);
+    }
+  }
+
+  fn replay_thread_transcript(
+    &mut self,
+    transcript: &crate::transcript::ThreadTranscriptStore,
+    width: u16,
+  ) {
+    for cell in transcript.render_history_cells(TranscriptRenderMode::Replay) {
+      self.stage_history_cell(cell, width, None);
     }
   }
 
@@ -1858,11 +2037,16 @@ impl App {
       return Ok(());
     }
 
-    let Some(snapshot) = self
+    let transcript_snapshot = self.thread_transcript_stores.get(&thread_id).cloned();
+    let legacy_snapshot = self
       .thread_event_stores
       .get(&thread_id)
-      .map(ThreadEventStore::snapshot)
-    else {
+      .map(ThreadEventStore::snapshot);
+    if transcript_snapshot
+      .as_ref()
+      .map_or(true, ThreadTranscriptStore::is_empty)
+      && legacy_snapshot.is_none()
+    {
       self
         .chat_widget
         .add_to_history(PlainHistoryCell::new(vec![Line::from(
@@ -1870,7 +2054,7 @@ impl App {
             .dim(),
         )]));
       return Ok(());
-    };
+    }
 
     self.active_thread_id = thread_id.clone();
     tui.clear_pending_history_lines();
@@ -1896,12 +2080,26 @@ impl App {
       },
     );
     self.chat_widget.bottom_pane.set_status_line_enabled(true);
+    self
+      .chat_widget
+      .set_collab_compact_mode(self.active_thread_id == self.primary_thread_id);
     self.clear_transcript_view();
     self.insert_startup_welcome(tui)?;
     self.task_running = false;
     self.inline_stable_height = 0;
     self.chat_widget.set_agent_turn_running(false);
-    self.replay_thread_snapshot(snapshot, tui.terminal.last_known_screen_size.width.max(1));
+    let width = tui.terminal.last_known_screen_size.width.max(1);
+    let legacy_snapshot_for_gaps = legacy_snapshot.clone();
+    if let Some(transcript) = transcript_snapshot.as_ref()
+      && !transcript.is_empty()
+    {
+      self.replay_thread_transcript(transcript, width);
+      if let Some(snapshot) = legacy_snapshot_for_gaps {
+        self.replay_thread_snapshot_for_legacy_gaps(snapshot, width);
+      }
+    } else if let Some(snapshot) = legacy_snapshot {
+      self.replay_thread_snapshot_for_legacy_gaps(snapshot, width);
+    }
     if self.ui_mode == UiMode::Inline && !self.deferred_history_lines.is_empty() {
       let lines = std::mem::take(&mut self.deferred_history_lines);
       tui.insert_history_lines(lines);
@@ -1918,13 +2116,26 @@ impl App {
       self.refresh_status_line();
     }
 
-    let owner_thread_id =
-      event_thread_id(&event.msg).unwrap_or_else(|| self.primary_thread_id.clone());
-    self
-      .ensure_thread_store(&owner_thread_id)
-      .push_event(event.clone());
+    let enriched_event = self.enrich_collab_event(&event.msg);
+    let thread_targets = event_thread_targets(&event.msg, &self.primary_thread_id);
+    let owner_thread_id = thread_targets
+      .first()
+      .cloned()
+      .unwrap_or_else(|| self.primary_thread_id.clone());
+    for thread_target in &thread_targets {
+      if legacy_replay_needed(&event.msg) {
+        self
+          .ensure_thread_store(thread_target)
+          .push_event(event.clone());
+      }
+      self
+        .ensure_thread_transcript(thread_target)
+        .apply_event(&enriched_event);
+    }
 
-    let is_active_thread = owner_thread_id == self.active_thread_id;
+    let is_active_thread = thread_targets
+      .iter()
+      .any(|thread_id| thread_id == &self.active_thread_id);
     let turn_started = matches!(event.msg, EventMsg::TurnStarted(_));
     let turn_finished = matches!(
       event.msg,
@@ -1938,7 +2149,8 @@ impl App {
           .await;
         self.footer_context_window_limit.insert(
           e.thread_id.clone(),
-          e.context_window_limit.and_then(|limit| i64::try_from(limit).ok()),
+          e.context_window_limit
+            .and_then(|limit| i64::try_from(limit).ok()),
         );
       }
       EventMsg::TurnStarted(e) if e.thread_id == self.primary_thread_id => {
@@ -2011,7 +2223,6 @@ impl App {
       self.chat_widget.set_agent_turn_running(true);
     }
 
-    let enriched_event = self.enrich_collab_event(&event.msg);
     if let Some(action) = self.chat_widget.handle_event(&enriched_event) {
       match action {
         ChatWidgetAction::ShowApproval(req) => {
@@ -2096,24 +2307,39 @@ impl App {
       }
       SlashCommand::Status => {
         let usage = self.chat_widget.token_usage();
-        let model = self.chat_widget.model_name();
+        let model = self.chat_widget.model_name().to_string();
         let cwd = self
           .chat_widget
           .cwd()
           .cloned()
           .unwrap_or_else(|| self.cokra.cwd());
-        let lines = vec![
-          Line::from(format!("● Model: {model}")),
-          Line::from(format!("● Cwd: {}", cwd.display())),
-          Line::from(format!(
-            "● Tokens: {} input, {} output, {} total",
-            usage.input_tokens, usage.output_tokens, usage.total_tokens
-          )),
-          Line::from(format!("● Task running: {}", self.task_running)),
-        ];
+
+        let collab_mode = self
+          .latest_team_snapshot
+          .as_ref()
+          .map(|_| "Agent Teams".to_string());
+        let agents_count = self.latest_team_snapshot.as_ref().map(|snapshot| {
+          snapshot
+            .members
+            .iter()
+            .filter(|m| m.thread_id != snapshot.root_thread_id)
+            .count()
+        });
+
+        let data = crate::status::StatusCardData {
+          model_name: model,
+          directory: cwd,
+          session_id: self.active_thread_id.clone(),
+          task_running: self.task_running,
+          input_tokens: usage.input_tokens,
+          output_tokens: usage.output_tokens,
+          total_tokens: usage.total_tokens,
+          collaboration_mode: collab_mode,
+          agents_count,
+        };
         self
           .chat_widget
-          .add_to_history(crate::history_cell::PlainHistoryCell::new(lines));
+          .add_to_history(crate::status::new_status_output(data));
       }
       SlashCommand::DebugConfig => {
         let Some(stack) = self.cokra.config_layer_stack() else {
@@ -2175,7 +2401,7 @@ impl App {
         self.open_agent_picker();
       }
       SlashCommand::Collab => {
-        self.show_team_dashboard();
+        self.toggle_team_panel();
       }
       SlashCommand::Clean => {
         self.cleanup_team().await?;
@@ -2707,7 +2933,159 @@ impl App {
         Vec::new()
       },
     );
+    self.refresh_team_snapshot_cache();
+    self.refresh_live_collab_summary();
     self.refresh_status_line();
+  }
+
+  fn refresh_team_snapshot_cache(&mut self) {
+    let snapshot = self.cokra.team_snapshot();
+    let visible = snapshot
+      .as_ref()
+      .is_some_and(Self::team_snapshot_has_visible_state);
+    self.latest_team_snapshot = visible.then_some(snapshot).flatten();
+    if self.latest_team_snapshot.is_none() {
+      self.team_panel_mode = TeamPanelMode::Hidden;
+    }
+  }
+
+  fn team_snapshot_has_visible_state(snapshot: &TeamSnapshot) -> bool {
+    snapshot.members.len() > 1
+      || !snapshot.tasks.is_empty()
+      || !snapshot.recent_messages.is_empty()
+      || !snapshot.ownership_leases.is_empty()
+      || !snapshot.plans.is_empty()
+  }
+
+  fn active_team_panel(&self) -> Option<TeamPanel> {
+    self
+      .latest_team_snapshot
+      .as_ref()
+      .and_then(|snapshot| TeamPanel::new(snapshot, self.team_panel_mode, self.team_panel_tab))
+  }
+
+  fn team_panel_height(&self, width: u16) -> u16 {
+    self
+      .active_team_panel()
+      .map(|panel| panel.desired_height(width.max(1)))
+      .unwrap_or(0)
+  }
+
+  fn toggle_team_panel(&mut self) {
+    if self.latest_team_snapshot.is_none() {
+      return;
+    }
+    self.team_panel_mode = match self.team_panel_mode {
+      TeamPanelMode::Hidden => TeamPanelMode::Collapsed,
+      TeamPanelMode::Collapsed => TeamPanelMode::Expanded,
+      TeamPanelMode::Expanded => TeamPanelMode::Hidden,
+    };
+  }
+
+  fn refresh_live_collab_summary(&mut self) {
+    const DONE_CHECKPOINT_DEBOUNCE: Duration = Duration::from_millis(1500);
+    let primary_thread_id = self.primary_thread_id.clone();
+    let compact_mode = self.active_thread_id == self.primary_thread_id;
+    self.chat_widget.set_collab_compact_mode(compact_mode);
+
+    let summary = self
+      .latest_team_snapshot
+      .as_ref()
+      .and_then(|snapshot| crate::multi_agents::working_summary_snapshot(&snapshot));
+
+    if !compact_mode {
+      self.chat_widget.set_collab_working_summary_lines(None);
+      if let Some(summary) = summary.as_ref() {
+        self
+          .ensure_thread_transcript(&primary_thread_id)
+          .update_live_collab_summary(summary.plain_lines.clone(), summary.fingerprint);
+      } else {
+        self
+          .ensure_thread_transcript(&primary_thread_id)
+          .clear_live_collab_summary();
+      }
+      self.collab_done_candidate_since = None;
+      self.collab_done_candidate_fingerprint = None;
+      self.last_collab_summary_phase = None;
+      return;
+    }
+
+    let next_phase = summary.as_ref().map(|item| item.phase);
+    let done_fingerprint = summary
+      .as_ref()
+      .filter(|summary| matches!(summary.phase, crate::multi_agents::CollabSummaryPhase::Done))
+      .map(|summary| summary.fingerprint);
+
+    let done_debounced = if let Some(fingerprint) = done_fingerprint {
+      if self.collab_done_candidate_fingerprint != Some(fingerprint) {
+        self.collab_done_candidate_fingerprint = Some(fingerprint);
+        self.collab_done_candidate_since = Some(Instant::now());
+        false
+      } else {
+        self
+          .collab_done_candidate_since
+          .is_some_and(|since| since.elapsed() >= DONE_CHECKPOINT_DEBOUNCE)
+      }
+    } else {
+      self.collab_done_candidate_since = None;
+      self.collab_done_candidate_fingerprint = None;
+      false
+    };
+
+    let hide_live_summary = summary.as_ref().is_some_and(|summary| {
+      matches!(summary.phase, crate::multi_agents::CollabSummaryPhase::Done)
+        && self.last_collab_checkpoint_fingerprint == Some(summary.fingerprint)
+    });
+    if let Some(summary) = summary.as_ref() {
+      self
+        .ensure_thread_transcript(&primary_thread_id)
+        .update_live_collab_summary(summary.plain_lines.clone(), summary.fingerprint);
+    } else {
+      self
+        .ensure_thread_transcript(&primary_thread_id)
+        .clear_live_collab_summary();
+    }
+    self.chat_widget.set_collab_working_summary_lines(
+      (!hide_live_summary)
+        .then(|| summary.as_ref().map(|summary| summary.lines.clone()))
+        .flatten(),
+    );
+
+    let should_checkpoint = match summary.as_ref() {
+      Some(summary)
+        if matches!(
+          summary.phase,
+          crate::multi_agents::CollabSummaryPhase::Attention
+        ) =>
+      {
+        true
+      }
+      Some(summary) if matches!(summary.phase, crate::multi_agents::CollabSummaryPhase::Done) => {
+        done_debounced
+      }
+      _ => false,
+    };
+
+    if should_checkpoint
+      && let Some(summary) = summary.as_ref()
+      && self.last_collab_checkpoint_fingerprint != Some(summary.fingerprint)
+    {
+      self.push_local_thread_event(
+        self.primary_thread_id.clone(),
+        EventMsg::CollabSummaryCheckpoint(cokra_protocol::CollabSummaryCheckpointEvent {
+          thread_id: self.primary_thread_id.clone(),
+          lines: summary.plain_lines.clone(),
+          fingerprint: summary.fingerprint,
+        }),
+      );
+      self.last_collab_checkpoint_fingerprint = Some(summary.fingerprint);
+
+      if matches!(summary.phase, crate::multi_agents::CollabSummaryPhase::Done) {
+        self.chat_widget.set_collab_working_summary_lines(None);
+      }
+    }
+
+    self.last_collab_summary_phase = next_phase;
   }
 
   fn background_pending_count(&self) -> usize {
@@ -2747,10 +3125,7 @@ impl App {
     let context_window_limit = self.active_footer_context_window_limit();
 
     let (provider_id, model_name) = if let Some(entry) = catalog_entry {
-      (
-        Some(entry.provider_id.clone()),
-        entry.model_id.clone(),
-      )
+      (Some(entry.provider_id.clone()), entry.model_id.clone())
     } else if let Some((provider_id, model_name)) = model.split_once('/') {
       (Some(provider_id.to_string()), model_name.to_string())
     } else {
@@ -2785,7 +3160,7 @@ impl App {
       self.chat_widget.bottom_pane.set_status_line(None);
       return;
     }
-    let team_snapshot = self.cokra.team_snapshot();
+    let team_snapshot = self.latest_team_snapshot.clone();
     let agent_switcher_threads = self.agent_switcher_threads();
     let has_team_switcher = agent_switcher_threads.len() > 1;
     if !has_team_switcher {
@@ -2867,15 +3242,31 @@ impl App {
   fn render(&mut self, frame: &mut Frame) {
     let area = frame.area();
     self.history_width = area.width;
+    let panel = self.active_team_panel();
+    let panel_height = panel
+      .as_ref()
+      .map(|panel| panel.desired_height(area.width).min(area.height))
+      .unwrap_or(0);
 
     match self.ui_mode {
       UiMode::Inline => {
+        let chunks = if panel_height > 0 {
+          Layout::vertical([Constraint::Length(panel_height), Constraint::Min(1)]).split(area)
+        } else {
+          Layout::vertical([Constraint::Min(1)]).split(area)
+        };
+        let chat_area = *chunks.last().unwrap_or(&area);
+        if let Some(panel) = panel.as_ref()
+          && let Some(panel_area) = chunks.first().copied().filter(|_| panel_height > 0)
+        {
+          panel.render(panel_area, frame.buffer_mut());
+        }
         // 1:1 codex: inline viewport only renders the live chat surface.
         // Committed history is written into normal scrollback via
         // Tui::insert_history_lines and must not be re-rendered here, or
         // resize/turn redraws will duplicate separators and footer borders.
-        self.chat_widget.render(area, frame.buffer_mut());
-        if let Some((x, y)) = self.chat_widget.cursor_pos(area) {
+        self.chat_widget.render(chat_area, frame.buffer_mut());
+        if let Some((x, y)) = self.chat_widget.cursor_pos(chat_area) {
           frame.set_cursor_position((x, y));
         }
       }
@@ -2884,15 +3275,34 @@ impl App {
           self.rebuild_transcript_cache(area.width);
         }
         self.refresh_active_tail_cache(area.width);
+        let remaining_after_panel = area.height.saturating_sub(panel_height);
         let bottom_height = self
           .chat_widget
           .bottom_pane
           .desired_height(area.width)
-          .min(area.height);
-        let chunks =
-          Layout::vertical([Constraint::Min(1), Constraint::Length(bottom_height)]).split(area);
+          .min(remaining_after_panel);
+        let chunks = if panel_height > 0 {
+          Layout::vertical([
+            Constraint::Length(panel_height),
+            Constraint::Min(1),
+            Constraint::Length(bottom_height),
+          ])
+          .split(area)
+        } else {
+          Layout::vertical([Constraint::Min(1), Constraint::Length(bottom_height)]).split(area)
+        };
+        let (panel_area, transcript_area, bottom_area) = if panel_height > 0 {
+          (Some(chunks[0]), chunks[1], chunks[2])
+        } else {
+          (None, chunks[0], chunks[1])
+        };
+        if let Some(panel) = panel.as_ref()
+          && let Some(panel_area) = panel_area
+        {
+          panel.render(panel_area, frame.buffer_mut());
+        }
         self.chat_widget.render_alt_screen(
-          chunks[0],
+          transcript_area,
           frame.buffer_mut(),
           &self.transcript_lines_cache,
           &self.active_tail_cache_lines,
@@ -2901,36 +3311,467 @@ impl App {
         self
           .chat_widget
           .bottom_pane
-          .render(chunks[1], frame.buffer_mut(), self.task_running);
-        if let Some((x, y)) = self.chat_widget.bottom_pane.cursor_pos(chunks[1]) {
+          .render(bottom_area, frame.buffer_mut(), self.task_running);
+        if let Some((x, y)) = self.chat_widget.bottom_pane.cursor_pos(bottom_area) {
           frame.set_cursor_position((x, y));
         }
       }
     }
   }
 
-  fn show_team_dashboard(&mut self) {
-    let Some(root_thread_id) = self.cokra.thread_id().map(ToString::to_string) else {
-      self
-        .chat_widget
-        .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "● No active team runtime".dim(),
-        )]));
+  fn open_team_console(&mut self) {
+    use crate::bottom_pane::list_selection_view::SelectionItem;
+    use crate::bottom_pane::list_selection_view::SelectionViewParams;
+    use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+
+    let Some(snapshot) = self.latest_team_snapshot.clone() else {
       return;
     };
-    let Some(snapshot) = self.cokra.team_snapshot() else {
-      self
-        .chat_widget
-        .add_to_history(PlainHistoryCell::new(vec![Line::from(
-          "● No active team runtime".dim(),
-        )]));
-      return;
-    };
-    let cell = crate::multi_agents::team_snapshot(cokra_protocol::CollabTeamSnapshotEvent {
-      actor_thread_id: root_thread_id,
-      snapshot,
+    let mut items = Vec::new();
+    items.push(SelectionItem {
+      name: "Toggle Panel".to_string(),
+      description: Some("Cycle hidden, collapsed, and expanded team panel modes.".to_string()),
+      actions: vec![Box::new(|tx| tx.send(AppEvent::ToggleTeamPanel))],
+      dismiss_on_select: true,
+      ..Default::default()
     });
-    self.chat_widget.add_to_history(cell);
+    items.push(SelectionItem {
+      name: "Panel Summary".to_string(),
+      description: Some("Show the Summary tab in the fixed team panel.".to_string()),
+      actions: vec![Box::new(|tx| {
+        tx.send(AppEvent::SetTeamPanelMode {
+          mode: TeamPanelMode::Expanded,
+        });
+        tx.send(AppEvent::SetTeamPanelTab {
+          tab: TeamPanelTab::Summary,
+        });
+      })],
+      dismiss_on_select: true,
+      ..Default::default()
+    });
+    items.push(SelectionItem {
+      name: "Panel Tasks".to_string(),
+      description: Some("Show the Tasks tab in the fixed team panel.".to_string()),
+      actions: vec![Box::new(|tx| {
+        tx.send(AppEvent::SetTeamPanelMode {
+          mode: TeamPanelMode::Expanded,
+        });
+        tx.send(AppEvent::SetTeamPanelTab {
+          tab: TeamPanelTab::Tasks,
+        });
+      })],
+      dismiss_on_select: true,
+      ..Default::default()
+    });
+    items.push(SelectionItem {
+      name: "Panel Mailbox".to_string(),
+      description: Some("Show the Mailbox tab in the fixed team panel.".to_string()),
+      actions: vec![Box::new(|tx| {
+        tx.send(AppEvent::SetTeamPanelMode {
+          mode: TeamPanelMode::Expanded,
+        });
+        tx.send(AppEvent::SetTeamPanelTab {
+          tab: TeamPanelTab::Mailbox,
+        });
+      })],
+      dismiss_on_select: true,
+      ..Default::default()
+    });
+    items.push(SelectionItem {
+      name: "Panel Locks".to_string(),
+      description: Some("Show the Locks tab in the fixed team panel.".to_string()),
+      actions: vec![Box::new(|tx| {
+        tx.send(AppEvent::SetTeamPanelMode {
+          mode: TeamPanelMode::Expanded,
+        });
+        tx.send(AppEvent::SetTeamPanelTab {
+          tab: TeamPanelTab::Locks,
+        });
+      })],
+      dismiss_on_select: true,
+      ..Default::default()
+    });
+    items.push(SelectionItem {
+      name: "Refresh Dashboard".to_string(),
+      description: Some(
+        "Open the team console with the latest mailbox, task graph, and lock state.".to_string(),
+      ),
+      actions: vec![Box::new(|tx| tx.send(AppEvent::OpenTeamConsole))],
+      dismiss_on_select: true,
+      ..Default::default()
+    });
+    items.push(SelectionItem {
+      name: "Reassign Task".to_string(),
+      description: Some("Choose a task and transfer ownership without review mode.".to_string()),
+      actions: vec![Box::new(|tx| {
+        tx.send(AppEvent::OpenTeamTaskPicker {
+          operation: TeamTaskOperation::Reassign,
+        });
+      })],
+      dismiss_on_select: true,
+      ..Default::default()
+    });
+    items.push(SelectionItem {
+      name: "Handoff Task".to_string(),
+      description: Some("Choose a task and hand it to another teammate.".to_string()),
+      actions: vec![Box::new(|tx| {
+        tx.send(AppEvent::OpenTeamTaskPicker {
+          operation: TeamTaskOperation::Handoff,
+        });
+      })],
+      dismiss_on_select: true,
+      ..Default::default()
+    });
+    items.push(SelectionItem {
+      name: "Review Handoff".to_string(),
+      description: Some("Downgrade a task into review mode for another teammate.".to_string()),
+      actions: vec![Box::new(|tx| {
+        tx.send(AppEvent::OpenTeamTaskPicker {
+          operation: TeamTaskOperation::ReviewHandoff,
+        });
+      })],
+      dismiss_on_select: true,
+      ..Default::default()
+    });
+    items.push(SelectionItem {
+      name: "Release Task Leases".to_string(),
+      description: Some("Release all locks currently held by a task.".to_string()),
+      actions: vec![Box::new(|tx| {
+        tx.send(AppEvent::OpenTeamTaskPicker {
+          operation: TeamTaskOperation::ReleaseLeases,
+        });
+      })],
+      dismiss_on_select: true,
+      ..Default::default()
+    });
+    items.push(SelectionItem {
+      name: "Force Release Lock".to_string(),
+      description: Some("Choose a specific lease and force release it as @main.".to_string()),
+      actions: vec![Box::new(|tx| tx.send(AppEvent::OpenTeamLeasePicker))],
+      dismiss_on_select: true,
+      ..Default::default()
+    });
+
+    self
+      .chat_widget
+      .bottom_pane
+      .show_selection_view(SelectionViewParams {
+        title: Some("Team Console".to_string()),
+        subtitle: Some(format!(
+          "{} teammates | {} tasks | {} live locks | {} recent messages",
+          snapshot.members.len().saturating_sub(1),
+          snapshot.tasks.len(),
+          snapshot.ownership_leases.len(),
+          snapshot.recent_messages.len()
+        )),
+        footer_hint: Some(standard_popup_hint_line()),
+        items,
+        ..Default::default()
+      });
+  }
+
+  fn open_team_task_picker(&mut self, operation: TeamTaskOperation) {
+    use crate::bottom_pane::list_selection_view::SelectionAction;
+    use crate::bottom_pane::list_selection_view::SelectionItem;
+    use crate::bottom_pane::list_selection_view::SelectionViewParams;
+    use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+
+    let Some(snapshot) = self.latest_team_snapshot.clone() else {
+      return;
+    };
+    let mut tasks = snapshot.tasks;
+    if matches!(operation, TeamTaskOperation::ReleaseLeases) {
+      tasks.retain(|task| !task.granted_scopes.is_empty());
+    }
+    if tasks.is_empty() {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          "No matching team tasks are available for that action.".dim(),
+        )]));
+      return;
+    }
+
+    let items = tasks
+      .into_iter()
+      .map(|task| {
+        let description = Some(format!(
+          "{:?} | owner={} | blockers={}",
+          task.status,
+          task
+            .owner_thread_id
+            .clone()
+            .unwrap_or_else(|| "unassigned".to_string()),
+          task
+            .blockers
+            .iter()
+            .filter(|blocker| blocker.active)
+            .count()
+        ));
+        let selected_description = task.blocking_reason.clone().or_else(|| {
+          (!task.granted_scopes.is_empty()).then(|| format!("Locks: {}", task.granted_scopes.len()))
+        });
+        let task_id = task.id.clone();
+        let action = operation;
+        let actions: Vec<SelectionAction> = if matches!(operation, TeamTaskOperation::ReleaseLeases)
+        {
+          vec![Box::new(move |tx| {
+            tx.send(AppEvent::ExecuteTeamTaskOperation {
+              task_id: task_id.clone(),
+              member_thread_id: String::new(),
+              operation: action,
+            });
+          })]
+        } else {
+          vec![Box::new(move |tx| {
+            tx.send(AppEvent::OpenTeamMemberPicker {
+              task_id: task_id.clone(),
+              operation: action,
+            });
+          })]
+        };
+        SelectionItem {
+          name: format!("#{} {}", task.id, task.title),
+          description,
+          selected_description,
+          actions,
+          dismiss_on_select: true,
+          search_value: Some(format!("{} {}", task.id, task.title)),
+          ..Default::default()
+        }
+      })
+      .collect();
+
+    self
+      .chat_widget
+      .bottom_pane
+      .show_selection_view(SelectionViewParams {
+        title: Some(team_task_operation_title(operation).to_string()),
+        subtitle: Some("Choose the task to operate on.".to_string()),
+        footer_hint: Some(standard_popup_hint_line()),
+        items,
+        is_searchable: true,
+        search_placeholder: Some("Filter tasks".to_string()),
+        ..Default::default()
+      });
+  }
+
+  fn open_team_member_picker(&mut self, task_id: String, operation: TeamTaskOperation) {
+    use crate::bottom_pane::list_selection_view::SelectionAction;
+    use crate::bottom_pane::list_selection_view::SelectionItem;
+    use crate::bottom_pane::list_selection_view::SelectionViewParams;
+    use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+
+    let Some(snapshot) = self.latest_team_snapshot.clone() else {
+      return;
+    };
+    let task = snapshot
+      .tasks
+      .iter()
+      .find(|task| task.id == task_id)
+      .cloned();
+    let Some(task) = task else {
+      return;
+    };
+    let mut members = snapshot
+      .members
+      .into_iter()
+      .map(|member| (member.thread_id.clone(), member))
+      .collect::<Vec<_>>();
+    members.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let items = members
+      .into_iter()
+      .map(|(thread_id, member)| {
+        let label = crate::multi_agents::format_agent_picker_item_name(
+          member.nickname.as_deref(),
+          Some(member.role.as_str()),
+          thread_id == self.primary_thread_id,
+        );
+        let description = Some(format!(
+          "{:?}/{:?} | {}",
+          member.state.lifecycle.clone(),
+          member.state.turn_outcome.clone(),
+          member.task
+        ));
+        let task_id = task.id.clone();
+        let target_thread_id = thread_id.clone();
+        let action = operation;
+        let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+          tx.send(AppEvent::ExecuteTeamTaskOperation {
+            task_id: task_id.clone(),
+            member_thread_id: target_thread_id.clone(),
+            operation: action,
+          });
+        })];
+        SelectionItem {
+          name: label,
+          description,
+          is_current: task.owner_thread_id.as_deref() == Some(thread_id.as_str()),
+          actions,
+          dismiss_on_select: true,
+          search_value: Some(format!("{} {}", thread_id, member.task)),
+          ..Default::default()
+        }
+      })
+      .collect();
+
+    self
+      .chat_widget
+      .bottom_pane
+      .show_selection_view(SelectionViewParams {
+        title: Some(team_task_operation_member_title(operation).to_string()),
+        subtitle: Some(format!("Task #{} {}", task.id, task.title)),
+        footer_hint: Some(standard_popup_hint_line()),
+        items,
+        is_searchable: true,
+        search_placeholder: Some("Filter teammates".to_string()),
+        ..Default::default()
+      });
+  }
+
+  fn open_team_lease_picker(&mut self) {
+    use crate::bottom_pane::list_selection_view::SelectionAction;
+    use crate::bottom_pane::list_selection_view::SelectionItem;
+    use crate::bottom_pane::list_selection_view::SelectionViewParams;
+    use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+
+    let Some(snapshot) = self.latest_team_snapshot.clone() else {
+      return;
+    };
+    if snapshot.ownership_leases.is_empty() {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          "No ownership leases are currently active.".dim(),
+        )]));
+      return;
+    }
+
+    let items = snapshot
+      .ownership_leases
+      .into_iter()
+      .map(|lease| {
+        let lease_id = lease.id.clone();
+        let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+          tx.send(AppEvent::ForceReleaseLease {
+            lease_id: lease_id.clone(),
+          });
+        })];
+        SelectionItem {
+          name: format!("{} {}", lease.owner_thread_id, lease.scope.path),
+          description: Some(format!(
+            "task={} | access={:?} | scope={:?}",
+            lease.task_id, lease.access, lease.scope.kind
+          )),
+          selected_description: Some(format!("lease {}", lease.id)),
+          actions,
+          dismiss_on_select: true,
+          search_value: Some(format!(
+            "{} {} {}",
+            lease.id, lease.owner_thread_id, lease.scope.path
+          )),
+          ..Default::default()
+        }
+      })
+      .collect();
+
+    self
+      .chat_widget
+      .bottom_pane
+      .show_selection_view(SelectionViewParams {
+        title: Some("Force Release Lock".to_string()),
+        subtitle: Some("Choose the lease to recover as @main.".to_string()),
+        footer_hint: Some(standard_popup_hint_line()),
+        items,
+        is_searchable: true,
+        search_placeholder: Some("Filter leases".to_string()),
+        ..Default::default()
+      });
+  }
+
+  async fn execute_team_task_operation(
+    &mut self,
+    task_id: String,
+    member_thread_id: String,
+    operation: TeamTaskOperation,
+  ) -> Result<()> {
+    let task = match operation {
+      TeamTaskOperation::Reassign => {
+        self
+          .cokra
+          .team_assign_task(
+            &task_id,
+            member_thread_id,
+            Some("reassigned from /collab".to_string()),
+            true,
+          )
+          .await?
+      }
+      TeamTaskOperation::Handoff => {
+        self
+          .cokra
+          .team_handoff_task(
+            &task_id,
+            member_thread_id,
+            Some("handoff from /collab".to_string()),
+            false,
+          )
+          .await?
+      }
+      TeamTaskOperation::ReviewHandoff => {
+        self
+          .cokra
+          .team_handoff_task(
+            &task_id,
+            member_thread_id,
+            Some("review handoff from /collab".to_string()),
+            true,
+          )
+          .await?
+      }
+      TeamTaskOperation::ReleaseLeases => self.cokra.team_release_task_leases(&task_id).await?,
+    };
+    if let Some(task) = task {
+      self
+        .chat_widget
+        .add_to_history(crate::multi_agents::task_updated(
+          cokra_protocol::CollabTaskUpdatedEvent {
+            actor_thread_id: self.primary_thread_id.clone(),
+            task,
+          },
+        ));
+      self.refresh_team_snapshot_cache();
+    } else {
+      self
+        .chat_widget
+        .add_to_history(PlainHistoryCell::new(vec![Line::from(
+          "The selected team task is no longer available.".dim(),
+        )]));
+    }
+    Ok(())
+  }
+
+  async fn force_release_team_lease(&mut self, lease_id: String) -> Result<()> {
+    match self.cokra.team_force_release_lease(&lease_id).await? {
+      Some(lease) => {
+        self
+          .chat_widget
+          .add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
+            "Released lock {} on {} (task {})",
+            lease.id, lease.scope.path, lease.task_id
+          ))]));
+        self.refresh_team_snapshot_cache();
+      }
+      None => {
+        self
+          .chat_widget
+          .add_to_history(PlainHistoryCell::new(vec![Line::from(
+            "No active team runtime is available for force release.".dim(),
+          )]));
+      }
+    }
+    Ok(())
   }
 
   fn open_agent_picker(&mut self) {
@@ -2949,7 +3790,7 @@ impl App {
       return;
     }
 
-    let snapshot = self.cokra.team_snapshot();
+    let snapshot = self.latest_team_snapshot.clone();
     let mut initial_selected_idx = None;
     let items = threads
       .into_iter()
@@ -2974,7 +3815,13 @@ impl App {
             .members
             .iter()
             .find(|member| member.thread_id == thread_id)
-            .map(|member| format!("{:?}", member.status))
+            .map(|member| {
+              format!(
+                "{:?}/{:?}",
+                member.state.lifecycle.clone(),
+                member.state.turn_outcome.clone()
+              )
+            })
         });
         let task = snapshot.as_ref().and_then(|state| {
           state
@@ -3052,7 +3899,7 @@ impl App {
     self.pending_approval = None;
     self.pending_approval_request = None;
     self.pending_user_input_request = None;
-    self.show_team_dashboard();
+    self.refresh_team_snapshot_cache();
     self.sync_bottom_pane_context();
     Ok(())
   }
@@ -3268,49 +4115,95 @@ impl App {
   }
 }
 
-fn event_thread_id(event: &EventMsg) -> Option<String> {
-  match event {
-    EventMsg::Error(e) => Some(e.thread_id.clone()),
-    EventMsg::Warning(e) => Some(e.thread_id.clone()),
-    EventMsg::TokenCount(e) => Some(e.thread_id.clone()),
-    EventMsg::AgentMessage(e) => Some(e.thread_id.clone()),
-    EventMsg::AgentMessageDelta(e) => Some(e.thread_id.clone()),
-    EventMsg::AgentMessageContentDelta(e) => Some(e.thread_id.clone()),
-    EventMsg::UserMessage(e) => Some(e.thread_id.clone()),
-    EventMsg::SessionConfigured(e) => Some(e.thread_id.clone()),
-    EventMsg::ThreadNameUpdated(e) => Some(e.thread_id.clone()),
-    EventMsg::ExecCommandBegin(e) => Some(e.thread_id.clone()),
-    EventMsg::ExecCommandOutputDelta(e) => Some(e.thread_id.clone()),
-    EventMsg::ExecCommandEnd(e) => Some(e.thread_id.clone()),
-    EventMsg::ExecApprovalRequest(e) => Some(e.thread_id.clone()),
-    EventMsg::RequestUserInput(e) => Some(e.thread_id.clone()),
-    EventMsg::StreamError(e) => Some(e.thread_id.clone()),
-    EventMsg::TurnComplete(e) => Some(e.thread_id.clone()),
-    EventMsg::TurnAborted(e) => Some(e.thread_id.clone()),
-    EventMsg::TurnStarted(e) => Some(e.thread_id.clone()),
-    EventMsg::ItemStarted(e) => Some(e.thread_id.clone()),
-    EventMsg::ItemCompleted(e) => Some(e.thread_id.clone()),
-    EventMsg::PlanDelta(e) => Some(e.thread_id.clone()),
-    EventMsg::ReasoningContentDelta(e) => Some(e.thread_id.clone()),
-    EventMsg::ReasoningRawContentDelta(e) => Some(e.thread_id.clone()),
-    EventMsg::CollabAgentSpawnBegin(e) => Some(e.thread_id.clone()),
-    EventMsg::CollabAgentSpawnEnd(e) => Some(e.thread_id.clone()),
-    EventMsg::CollabAgentInteractionBegin(e) => Some(e.thread_id.clone()),
-    EventMsg::CollabAgentInteractionEnd(e) => Some(e.thread_id.clone()),
-    EventMsg::CollabMessagePosted(e) => Some(e.sender_thread_id.clone()),
-    EventMsg::CollabMessagesRead(e) => Some(e.reader_thread_id.clone()),
-    EventMsg::CollabTaskUpdated(e) => Some(e.actor_thread_id.clone()),
-    EventMsg::CollabTeamSnapshot(e) => Some(e.actor_thread_id.clone()),
-    EventMsg::CollabPlanSubmitted(e) => Some(e.actor_thread_id.clone()),
-    EventMsg::CollabPlanDecision(e) => Some(e.actor_thread_id.clone()),
-    EventMsg::CollabWaitingBegin(e) => Some(e.sender_thread_id.clone()),
-    EventMsg::CollabWaitingEnd(e) => Some(e.sender_thread_id.clone()),
-    EventMsg::CollabCloseBegin(e) => Some(e.sender_thread_id.clone()),
-    EventMsg::CollabCloseEnd(e) => Some(e.sender_thread_id.clone()),
-    EventMsg::CollabResumeBegin(e) => Some(e.sender_thread_id.clone()),
-    EventMsg::CollabResumeEnd(e) => Some(e.sender_thread_id.clone()),
-    _ => None,
-  }
+fn event_thread_targets(event: &EventMsg, primary_thread_id: &str) -> Vec<String> {
+  let mut targets = match event {
+    EventMsg::Error(e) => vec![e.thread_id.clone()],
+    EventMsg::Warning(e) => vec![e.thread_id.clone()],
+    EventMsg::TokenCount(e) => vec![e.thread_id.clone()],
+    EventMsg::AgentMessage(e) => vec![e.thread_id.clone()],
+    EventMsg::AgentMessageDelta(e) => vec![e.thread_id.clone()],
+    EventMsg::AgentMessageContentDelta(e) => vec![e.thread_id.clone()],
+    EventMsg::UserMessage(e) => vec![e.thread_id.clone()],
+    EventMsg::SessionConfigured(e) => vec![e.thread_id.clone()],
+    EventMsg::ThreadNameUpdated(e) => vec![e.thread_id.clone()],
+    EventMsg::ExecCommandBegin(e) => vec![e.thread_id.clone()],
+    EventMsg::ExecCommandOutputDelta(e) => vec![e.thread_id.clone()],
+    EventMsg::ExecCommandEnd(e) => vec![e.thread_id.clone()],
+    EventMsg::ExecApprovalRequest(e) => vec![e.thread_id.clone()],
+    EventMsg::RequestUserInput(e) => vec![e.thread_id.clone()],
+    EventMsg::StreamError(e) => vec![e.thread_id.clone()],
+    EventMsg::TurnComplete(e) => vec![e.thread_id.clone()],
+    EventMsg::TurnAborted(e) => vec![e.thread_id.clone()],
+    EventMsg::TurnStarted(e) => vec![e.thread_id.clone()],
+    EventMsg::ItemStarted(e) => vec![e.thread_id.clone()],
+    EventMsg::ItemCompleted(e) => vec![e.thread_id.clone()],
+    EventMsg::PlanDelta(e) => vec![e.thread_id.clone()],
+    EventMsg::ReasoningContentDelta(e) => vec![e.thread_id.clone()],
+    EventMsg::ReasoningRawContentDelta(e) => vec![e.thread_id.clone()],
+    EventMsg::TodoUpdate(e) => vec![e.thread_id.clone()],
+    EventMsg::CollabAgentSpawnBegin(e) => vec![e.thread_id.clone()],
+    EventMsg::CollabAgentSpawnEnd(e) => vec![e.thread_id.clone()],
+    EventMsg::CollabAgentInteractionBegin(e) => vec![e.thread_id.clone()],
+    EventMsg::CollabAgentInteractionEnd(e) => vec![e.thread_id.clone()],
+    EventMsg::CollabAgentStateChanged(e) => vec![e.thread_id.clone()],
+    EventMsg::CollabMessagePosted(e) => vec![e.sender_thread_id.clone()],
+    EventMsg::CollabMailboxDelivered(e) => vec![e.thread_id.clone()],
+    EventMsg::CollabMessagesRead(e) => vec![e.reader_thread_id.clone()],
+    EventMsg::CollabTaskUpdated(e) => vec![e.actor_thread_id.clone()],
+    EventMsg::CollabTeamSnapshot(e) => vec![e.actor_thread_id.clone()],
+    EventMsg::CollabSummaryCheckpoint(e) => vec![e.thread_id.clone()],
+    EventMsg::CollabPlanSubmitted(e) => vec![e.actor_thread_id.clone()],
+    EventMsg::CollabPlanDecision(e) => vec![e.actor_thread_id.clone()],
+    EventMsg::CollabWaitingBegin(e) => vec![e.sender_thread_id.clone()],
+    EventMsg::CollabWaitingEnd(e) => vec![e.sender_thread_id.clone()],
+    EventMsg::CollabCloseBegin(e) => vec![e.sender_thread_id.clone()],
+    EventMsg::CollabCloseEnd(e) => vec![e.sender_thread_id.clone()],
+    EventMsg::CollabResumeBegin(e) => vec![e.sender_thread_id.clone()],
+    EventMsg::CollabResumeEnd(e) => vec![e.sender_thread_id.clone()],
+    _ => vec![primary_thread_id.to_string()],
+  };
+  targets.sort();
+  targets.dedup();
+  targets
+}
+
+fn transcript_owns_event(event: &EventMsg) -> bool {
+  matches!(
+    event,
+    EventMsg::UserMessage(_)
+      | EventMsg::AgentMessage(_)
+      | EventMsg::AgentMessageDelta(_)
+      | EventMsg::AgentMessageContentDelta(_)
+      | EventMsg::TokenCount(_)
+      | EventMsg::ExecCommandBegin(_)
+      | EventMsg::ExecCommandOutputDelta(_)
+      | EventMsg::ExecCommandEnd(_)
+      | EventMsg::TodoUpdate(_)
+      | EventMsg::CollabAgentSpawnEnd(_)
+      | EventMsg::CollabAgentInteractionEnd(_)
+      | EventMsg::CollabWaitingBegin(_)
+      | EventMsg::CollabWaitingEnd(_)
+      | EventMsg::CollabCloseEnd(_)
+      | EventMsg::CollabMailboxDelivered(_)
+      | EventMsg::CollabMessagesRead(_)
+      | EventMsg::CollabMessagePosted(_)
+      | EventMsg::CollabTaskUpdated(_)
+      | EventMsg::CollabTeamSnapshot(_)
+      | EventMsg::CollabSummaryCheckpoint(_)
+      | EventMsg::CollabPlanSubmitted(_)
+      | EventMsg::CollabPlanDecision(_)
+      | EventMsg::Warning(_)
+      | EventMsg::StreamError(_)
+      | EventMsg::Error(_)
+      | EventMsg::TurnComplete(_)
+      | EventMsg::TurnAborted(_)
+      | EventMsg::ThreadNameUpdated(_)
+      | EventMsg::TurnStarted(_)
+  )
+}
+
+fn legacy_replay_needed(event: &EventMsg) -> bool {
+  !transcript_owns_event(event)
 }
 
 fn decrement_background_approval(
@@ -3334,6 +4227,24 @@ fn decrement_background_user_input(
     if pending.approval_count == 0 && pending.user_input_count == 0 {
       pending_threads.remove(thread_id);
     }
+  }
+}
+
+fn team_task_operation_title(operation: TeamTaskOperation) -> &'static str {
+  match operation {
+    TeamTaskOperation::Reassign => "Reassign Task",
+    TeamTaskOperation::Handoff => "Handoff Task",
+    TeamTaskOperation::ReviewHandoff => "Review Handoff",
+    TeamTaskOperation::ReleaseLeases => "Release Task Leases",
+  }
+}
+
+fn team_task_operation_member_title(operation: TeamTaskOperation) -> &'static str {
+  match operation {
+    TeamTaskOperation::Reassign => "Choose New Owner",
+    TeamTaskOperation::Handoff => "Choose Handoff Target",
+    TeamTaskOperation::ReviewHandoff => "Choose Reviewer",
+    TeamTaskOperation::ReleaseLeases => "Choose Teammate",
   }
 }
 
@@ -3401,29 +4312,72 @@ mod tests {
   }
 
   #[test]
-  fn thread_event_store_keeps_full_history_without_truncation() {
+  fn thread_event_store_only_retains_legacy_replay_events() {
     let mut store = ThreadEventStore::new();
     for idx in 0..600 {
-      store.push_event(Event {
-        id: format!("event-{idx}"),
-        msg: EventMsg::AgentMessage(cokra_protocol::AgentMessageEvent {
-          thread_id: "agent-1".to_string(),
-          turn_id: "turn-1".to_string(),
-          item_id: format!("item-{idx}"),
-          content: vec![cokra_protocol::AgentMessageContent::Text {
-            text: format!("message-{idx}"),
-          }],
-        }),
-      });
+      if legacy_replay_needed(&EventMsg::AgentMessage(cokra_protocol::AgentMessageEvent {
+        thread_id: "agent-1".to_string(),
+        turn_id: "turn-1".to_string(),
+        item_id: format!("item-{idx}"),
+        content: vec![cokra_protocol::AgentMessageContent::Text {
+          text: format!("message-{idx}"),
+        }],
+      })) {
+        store.push_event(Event {
+          id: format!("event-{idx}"),
+          msg: EventMsg::AgentMessage(cokra_protocol::AgentMessageEvent {
+            thread_id: "agent-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: format!("item-{idx}"),
+            content: vec![cokra_protocol::AgentMessageContent::Text {
+              text: format!("message-{idx}"),
+            }],
+          }),
+        });
+      }
     }
 
     let snapshot = store.snapshot();
-    assert_eq!(snapshot.events.len(), 600);
+    assert_eq!(snapshot.events.len(), 0);
 
-    let first = snapshot.events.first().expect("first event");
-    let last = snapshot.events.last().expect("last event");
-    assert_eq!(first.id, "event-0");
-    assert_eq!(last.id, "event-599");
+    let session_configured = EventMsg::SessionConfigured(cokra_protocol::SessionConfiguredEvent {
+      thread_id: "thread-1".to_string(),
+      model: "openai/gpt-5".to_string(),
+      approval_policy: "Ask".to_string(),
+      sandbox_mode: "WorkspaceWrite".to_string(),
+      context_window_limit: None,
+      previous_model: None,
+      model_switched_at: None,
+    });
+    assert!(legacy_replay_needed(&session_configured));
+  }
+
+  #[test]
+  fn transcript_owns_core_history_events() {
+    assert!(transcript_owns_event(&EventMsg::TodoUpdate(
+      cokra_protocol::TodoUpdateEvent {
+        thread_id: "impl-thread".to_string(),
+        todos: Vec::new(),
+      },
+    )));
+    assert!(transcript_owns_event(&EventMsg::CollabSummaryCheckpoint(
+      cokra_protocol::CollabSummaryCheckpointEvent {
+        thread_id: "main-thread".to_string(),
+        lines: vec!["Agent Teams Done".to_string()],
+        fingerprint: 1,
+      },
+    )));
+    assert!(!transcript_owns_event(&EventMsg::ContextCompacted(
+      cokra_protocol::ContextCompactedEvent {
+        thread_id: "thread-1".to_string(),
+        turn_id: "turn-1".to_string(),
+        reason: cokra_protocol::ContextCompactionReason::Threshold,
+        tokens_before_est: 100,
+        tokens_after_est: 50,
+        reserve_tokens: 10,
+        keep_recent_tokens: 10,
+      },
+    )));
   }
 
   #[test]
@@ -3478,5 +4432,41 @@ mod tests {
           .add_modifier
           .contains(ratatui::style::Modifier::UNDERLINED)
     }));
+  }
+
+  #[test]
+  fn event_thread_targets_route_todo_updates_to_their_own_thread() {
+    let targets = event_thread_targets(
+      &EventMsg::TodoUpdate(cokra_protocol::TodoUpdateEvent {
+        thread_id: "impl-thread".to_string(),
+        todos: Vec::new(),
+      }),
+      "main-thread",
+    );
+
+    assert_eq!(targets, vec!["impl-thread".to_string()]);
+  }
+
+  #[test]
+  fn event_thread_targets_route_mailbox_delivery_to_recipient_thread() {
+    let targets = event_thread_targets(
+      &EventMsg::CollabMailboxDelivered(cokra_protocol::CollabMailboxDeliveredEvent {
+        thread_id: "review-thread".to_string(),
+        sender_thread_id: "main-thread".to_string(),
+        sender_nickname: Some("main".to_string()),
+        sender_role: Some("root".to_string()),
+        recipient_thread_id: "review-thread".to_string(),
+        recipient_nickname: Some("reviewer".to_string()),
+        recipient_role: Some("general".to_string()),
+        message: "Please run another pass.".to_string(),
+        task_id: None,
+        delivery_mode: cokra_protocol::TeamMessageDeliveryMode::DurableMail,
+        kind: cokra_protocol::TeamMessageKind::Direct,
+        created_at: 0,
+      }),
+      "main-thread",
+    );
+
+    assert_eq!(targets, vec!["review-thread".to_string()]);
   }
 }

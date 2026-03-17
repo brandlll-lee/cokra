@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use cokra_protocol::CollabMailboxDeliveredEvent;
 use cokra_protocol::CollabMessagePostedEvent;
 use cokra_protocol::EventMsg;
 use cokra_protocol::TeamMessageDeliveryMode;
@@ -11,6 +12,7 @@ use crate::agent::team_runtime::runtime_for_thread;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::team_selectors::resolve_optional_agent_selector;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 
@@ -44,10 +46,11 @@ impl ToolHandler for SendTeamMessageHandler {
     let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
       FunctionCallError::Execution("send_team_message runtime is not configured".to_string())
     })?;
-    let direct = args
-      .recipient_thread_id
-      .clone()
-      .filter(|value| !value.trim().is_empty());
+    let direct = resolve_optional_agent_selector(
+      &team_runtime,
+      args.recipient_thread_id.clone(),
+      "recipient_thread_id",
+    )?;
     let channel = args
       .channel
       .clone()
@@ -70,6 +73,10 @@ impl ToolHandler for SendTeamMessageHandler {
     } else {
       channel.clone()
     };
+    let recipient = direct
+      .as_deref()
+      .and_then(|thread_id| team_runtime.collab_agent_ref(thread_id));
+    let sender = team_runtime.collab_agent_ref(&runtime.thread_id);
     let message = team_runtime
       .post_message(
         runtime.thread_id.clone(),
@@ -89,14 +96,72 @@ impl ToolHandler for SendTeamMessageHandler {
       let _ = tx_event
         .send(EventMsg::CollabMessagePosted(CollabMessagePostedEvent {
           sender_thread_id: runtime.thread_id.clone(),
-          sender_nickname: None,
-          sender_role: None,
+          sender_nickname: sender.as_ref().and_then(|agent| agent.nickname.clone()),
+          sender_role: sender.as_ref().and_then(|agent| agent.role.clone()),
           recipient_thread_id: direct.clone(),
-          recipient_nickname: None,
-          recipient_role: None,
+          recipient_nickname: recipient.as_ref().and_then(|agent| agent.nickname.clone()),
+          recipient_role: recipient.and_then(|agent| agent.role),
           message: args.message,
         }))
         .await;
+      match message.kind {
+        TeamMessageKind::Direct => {
+          if let Some(recipient_thread_id) = message.recipient_thread_id.clone() {
+            let recipient = team_runtime.collab_agent_ref(&recipient_thread_id);
+            let _ = tx_event
+              .send(EventMsg::CollabMailboxDelivered(
+                CollabMailboxDeliveredEvent {
+                  thread_id: recipient_thread_id.clone(),
+                  sender_thread_id: runtime.thread_id.clone(),
+                  sender_nickname: sender.as_ref().and_then(|agent| agent.nickname.clone()),
+                  sender_role: sender.as_ref().and_then(|agent| agent.role.clone()),
+                  recipient_thread_id,
+                  recipient_nickname: recipient.as_ref().and_then(|agent| agent.nickname.clone()),
+                  recipient_role: recipient.and_then(|agent| agent.role),
+                  message: message.message.clone(),
+                  task_id: message.task_id.clone(),
+                  delivery_mode: message.delivery_mode.clone(),
+                  kind: message.kind.clone(),
+                  created_at: message.created_at,
+                },
+              ))
+              .await;
+          }
+        }
+        TeamMessageKind::Broadcast | TeamMessageKind::Channel => {
+          let mut recipient_thread_ids = team_runtime.list_spawned_agent_ids();
+          if let Some(root_thread_id) = team_runtime.resolve_agent_selector("main") {
+            recipient_thread_ids.push(root_thread_id);
+          }
+          recipient_thread_ids.sort();
+          recipient_thread_ids.dedup();
+          for recipient_thread_id in recipient_thread_ids {
+            if recipient_thread_id == runtime.thread_id {
+              continue;
+            }
+            let recipient = team_runtime.collab_agent_ref(&recipient_thread_id);
+            let _ = tx_event
+              .send(EventMsg::CollabMailboxDelivered(
+                CollabMailboxDeliveredEvent {
+                  thread_id: recipient_thread_id.clone(),
+                  sender_thread_id: runtime.thread_id.clone(),
+                  sender_nickname: sender.as_ref().and_then(|agent| agent.nickname.clone()),
+                  sender_role: sender.as_ref().and_then(|agent| agent.role.clone()),
+                  recipient_thread_id,
+                  recipient_nickname: recipient.as_ref().and_then(|agent| agent.nickname.clone()),
+                  recipient_role: recipient.and_then(|agent| agent.role),
+                  message: message.message.clone(),
+                  task_id: message.task_id.clone(),
+                  delivery_mode: message.delivery_mode.clone(),
+                  kind: message.kind.clone(),
+                  created_at: message.created_at,
+                },
+              ))
+              .await;
+          }
+        }
+        TeamMessageKind::Queue => {}
+      }
     }
 
     let out = ToolOutput::success(serde_json::to_string(&message).map_err(|err| {

@@ -21,8 +21,31 @@ pub fn light_blue() -> Color {
   best_color(LIGHT_BLUE_TARGET)
 }
 
+const AGENT_ACCENT_TARGETS: &[(u8, u8, u8)] = &[
+  (0x59, 0xa4, 0xf9),
+  (0x7d, 0xd3, 0x7d),
+  (0xf9, 0xb8, 0x4a),
+  (0xf2, 0x78, 0xa4),
+  (0x8f, 0x8c, 0xff),
+  (0x5f, 0xd6, 0xd0),
+];
+
+pub fn agent_accent(seed: &str) -> Color {
+  let idx = stable_hash(seed) as usize % AGENT_ACCENT_TARGETS.len();
+  best_color(AGENT_ACCENT_TARGETS[idx])
+}
+
 fn bump_palette_version() {
   DEFAULT_PALETTE_VERSION.fetch_add(1, Ordering::Relaxed);
+}
+
+fn stable_hash(seed: &str) -> u64 {
+  let mut hash: u64 = 0xcbf29ce484222325;
+  for byte in seed.as_bytes() {
+    hash ^= u64::from(*byte);
+    hash = hash.wrapping_mul(0x100000001b3);
+  }
+  hash
 }
 
 /// Returns the closest color to the target color that the terminal can display.

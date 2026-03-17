@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::exec_cell::ExecCall;
 use crate::exec_cell::ExecCell;
+use crate::exec_cell::is_ui_handled_tool;
 use crate::exec_cell::model::CommandOutput;
 use crate::exec_cell::new_active_exec_command;
 use crate::history_cell::ApprovalRequestedHistoryCell;
@@ -15,6 +16,25 @@ impl ChatWidget {
   }
 
   pub(super) fn handle_exec_begin_now(&mut self, event: &cokra_protocol::ExecCommandBeginEvent) {
+    // UI-handled tools (e.g. todo_write) have their visual representation
+    // managed by a dedicated active widget. Skip ExecCell creation entirely;
+    // only track in pending_exec_calls so handle_exec_end_now can clean up.
+    if is_ui_handled_tool(&event.tool_name) {
+      self.transcript.pending_exec_calls.insert(
+        event.command_id.clone(),
+        ExecCall {
+          command_id: event.command_id.clone(),
+          tool_name: event.tool_name.clone(),
+          command: event.command.clone(),
+          cwd: event.cwd.clone(),
+          output: None,
+          start_time: Some(Instant::now()),
+          duration: None,
+        },
+      );
+      return;
+    }
+
     self.flush_answer_stream();
 
     let call = ExecCall {
@@ -36,17 +56,15 @@ impl ChatWidget {
 
     if let Some(merged_exec_cell) = merged_exec_cell {
       // ScrollbackFirst: before merging the new call, emit a snapshot of the
-      // *current* completed state so the user sees the exploring list grow in
-      // scrollback. We only emit when the current cell has no active calls
-      // (all calls have output), which guarantees the snapshot shows
-      // "● Explored" with no spinner residue.
+      // *current* completed state for non-exploring cells. Exploring cells are
+      // handled by the ExploringAccumulator + live summary instead.
       if self.stream_render_mode == StreamRenderMode::ScrollbackFirst {
         if let Some(cell) = self
           .transcript
           .active_exec_cell
           .as_ref()
           .and_then(|cell| cell.as_any().downcast_ref::<ExecCell>())
-          .filter(|cell| !cell.is_active())
+          .filter(|cell| !cell.is_active() && !cell.is_exploring_cell())
         {
           self
             .app_event_tx
@@ -119,6 +137,17 @@ impl ChatWidget {
   }
 
   pub(super) fn handle_exec_end_now(&mut self, event: &cokra_protocol::ExecCommandEndEvent) {
+    // UI-handled tools: just remove from pending, no ExecCell to update.
+    if self
+      .transcript
+      .pending_exec_calls
+      .get(&event.command_id)
+      .is_some_and(|call| is_ui_handled_tool(&call.tool_name))
+    {
+      self.transcript.pending_exec_calls.remove(&event.command_id);
+      return;
+    }
+
     let mut call = self
       .transcript
       .pending_exec_calls
@@ -431,82 +460,31 @@ mod tests {
   }
 
   #[test]
-  fn scrollback_first_exploring_cell_writes_snapshot_on_each_new_call() {
+  fn scrollback_first_exploring_cells_do_not_emit_intermediate_snapshots() {
     let (mut widget, mut rx) = make_scrollback_first_widget();
 
-    // First exploring call — no snapshot yet (nothing to snapshot before it).
+    // First exploring call — no snapshot.
     widget.handle_exec_begin_now(&begin_event("call-1", "list_dir", "cokra-rs"));
     assert!(
       rx.try_recv().is_err(),
       "first exploring call should not emit a scrollback snapshot"
     );
 
-    // Complete call-1: the cell is now fully idle (no active calls).
+    // Complete call-1, start call-2: with Phase 3, exploring cells no longer
+    // emit intermediate snapshots — the accumulator handles aggregation.
     widget.handle_exec_end_now(&end_event("call-1"));
+    widget.handle_exec_begin_now(&begin_event("call-2", "read_file", "Cargo.toml"));
     assert!(
       rx.try_recv().is_err(),
-      "exec_end alone should not emit a snapshot"
+      "exploring cells should not emit intermediate snapshots (handled by accumulator)"
     );
 
-    // Second exploring call — active_exec_cell is now !is_active(), so a snapshot is emitted.
-    widget.handle_exec_begin_now(&begin_event("call-2", "read_file", "Cargo.toml"));
-    let snapshot_event = rx
-      .try_recv()
-      .expect("expected scrollback snapshot after second call");
-    let AppEvent::InsertHistoryCell(snapshot) = snapshot_event else {
-      panic!("expected InsertHistoryCell event");
-    };
-    assert!(
-      snapshot.is_stream_continuation(),
-      "scrollback snapshot should be marked as stream continuation to suppress blank line"
-    );
-    let rendered = snapshot
-      .display_lines(80)
-      .iter()
-      .map(|l| l.to_string())
-      .collect::<Vec<_>>()
-      .join("\n");
-    assert!(
-      rendered.contains("Explored"),
-      "snapshot should show Explored (no spinner): {rendered}"
-    );
-    assert!(
-      rendered.contains("List cokra-rs"),
-      "snapshot should contain the first call: {rendered}"
-    );
-    assert!(
-      !rendered.contains("Cargo.toml"),
-      "snapshot should NOT yet contain the second call: {rendered}"
-    );
-
-    // Complete call-2, then start call-3 — should emit another snapshot (now with 2 calls).
+    // Complete call-2, start call-3: still no intermediate snapshot.
     widget.handle_exec_end_now(&end_event("call-2"));
     widget.handle_exec_begin_now(&begin_event("call-3", "glob", "**/*.rs"));
-    let snapshot2_event = rx.try_recv().expect("expected second scrollback snapshot");
-    let AppEvent::InsertHistoryCell(snapshot2) = snapshot2_event else {
-      panic!("expected InsertHistoryCell event");
-    };
-    let rendered2 = snapshot2
-      .display_lines(80)
-      .iter()
-      .map(|l| l.to_string())
-      .collect::<Vec<_>>()
-      .join("\n");
     assert!(
-      rendered2.contains("Explored"),
-      "second snapshot should show Explored (no spinner): {rendered2}"
-    );
-    assert!(
-      rendered2.contains("List cokra-rs"),
-      "second snapshot should contain call-1: {rendered2}"
-    );
-    assert!(
-      rendered2.contains("Read Cargo.toml"),
-      "second snapshot should contain call-2: {rendered2}"
-    );
-    assert!(
-      !rendered2.contains("glob"),
-      "second snapshot should NOT yet contain call-3: {rendered2}"
+      rx.try_recv().is_err(),
+      "exploring cells should not emit intermediate snapshots"
     );
   }
 
@@ -529,7 +507,7 @@ mod tests {
   }
 
   #[test]
-  fn agent_text_flushes_exec_cell_and_subsequent_exec_starts_new_cell() {
+  fn agent_text_flushes_exploring_cell_into_accumulator_and_subsequent_exec_starts_new_cell() {
     let (tx, mut rx) = unbounded_channel();
     let sender = AppEventSender::new(tx);
     let mut widget = ChatWidget::new(
@@ -541,22 +519,26 @@ mod tests {
     widget.set_agent_turn_running(true);
 
     widget.handle_exec_begin_now(&begin_event("call-1", "list_dir", "cokra-rs"));
-    // First agent delta should flush the exec cell (1:1 codex: handle_streaming_delta flushes active cell)
+    widget.handle_exec_end_now(&end_event("call-1"));
+    // First agent delta flushes the completed exploring cell — absorbed by accumulator.
     widget.on_agent_message_delta("item-1", "I'll inspect the top-level layout.");
 
-    // exec cell for call-1 should now be in history (flushed)
-    let Some(AppEvent::InsertHistoryCell(exec_cell)) = rx.try_recv().ok() else {
-      panic!("expected call-1 exec cell to be flushed to history when agent text starts");
-    };
-    let exec_rendered = exec_cell
-      .display_lines(80)
-      .iter()
-      .map(Line::to_string)
-      .collect::<Vec<_>>()
-      .join("\n");
-    assert!(exec_rendered.contains("List cokra-rs"));
+    // Exploring cell should NOT emit InsertHistoryCell (absorbed by accumulator).
+    // The only events should be streaming-related, not InsertHistoryCell for exploring.
+    while let Ok(event) = rx.try_recv() {
+      assert!(
+        !matches!(event, AppEvent::InsertHistoryCell(_)),
+        "exploring cell flush should go to accumulator, not scrollback: {event:?}"
+      );
+    }
 
-    // After agent text flushes exec cell, a new exec begin starts a fresh exec cell
+    // Accumulator should have absorbed call-1.
+    assert!(
+      !widget.transcript.exploring_accumulator.is_empty(),
+      "accumulator should have absorbed the exploring call"
+    );
+
+    // After agent text flushes exec cell, a new exec begin starts a fresh exec cell.
     widget.handle_exec_begin_now(&begin_event("call-2", "read_file", "Cargo.toml"));
 
     let cell = widget
@@ -569,6 +551,64 @@ mod tests {
       cell.calls.len(),
       1,
       "call-2 should be in a fresh exec cell, not merged with call-1"
+    );
+  }
+
+  #[test]
+  fn non_exploring_exec_calls_do_not_flush_running_rows_when_begins_overlap() {
+    let (tx, mut rx) = unbounded_channel();
+    let sender = AppEventSender::new(tx);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::AnimatedPreview,
+    );
+    widget.set_agent_turn_running(true);
+
+    widget.handle_exec_begin_now(&begin_event("call-1", "write_file", "write_file"));
+    widget.handle_exec_begin_now(&begin_event("call-2", "write_file", "write_file"));
+    widget.handle_exec_begin_now(&begin_event("call-3", "write_file", "write_file"));
+    widget.handle_exec_begin_now(&begin_event("call-4", "write_file", "write_file"));
+
+    while let Ok(event) = rx.try_recv() {
+      assert!(
+        !matches!(event, AppEvent::InsertHistoryCell(_)),
+        "overlapping begins must not flush a running exec cell into history: {event:?}"
+      );
+    }
+
+    widget.handle_exec_end_now(&cokra_protocol::ExecCommandEndEvent {
+      thread_id: "thread-1".to_string(),
+      turn_id: "turn-1".to_string(),
+      command_id: "call-4".to_string(),
+      exit_code: 1,
+      output: String::new(),
+    });
+    widget.handle_exec_end_now(&end_event("call-3"));
+    widget.handle_exec_end_now(&end_event("call-2"));
+    widget.handle_exec_end_now(&end_event("call-1"));
+
+    let Some(AppEvent::InsertHistoryCell(cell)) = rx.try_recv().ok() else {
+      panic!("expected a single settled exec cell after the last overlapping call finished");
+    };
+    let rendered = cell
+      .display_lines(80)
+      .iter()
+      .map(Line::to_string)
+      .collect::<Vec<_>>()
+      .join("\n");
+    assert!(
+      !rendered.contains("Running"),
+      "settled history should not strand running rows: {rendered}"
+    );
+    assert!(
+      rendered.matches("write_file").count() >= 4,
+      "expected all overlapping calls to be preserved in one settled cell: {rendered}"
+    );
+    assert!(
+      rx.try_recv().is_err(),
+      "only one settled history cell should be emitted for the overlapped batch"
     );
   }
 }

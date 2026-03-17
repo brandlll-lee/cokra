@@ -533,11 +533,18 @@ mod tests {
   use futures::Stream;
   use pretty_assertions::assert_eq;
   use std::pin::Pin;
+  use std::sync::Mutex;
+  use std::sync::OnceLock;
 
   #[derive(Debug)]
   struct TestProvider {
     id: &'static str,
     name: &'static str,
+  }
+
+  fn env_lock() -> &'static Mutex<()> {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK.get_or_init(|| Mutex::new(()))
   }
 
   #[async_trait]
@@ -639,6 +646,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_connect_catalog_does_not_mark_oauth_provider_connected_from_unrelated_env() {
+    let _guard = env_lock().lock().expect("env lock");
     let home = tempfile::tempdir().expect("tempdir");
 
     unsafe {
@@ -668,6 +676,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_connect_catalog_header_tag_does_not_affect_connected_status() {
+    let _guard = env_lock().lock().expect("env lock");
     // Phase 4: runtime_connected via x-cokra-connect-source header is removed.
     // Only env vars and stored credentials determine connect catalog status.
     let home = tempfile::tempdir().expect("tempdir");
@@ -720,6 +729,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_connect_catalog_stored_credentials_mark_provider_connected() {
+    let _guard = env_lock().lock().expect("env lock");
     use crate::model::auth::AuthManager;
     use crate::model::auth::Credentials;
     use crate::model::auth::StoredCredentials;

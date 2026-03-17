@@ -36,15 +36,21 @@ impl ToolHandler for ClaimReadyTaskHandler {
     let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
       FunctionCallError::Execution("claim_ready_task runtime is not configured".to_string())
     })?;
-    let task = team_runtime
+    let Some(task) = team_runtime
       .claim_ready_task(&args.task_id, runtime.thread_id.clone(), args.note)
       .await
-      .ok_or_else(|| {
-        FunctionCallError::RespondToModel(format!(
-          "task {} is not ready to be claimed",
-          args.task_id
-        ))
-      })?;
+      .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?
+    else {
+      team_runtime.note_attention(
+        &runtime.thread_id,
+        format!("task {} is not ready or assigned elsewhere", args.task_id),
+      );
+      return Err(FunctionCallError::RespondToModel(format!(
+        "task {} is not ready to be claimed by this teammate",
+        args.task_id
+      )));
+    };
+    team_runtime.clear_attention(&runtime.thread_id);
 
     if let Some(tx_event) = &runtime.tx_event {
       let _ = tx_event

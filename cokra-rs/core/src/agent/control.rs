@@ -226,9 +226,11 @@ impl AgentControl {
         nickname,
         role: Some(role),
         task: Some(task),
-        // Tradeoff: emit `Running` immediately after creation so the UI stays stable
-        // and does not need a separate transient "created" state for collab agents.
-        status: cokra_protocol::AgentStatus::Running,
+        lifecycle: cokra_protocol::CollabAgentLifecycle::Ready,
+        turn_outcome: cokra_protocol::CollabTurnOutcome::NoneYet,
+        last_turn_summary: None,
+        attention_reason: None,
+        pending_wake_count: 0,
       }))
       .await;
 

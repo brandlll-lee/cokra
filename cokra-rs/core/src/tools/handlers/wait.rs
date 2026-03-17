@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use serde::Deserialize;
 
-use cokra_protocol::AgentStatus;
+use cokra_protocol::CollabAgentLifecycle;
+use cokra_protocol::CollabAgentWaitState;
 use cokra_protocol::CollabWaitingBeginEvent;
 use cokra_protocol::CollabWaitingEndEvent;
 use cokra_protocol::EventMsg;
@@ -35,34 +36,39 @@ fn normalize_timeout_ms(value: Option<i64>) -> i64 {
   timeout_ms.clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS)
 }
 
-fn is_final_status(status: &AgentStatus) -> bool {
-  matches!(
-    status,
-    AgentStatus::Completed(_)
-      | AgentStatus::Errored(_)
-      | AgentStatus::Shutdown
-      | AgentStatus::NotFound
-  )
+fn is_wait_satisfied(
+  state: &crate::agent::team_runtime::ManagedAgentState,
+  target_generation: u64,
+) -> bool {
+  state.settled_generation >= target_generation
+    && !matches!(
+      state.lifecycle,
+      CollabAgentLifecycle::PendingInit | CollabAgentLifecycle::Busy
+    )
 }
 
 async fn wait_for_agent_status(
   team_runtime: std::sync::Arc<crate::agent::team_runtime::TeamRuntime>,
   agent_id: String,
+  target_generation: u64,
   deadline: tokio::time::Instant,
-) -> AgentStatus {
-  let Some(mut status_rx) = team_runtime.subscribe_status(&agent_id) else {
-    return AgentStatus::NotFound;
+) -> CollabAgentWaitState {
+  let Some(mut state_rx) = team_runtime.subscribe_state(&agent_id) else {
+    return CollabAgentWaitState {
+      lifecycle: CollabAgentLifecycle::NotFound,
+      ..Default::default()
+    };
   };
 
   loop {
-    let current = status_rx.borrow().clone();
-    if is_final_status(&current) {
-      return current;
+    let current = state_rx.borrow().clone();
+    if is_wait_satisfied(&current, target_generation) {
+      return current.wait_state();
     }
 
-    match tokio::time::timeout_at(deadline, status_rx.changed()).await {
+    match tokio::time::timeout_at(deadline, state_rx.changed()).await {
       Ok(Ok(())) => {}
-      Ok(Err(_)) | Err(_) => return status_rx.borrow().clone(),
+      Ok(Err(_)) | Err(_) => return state_rx.borrow().wait_state(),
     }
   }
 }
@@ -109,14 +115,21 @@ impl ToolHandler for WaitHandler {
 
     let deadline = tokio::time::Instant::now()
       + Duration::from_millis(normalize_timeout_ms(args.timeout_ms) as u64);
-    let statuses = join_all(
-      agent_ids
-        .iter()
-        .cloned()
-        .map(|agent_id| wait_for_agent_status(team_runtime.clone(), agent_id, deadline)),
-    )
+    let statuses = join_all(agent_ids.iter().cloned().map(|agent_id| {
+      let target_generation = team_runtime
+        .wait_target_generation(&agent_id)
+        .unwrap_or_default();
+      let wait_deadline = deadline.clone();
+      wait_for_agent_status(
+        team_runtime.clone(),
+        agent_id,
+        target_generation,
+        wait_deadline,
+      )
+    }))
     .await;
-    let statuses: HashMap<String, AgentStatus> = agent_ids.into_iter().zip(statuses).collect();
+    let statuses: HashMap<String, CollabAgentWaitState> =
+      agent_ids.into_iter().zip(statuses).collect();
 
     if let Some(tx_event) = &runtime.tx_event {
       let _ = tx_event

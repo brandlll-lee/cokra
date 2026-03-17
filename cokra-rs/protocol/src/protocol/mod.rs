@@ -132,6 +132,7 @@ pub enum EventMsg {
   CollabAgentSpawnEnd(CollabAgentSpawnEndEvent),
   CollabAgentInteractionBegin(CollabAgentInteractionBeginEvent),
   CollabAgentInteractionEnd(CollabAgentInteractionEndEvent),
+  CollabAgentStateChanged(CollabAgentStateChangedEvent),
   CollabWaitingBegin(CollabWaitingBeginEvent),
   CollabWaitingEnd(CollabWaitingEndEvent),
   CollabCloseBegin(CollabCloseBeginEvent),
@@ -139,9 +140,11 @@ pub enum EventMsg {
   CollabResumeBegin(CollabResumeBeginEvent),
   CollabResumeEnd(CollabResumeEndEvent),
   CollabMessagePosted(CollabMessagePostedEvent),
+  CollabMailboxDelivered(CollabMailboxDeliveredEvent),
   CollabMessagesRead(CollabMessagesReadEvent),
   CollabTaskUpdated(CollabTaskUpdatedEvent),
   CollabTeamSnapshot(CollabTeamSnapshotEvent),
+  CollabSummaryCheckpoint(CollabSummaryCheckpointEvent),
   CollabPlanSubmitted(CollabPlanSubmittedEvent),
   CollabPlanDecision(CollabPlanDecisionEvent),
 }
@@ -510,7 +513,16 @@ pub struct CollabAgentSpawnEndEvent {
   pub role: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub task: Option<String>,
-  pub status: AgentStatus,
+  #[serde(default)]
+  pub lifecycle: CollabAgentLifecycle,
+  #[serde(default)]
+  pub turn_outcome: CollabTurnOutcome,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub last_turn_summary: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub attention_reason: Option<String>,
+  #[serde(default)]
+  pub pending_wake_count: usize,
 }
 
 /// Collab agent interaction begin
@@ -535,7 +547,39 @@ pub struct CollabAgentInteractionEndEvent {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub role: Option<String>,
   pub message: String,
-  pub status: AgentStatus,
+  #[serde(default)]
+  pub lifecycle: CollabAgentLifecycle,
+  #[serde(default)]
+  pub turn_outcome: CollabTurnOutcome,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub last_turn_summary: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub attention_reason: Option<String>,
+  #[serde(default)]
+  pub pending_wake_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabAgentStateChangedEvent {
+  pub thread_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub nickname: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub role: Option<String>,
+  #[serde(default)]
+  pub lifecycle: CollabAgentLifecycle,
+  #[serde(default)]
+  pub turn_outcome: CollabTurnOutcome,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub last_turn_summary: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub attention_reason: Option<String>,
+  #[serde(default)]
+  pub pending_wake_count: usize,
+  #[serde(default)]
+  pub open_task_count: usize,
+  #[serde(default)]
+  pub unread_count: usize,
 }
 
 /// Item started event
@@ -1129,6 +1173,7 @@ pub struct TodoItemEvent {
 /// Todo list update event emitted by todo_write handler.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoUpdateEvent {
+  pub thread_id: String,
   pub todos: Vec<TodoItemEvent>,
 }
 
@@ -1244,7 +1289,8 @@ pub struct CollabAgentStatusEntry {
   pub nickname: Option<String>,
   #[serde(default, alias = "agent_type", skip_serializing_if = "Option::is_none")]
   pub role: Option<String>,
-  pub status: AgentStatus,
+  #[serde(flatten)]
+  pub state: CollabAgentWaitState,
 }
 
 // ---------- Additional Collaboration Events ----------
@@ -1266,7 +1312,7 @@ pub struct CollabWaitingEndEvent {
   pub call_id: String,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub agent_statuses: Vec<CollabAgentStatusEntry>,
-  pub statuses: std::collections::HashMap<String, AgentStatus>,
+  pub statuses: std::collections::HashMap<String, CollabAgentWaitState>,
 }
 
 /// Collab close begin event
@@ -1287,7 +1333,8 @@ pub struct CollabCloseEndEvent {
   pub receiver_nickname: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub receiver_role: Option<String>,
-  pub status: AgentStatus,
+  #[serde(default)]
+  pub lifecycle: CollabAgentLifecycle,
 }
 
 /// Collab resume begin event
@@ -1304,7 +1351,8 @@ pub struct CollabResumeEndEvent {
   pub call_id: String,
   pub sender_thread_id: String,
   pub receiver_thread_id: String,
-  pub status: AgentStatus,
+  #[serde(default)]
+  pub lifecycle: CollabAgentLifecycle,
 }
 
 /// Collab team message posted event
@@ -1321,6 +1369,27 @@ pub struct CollabMessagePostedEvent {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub recipient_role: Option<String>,
   pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabMailboxDeliveredEvent {
+  pub thread_id: String,
+  pub sender_thread_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub sender_nickname: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub sender_role: Option<String>,
+  pub recipient_thread_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub recipient_nickname: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub recipient_role: Option<String>,
+  pub message: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub task_id: Option<String>,
+  pub delivery_mode: TeamMessageDeliveryMode,
+  pub kind: TeamMessageKind,
+  pub created_at: i64,
 }
 
 /// Collab team messages read event
@@ -1346,6 +1415,13 @@ pub struct CollabTaskUpdatedEvent {
 pub struct CollabTeamSnapshotEvent {
   pub actor_thread_id: String,
   pub snapshot: TeamSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabSummaryCheckpointEvent {
+  pub thread_id: String,
+  pub lines: Vec<String>,
+  pub fingerprint: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

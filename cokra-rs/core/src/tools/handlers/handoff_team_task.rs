@@ -8,6 +8,7 @@ use crate::agent::team_runtime::runtime_for_thread;
 use crate::tools::context::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::team_selectors::resolve_required_agent_selector;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 
@@ -38,10 +39,12 @@ impl ToolHandler for HandoffTeamTaskHandler {
     let team_runtime = runtime_for_thread(&runtime.thread_id).ok_or_else(|| {
       FunctionCallError::Execution("handoff_team_task runtime is not configured".to_string())
     })?;
+    let to_thread_id =
+      resolve_required_agent_selector(&team_runtime, &args.to_thread_id, "to_thread_id")?;
     let task = team_runtime
       .handoff_task(
         &args.task_id,
-        args.to_thread_id,
+        to_thread_id,
         args.note,
         args.review_mode.unwrap_or(false),
       )

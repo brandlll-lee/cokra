@@ -28,6 +28,7 @@ use crate::bottom_pane::BottomPane;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
+use crate::history_cell::TodoUpdateCell;
 use crate::history_cell::UserHistoryCell;
 use crate::render::Insets;
 use crate::render::renderable::FlexRenderable;
@@ -145,6 +146,19 @@ impl ChatWidget {
     self.transcript.flush_active_exec_cell(&self.app_event_tx);
   }
 
+  fn flush_active_exec_cell_if_inactive(&mut self) {
+    if let Some(cell) = self
+      .transcript
+      .active_exec_cell
+      .as_ref()
+      .and_then(|cell| cell.as_any().downcast_ref::<crate::exec_cell::ExecCell>())
+      && cell.is_active()
+    {
+      return;
+    }
+    self.flush_active_exec_cell();
+  }
+
   /// Like `flush_active_exec_cell`, but skips the flush when the active cell
   /// is an exploring cell that has been visible for less than
   /// `MIN_EXPLORING_VISIBLE_MS`. This ensures users see at least a brief
@@ -166,6 +180,27 @@ impl ChatWidget {
     self.flush_active_exec_cell();
   }
 
+  /// Update the live todo widget in the viewport. Called on each TodoUpdate
+  /// event instead of creating a new static history cell. The widget is
+  /// flushed to scrollback at turn end via `flush_all_active_cells`.
+  pub(crate) fn set_active_todo(&mut self, todos: Vec<cokra_protocol::TodoItemEvent>) {
+    if todos.is_empty() {
+      if self.transcript.active_todo.take().is_some() {
+        self.bump_active_cell_revision();
+      }
+      return;
+    }
+    match self.transcript.active_todo.as_mut() {
+      Some(cell) => {
+        cell.todos = todos;
+      }
+      None => {
+        self.transcript.active_todo = Some(TodoUpdateCell::new(todos));
+      }
+    }
+    self.bump_active_cell_revision();
+  }
+
   pub(crate) fn add_to_history(&mut self, cell: impl HistoryCell + 'static) {
     self.add_boxed_history(Box::new(cell));
   }
@@ -175,7 +210,7 @@ impl ChatWidget {
   }
 
   fn add_boxed_history(&mut self, cell: Box<dyn HistoryCell>) {
-    self.flush_active_exec_cell();
+    self.flush_active_exec_cell_if_inactive();
     self.app_event_tx.insert_boxed_history_cell(cell);
   }
 
@@ -383,6 +418,40 @@ impl ChatWidget {
     self.bottom_pane.set_task_running(running);
     if running {
       self.sync_status_indicator();
+    }
+  }
+
+  pub(crate) fn set_collab_compact_mode(&mut self, enabled: bool) {
+    if self.session.collab_compact_mode == enabled {
+      return;
+    }
+    self.session.collab_compact_mode = enabled;
+  }
+
+  pub(crate) fn set_collab_working_summary_lines(&mut self, lines: Option<Vec<Line<'static>>>) {
+    match lines {
+      Some(lines) if !lines.is_empty() => {
+        if let Some(cell) = self
+          .transcript
+          .active_collab_summary
+          .as_mut()
+          .and_then(|cell| cell.as_any_mut().downcast_mut::<AgentMessageCell>())
+        {
+          if cell.lines == lines {
+            return;
+          }
+          cell.replace_lines(lines);
+        } else {
+          self.transcript.active_collab_summary =
+            Some(Box::new(AgentMessageCell::new(lines, true)));
+        }
+        self.bump_active_cell_revision();
+      }
+      _ => {
+        if self.transcript.active_collab_summary.take().is_some() {
+          self.bump_active_cell_revision();
+        }
+      }
     }
   }
 
@@ -671,21 +740,77 @@ impl ChatWidget {
 
   fn as_renderable(&self) -> RenderableItem<'_> {
     let mut live_content = FlexRenderable::new();
-    let has_exploring_exec = self
+
+    // Detect whether the active exec cell is an exploring cell.
+    let active_exploring = self
       .transcript
       .active_exec_cell
       .as_ref()
       .and_then(|cell| cell.as_any().downcast_ref::<crate::exec_cell::ExecCell>())
-      .is_some_and(crate::exec_cell::ExecCell::is_exploring_cell);
-    if let Some(cell) = &self.transcript.active_agent_preview {
+      .filter(|c| c.is_exploring_cell());
+    let has_exploring = active_exploring.is_some()
+      || !self.transcript.exploring_accumulator.is_empty();
+
+    // 1. Collab summary (persistent, always at top of live area)
+    if let Some(cell) = &self.transcript.active_collab_summary {
       live_content.push(
-        if has_exploring_exec { 1 } else { 0 },
+        0,
         RenderableItem::Borrowed(cell as &dyn Renderable).inset(Insets::tlbr(1, 0, 0, 0)),
       );
     }
-    if let Some(cell) = &self.transcript.active_exec_cell {
+
+    // 2. Exploring summary OR agent_preview + exec_cell
+    if has_exploring {
+      // Render a one-line exploring summary from accumulator + active cell.
+      let mut counts = self.transcript.exploring_accumulator.counts();
+      if let Some(exec) = active_exploring {
+        for call in exec.iter_calls().filter(|c| c.output.is_some()) {
+          counts.add(&call.tool_name);
+        }
+      }
+      if !counts.is_empty() {
+        // Summary replaces the detailed exploring cell view.
+        let summary_cell: Box<dyn HistoryCell> =
+          Box::new(PlainHistoryCell::new(vec![counts.to_summary_line()]));
+        live_content.push(
+          0,
+          RenderableItem::Owned(Box::new(summary_cell)).inset(Insets::tlbr(1, 0, 0, 0)),
+        );
+      } else if let Some(cell) = &self.transcript.active_exec_cell {
+        // No completed counts yet (e.g. first exploring call still running):
+        // show the exploring cell directly (spinner + "Exploring").
+        live_content.push(
+          0,
+          RenderableItem::Borrowed(cell as &dyn Renderable).inset(Insets::tlbr(1, 0, 0, 0)),
+        );
+      }
+      // Agent preview gets flex=1 when exploring (it's the main content).
+      if let Some(cell) = &self.transcript.active_agent_preview {
+        live_content.push(
+          1,
+          RenderableItem::Borrowed(cell as &dyn Renderable).inset(Insets::tlbr(1, 0, 0, 0)),
+        );
+      }
+    } else {
+      // No exploring: normal layout.
+      if let Some(cell) = &self.transcript.active_agent_preview {
+        live_content.push(
+          0,
+          RenderableItem::Borrowed(cell as &dyn Renderable).inset(Insets::tlbr(1, 0, 0, 0)),
+        );
+      }
+      if let Some(cell) = &self.transcript.active_exec_cell {
+        live_content.push(
+          1,
+          RenderableItem::Borrowed(cell as &dyn Renderable).inset(Insets::tlbr(1, 0, 0, 0)),
+        );
+      }
+    }
+
+    // 3. Todo (persistent state indicator)
+    if let Some(cell) = &self.transcript.active_todo {
       live_content.push(
-        if has_exploring_exec { 0 } else { 1 },
+        0,
         RenderableItem::Borrowed(cell as &dyn Renderable).inset(Insets::tlbr(1, 0, 0, 0)),
       );
     }
@@ -831,5 +956,32 @@ mod tests {
       rendered.contains("? for shortcuts"),
       "expected composer shortcuts hint to remain visible: {rendered}"
     );
+  }
+
+  #[test]
+  fn inline_render_shows_live_collab_summary_block() {
+    let (tx, _rx) = unbounded_channel();
+    let sender = AppEventSender::new(tx);
+    let mut widget = ChatWidget::new(
+      sender,
+      FrameRequester::test_dummy(),
+      false,
+      StreamRenderMode::ScrollbackFirst,
+    );
+    widget.transcript.active_collab_summary = Some(Box::new(AgentMessageCell::new(
+      vec![
+        Line::from("Agent teams working..."),
+        Line::from(" ├─ @beta [general]"),
+        Line::from(" │  ⎿ implementing b.txt"),
+        Line::from(" └─ @alpha [general]"),
+        Line::from("    ⎿ reviewing task-a"),
+      ],
+      true,
+    )));
+
+    let rendered = render_chat_widget(&widget, 80, 12);
+    assert!(rendered.contains("@beta [general]"));
+    assert!(rendered.contains("implementing b.txt"));
+    assert!(rendered.contains("reviewing task-a"));
   }
 }

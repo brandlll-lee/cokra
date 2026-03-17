@@ -15,11 +15,35 @@ impl ChatWidget {
     match event {
       EventMsg::CollabAgentSpawnBegin(_) => {}
       EventMsg::CollabAgentSpawnEnd(e) => {
+        if self.session.collab_compact_mode {
+          return true;
+        }
         self.add_to_history_preserving_exec(multi_agents::spawn_end(e.clone()));
       }
       EventMsg::CollabAgentInteractionBegin(_) => {}
       EventMsg::CollabAgentInteractionEnd(e) => {
+        if self.session.collab_compact_mode {
+          return true;
+        }
         self.add_to_history_preserving_exec(multi_agents::interaction_end(e.clone()));
+      }
+      EventMsg::CollabMailboxDelivered(e) => {
+        if self.session.collab_compact_mode {
+          return true; // mailbox info is reflected in active_collab_summary
+        }
+        self.add_to_history_preserving_exec(multi_agents::mailbox_delivered(e.clone()));
+      }
+      EventMsg::CollabAgentStateChanged(e) => {
+        if self.session.collab_compact_mode {
+          if let Some(reason) = e.attention_reason.as_deref() {
+            self.add_to_history_preserving_exec(PlainHistoryCell::new(vec![Line::from(format!(
+              "● @{} attention: {}",
+              e.nickname.as_deref().unwrap_or("agent"),
+              reason
+            ))]));
+          }
+          return true;
+        }
       }
       EventMsg::ItemStarted(_)
       | EventMsg::ItemCompleted(_)
@@ -305,9 +329,7 @@ impl ChatWidget {
         self.add_to_history_preserving_exec(PlainHistoryCell::new(lines));
       }
       EventMsg::TodoUpdate(todo_event) => {
-        self.add_to_history_preserving_exec(crate::history_cell::TodoUpdateCell::new(
-          todo_event.todos.clone(),
-        ));
+        self.set_active_todo(todo_event.todos.clone());
       }
       EventMsg::EnteredReviewMode(e) => {
         let hint = e
@@ -351,28 +373,62 @@ impl ChatWidget {
           return true;
         }
         self.session.last_wait_end_fingerprint = Some(fingerprint);
+        if self.session.collab_compact_mode {
+          return true;
+        }
         self.add_to_history_preserving_exec(multi_agents::waiting_end(e.clone()));
       }
       EventMsg::CollabCloseBegin(_) => {}
       EventMsg::CollabCloseEnd(e) => {
+        if self.session.collab_compact_mode {
+          return true;
+        }
         self.add_to_history_preserving_exec(multi_agents::close_end(e.clone()));
       }
       EventMsg::CollabMessagePosted(e) => {
+        if self.session.collab_compact_mode {
+          return true;
+        }
         self.add_to_history_preserving_exec(multi_agents::message_posted(e.clone()));
       }
       EventMsg::CollabMessagesRead(e) => {
+        if self.session.collab_compact_mode {
+          return true;
+        }
         self.add_to_history_preserving_exec(multi_agents::messages_read(e.clone()));
       }
       EventMsg::CollabTaskUpdated(e) => {
+        if self.session.collab_compact_mode {
+          return true;
+        }
         self.add_to_history_preserving_exec(multi_agents::task_updated(e.clone()));
       }
       EventMsg::CollabTeamSnapshot(e) => {
+        if self.session.collab_compact_mode {
+          return true;
+        }
         self.add_to_history_preserving_exec(multi_agents::team_snapshot(e.clone()));
       }
+      // Design note: CollabSummaryCheckpoint flows through two independent paths:
+      // 1. This handler → main chat history cell (suppressed in compact mode)
+      // 2. app.rs push_local_thread_event → transcript/mod.rs per-thread store
+      // Suppressing path 1 does not affect path 2's persistence logic.
+      EventMsg::CollabSummaryCheckpoint(e) => {
+        if self.session.collab_compact_mode {
+          return true;
+        }
+        self.add_to_history_preserving_exec(multi_agents::summary_checkpoint(e.clone()));
+      }
       EventMsg::CollabPlanSubmitted(e) => {
+        if self.session.collab_compact_mode {
+          return true;
+        }
         self.add_to_history_preserving_exec(multi_agents::plan_submitted(e.clone()));
       }
       EventMsg::CollabPlanDecision(e) => {
+        if self.session.collab_compact_mode {
+          return true;
+        }
         self.add_to_history_preserving_exec(multi_agents::plan_decision(e.clone()));
       }
       EventMsg::CollabResumeBegin(_) | EventMsg::CollabResumeEnd(_) => {}
@@ -401,30 +457,18 @@ fn wait_end_fingerprint(ev: &cokra_protocol::CollabWaitingEndEvent) -> u64 {
       entry.thread_id.hash(&mut hasher);
       entry.nickname.hash(&mut hasher);
       entry.role.hash(&mut hasher);
-      hash_agent_status(&entry.status, &mut hasher);
+      hash_agent_status(&entry.state, &mut hasher);
     }
   }
   hasher.finish()
 }
 
-fn hash_agent_status(status: &cokra_protocol::AgentStatus, hasher: &mut DefaultHasher) {
-  match status {
-    cokra_protocol::AgentStatus::PendingInit => "PendingInit".hash(hasher),
-    cokra_protocol::AgentStatus::Running => "Running".hash(hasher),
-    cokra_protocol::AgentStatus::Completed(message) => {
-      "Completed".hash(hasher);
-      // Tradeoff: hash the full message string so repeated `wait` calls that return the
-      // same content dedupe correctly. This can cost some CPU for very large outputs,
-      // but keeps UI stable and avoids hiding real changes.
-      message.hash(hasher);
-    }
-    cokra_protocol::AgentStatus::Errored(message) => {
-      "Errored".hash(hasher);
-      message.hash(hasher);
-    }
-    cokra_protocol::AgentStatus::Shutdown => "Shutdown".hash(hasher),
-    cokra_protocol::AgentStatus::NotFound => "NotFound".hash(hasher),
-  }
+fn hash_agent_status(status: &cokra_protocol::CollabAgentWaitState, hasher: &mut DefaultHasher) {
+  status.lifecycle.hash(hasher);
+  status.turn_outcome.hash(hasher);
+  status.last_turn_summary.hash(hasher);
+  status.attention_reason.hash(hasher);
+  status.pending_wake_count.hash(hasher);
 }
 
 #[cfg(test)]

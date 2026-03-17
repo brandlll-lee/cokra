@@ -1,5 +1,5 @@
-pub mod activate_tools;
 pub mod ack_team_message;
+pub mod activate_tools;
 pub mod active_tool_status;
 pub mod add_task_dependency;
 pub mod apply_patch;
@@ -19,6 +19,7 @@ pub mod deactivate_tools;
 pub mod diagnostics;
 pub mod dynamic;
 pub mod edit_file;
+pub mod force_release_lease;
 pub mod glob;
 pub mod grep_files;
 pub mod handoff_team_task;
@@ -26,9 +27,9 @@ pub mod inspect_tool;
 pub mod install_integration;
 pub mod integration_status;
 pub mod list_dir;
-pub mod list_ready_tasks;
 pub mod list_mcp_resource_templates;
 pub mod list_mcp_resources;
+pub mod list_ready_tasks;
 pub mod lsp;
 pub mod mcp;
 pub mod plan;
@@ -36,8 +37,9 @@ pub mod read_file;
 pub mod read_many_files;
 pub mod read_mcp_resource;
 pub mod read_team_messages;
-pub mod request_user_input;
+pub mod release_task_leases;
 pub mod remove_task_dependency;
+pub mod request_user_input;
 pub mod reset_active_tools;
 pub mod save_memory;
 pub mod send_input;
@@ -47,11 +49,12 @@ pub mod shell;
 pub mod skill;
 pub mod spawn_agent;
 pub mod submit_team_plan;
+pub mod team_selectors;
 pub mod team_status;
 pub mod todo;
 pub mod tool_audit_log;
-pub mod update_team_task;
 pub mod unblock_task;
+pub mod update_team_task;
 pub mod view_image;
 pub mod wait;
 pub mod watch_team_inbox;
@@ -199,6 +202,14 @@ pub fn register_builtin_handlers(
   registry.register_handler(
     "update_team_task",
     Arc::new(update_team_task::UpdateTeamTaskHandler),
+  );
+  registry.register_handler(
+    "release_task_leases",
+    Arc::new(release_task_leases::ReleaseTaskLeasesHandler),
+  );
+  registry.register_handler(
+    "force_release_lease",
+    Arc::new(force_release_lease::ForceReleaseLeaseHandler),
   );
   registry.register_handler(
     "add_task_dependency",

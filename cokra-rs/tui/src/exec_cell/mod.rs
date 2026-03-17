@@ -8,6 +8,7 @@ pub(crate) mod render;
 
 pub(crate) use model::ExecCall;
 pub(crate) use model::ExecCell;
+pub(crate) use render::is_ui_handled_tool;
 pub(crate) use render::new_active_exec_command;
 
 /// Braille spinner frames matching opencode's spinner component.

@@ -14,6 +14,7 @@ use crate::exec_policy::eval_exec_approval;
 use crate::exec_policy::eval_shell_command_approval;
 use crate::session::Session;
 use crate::tools::command_intent::CommandIntent;
+use crate::tools::command_intent::CommandMutationClass;
 use crate::tools::events::ToolEmitter;
 use crate::tools::events::ToolEventCtx;
 use crate::tools::events::ToolEventStage;
@@ -175,10 +176,11 @@ impl ToolRouter {
     run_ctx: ToolRunContext,
   ) -> Result<ToolOutput, FunctionCallError> {
     self.validate_call(&call)?;
+    let spec = self.registry.get_spec(&call.tool_name).cloned();
 
     let mut runtime = RegistryToolRuntime::new(
       Arc::clone(&self.registry),
-      self.registry.get_spec(&call.tool_name).cloned(),
+      spec.clone(),
       run_ctx.approval_policy.clone(),
       run_ctx.sandbox_policy.clone(),
       self.exec_config,
@@ -227,6 +229,23 @@ impl ToolRouter {
     };
     if emit_exec_events && !run_ctx.begin_already_emitted {
       emitter.begin(event_ctx.clone()).await;
+    }
+    if let Err(err) = enforce_ownership_lock_gate(
+      self.registry.as_ref(),
+      spec.as_ref(),
+      &call,
+      &run_ctx.cwd,
+      &run_ctx.thread_id,
+    )
+    .await
+    {
+      let fc_err = FunctionCallError::Execution(err);
+      if emit_exec_events {
+        emitter
+          .emit(event_ctx.clone(), ToolEventStage::Failure(fc_err.clone()))
+          .await;
+      }
+      return Err(fc_err);
     }
 
     let result = self.orchestrator.run(&mut runtime, &call, &tool_ctx).await;
@@ -349,6 +368,8 @@ pub(crate) fn should_emit_exec_events(tool_name: &str) -> bool {
       | "remove_task_dependency"
       | "block_task"
       | "unblock_task"
+      | "release_task_leases"
+      | "force_release_lease"
       | "handoff_team_task"
       | "submit_team_plan"
       | "approve_team_plan"
@@ -605,6 +626,196 @@ fn command_approval_argv(command: &str, cwd: &Path) -> Vec<String> {
   intent.canonical_command
 }
 
+fn exec_command_intent(req: &ToolCall, cwd: &Path) -> Option<CommandIntent> {
+  if canonical_exec_tool_name(&req.tool_name) == Some(SHELL_TOOL_NAME) {
+    let command = req.args.get("command").and_then(Value::as_str)?;
+    let workdir = req
+      .args
+      .get("workdir")
+      .and_then(Value::as_str)
+      .map(PathBuf::from)
+      .unwrap_or_else(|| cwd.to_path_buf());
+    return Some(CommandIntent::from_command(command, &workdir));
+  }
+
+  if canonical_exec_tool_name(&req.tool_name) == Some(UNIFIED_EXEC_TOOL_NAME)
+    && let Ok(params) = serde_json::from_value::<ShellToolCallParams>(req.args.clone())
+  {
+    let workdir = params
+      .workdir
+      .as_deref()
+      .map(PathBuf::from)
+      .unwrap_or_else(|| cwd.to_path_buf());
+    return Some(CommandIntent::from_argv(&params.command, &workdir));
+  }
+
+  None
+}
+
+fn mutation_paths_for_call(req: &ToolCall, cwd: &Path) -> Vec<String> {
+  if let Some(intent) = exec_command_intent(req, cwd) {
+    return intent
+      .path_intents
+      .into_iter()
+      .map(|intent| intent.path)
+      .collect();
+  }
+
+  match req.tool_name.as_str() {
+    "write_file" | "edit_file" => req
+      .args
+      .get("file_path")
+      .and_then(Value::as_str)
+      .map(|path| normalize_lock_path(path, cwd))
+      .into_iter()
+      .collect(),
+    "apply_patch" => req
+      .args
+      .get("patch")
+      .and_then(Value::as_str)
+      .map(|patch| parse_apply_patch_paths(patch, cwd))
+      .unwrap_or_default(),
+    _ => Vec::new(),
+  }
+}
+
+fn exec_requires_explicit_lock_paths(req: &ToolCall, cwd: &Path) -> bool {
+  let Some(intent) = exec_command_intent(req, cwd) else {
+    return false;
+  };
+  matches!(
+    intent.mutation_class,
+    CommandMutationClass::WritesFiles
+      | CommandMutationClass::ChangesPermissions
+      | CommandMutationClass::Destructive
+  ) && intent.path_intents.is_empty()
+}
+
+fn lock_gate_exempt(tool_name: &str) -> bool {
+  matches!(
+    tool_name,
+    "approve_team_plan"
+      | "submit_team_plan"
+      | "team_status"
+      | "read_team_messages"
+      | "watch_team_inbox"
+      | "ack_team_message"
+      | "send_team_message"
+      | "send_team_nudge"
+      | "create_team_task"
+      | "update_team_task"
+      | "assign_team_task"
+      | "claim_team_task"
+      | "claim_next_team_task"
+      | "claim_team_messages"
+      | "handoff_team_task"
+      | "claim_ready_task"
+      | "list_ready_tasks"
+      | "add_task_dependency"
+      | "remove_task_dependency"
+      | "block_task"
+      | "unblock_task"
+      | "release_task_leases"
+      | "force_release_lease"
+      | "cleanup_team"
+      | "wait"
+      | "close_agent"
+  )
+}
+
+fn is_mutating_call(
+  registry: &ToolRegistry,
+  spec: Option<&ToolSpec>,
+  req: &ToolCall,
+  cwd: &Path,
+) -> bool {
+  let invocation = ToolInvocation {
+    id: req.call_id.clone(),
+    name: req.tool_name.clone(),
+    payload: invocation_payload_for_call(req),
+    cwd: cwd.to_path_buf(),
+    runtime: None,
+  };
+  let exec_mutates_state = exec_command_intent(req, cwd)
+    .is_some_and(|intent| !matches!(intent.mutation_class, CommandMutationClass::ReadOnly));
+  let declared_mutates_state = spec.map(|spec| spec.mutates_state).unwrap_or(false);
+  declared_mutates_state || exec_mutates_state || registry.is_mutating(&invocation).unwrap_or(false)
+}
+
+async fn enforce_ownership_lock_gate(
+  registry: &ToolRegistry,
+  spec: Option<&ToolSpec>,
+  req: &ToolCall,
+  cwd: &Path,
+  thread_id: &str,
+) -> Result<(), String> {
+  if !is_mutating_call(registry, spec, req, cwd) || lock_gate_exempt(req.tool_name.as_str()) {
+    return Ok(());
+  }
+  let Some(team_runtime) = runtime_for_thread(thread_id) else {
+    return Ok(());
+  };
+  if exec_requires_explicit_lock_paths(req, cwd) {
+    return Err(
+      "ownership lock gate requires explicit mutation paths; use write_file/edit_file/apply_patch or a command with explicit file arguments"
+        .to_string(),
+    );
+  }
+  let mutation_paths = mutation_paths_for_call(req, cwd);
+  if mutation_paths.is_empty() {
+    return Ok(());
+  }
+  team_runtime
+    .ensure_mutation_paths_owned(thread_id, &mutation_paths)
+    .await
+    .map_err(|err| err.to_string())
+}
+
+fn normalize_lock_path(path: &str, cwd: &Path) -> String {
+  let path_buf = PathBuf::from(path);
+  let joined = if path_buf.is_absolute() {
+    path_buf
+  } else {
+    cwd.join(path_buf)
+  };
+  lexical_normalize_path(joined).display().to_string()
+}
+
+fn parse_apply_patch_paths(patch: &str, cwd: &Path) -> Vec<String> {
+  let mut paths = Vec::new();
+  for line in patch.lines() {
+    let path = line
+      .strip_prefix("*** Update File: ")
+      .or_else(|| line.strip_prefix("*** Add File: "))
+      .or_else(|| line.strip_prefix("*** Delete File: "))
+      .or_else(|| line.strip_prefix("*** Move to: "));
+    if let Some(path) = path {
+      paths.push(normalize_lock_path(path.trim(), cwd));
+    }
+  }
+  paths.sort();
+  paths.dedup();
+  paths
+}
+
+fn lexical_normalize_path(path: PathBuf) -> PathBuf {
+  use std::path::Component;
+
+  let mut normalized = PathBuf::new();
+  for component in path.components() {
+    match component {
+      Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+      Component::RootDir => normalized.push(std::path::MAIN_SEPARATOR.to_string()),
+      Component::CurDir => {}
+      Component::ParentDir => {
+        normalized.pop();
+      }
+      Component::Normal(segment) => normalized.push(segment),
+    }
+  }
+  normalized
+}
+
 #[async_trait]
 impl Approvable<ToolCall> for RegistryToolRuntime {
   type ApprovalKey = RegistryApprovalKey;
@@ -752,17 +963,6 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
     attempt: &SandboxAttempt<'_>,
     ctx: &ToolCtx<'_>,
   ) -> Result<ToolOutput, ToolError> {
-    if canonical_exec_tool_name(&req.tool_name).is_some() {
-      return run_shell_tool_call(
-        req,
-        self.approval_policy.clone(),
-        attempt,
-        ctx,
-        self.exec_config,
-      )
-      .await;
-    }
-
     // 1:1 codex: thread session-level cwd into ToolInvocation so handlers
     // resolve paths against the correct working directory.
     let invocation = ToolInvocation {
@@ -788,14 +988,13 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
         })
       }),
     };
-
-    let declared_mutates_state = self
-      .spec
-      .as_ref()
-      .map(|spec| spec.mutates_state)
-      .unwrap_or(false);
-    let is_mutating =
-      declared_mutates_state || self.registry.is_mutating(&invocation).unwrap_or(false);
+    let is_exec_tool = canonical_exec_tool_name(&req.tool_name).is_some();
+    let is_mutating = is_mutating_call(
+      self.registry.as_ref(),
+      self.spec.as_ref(),
+      req,
+      &ctx.turn.cwd,
+    );
     if is_mutating
       && let Some(runtime) = &invocation.runtime
       && let Some(team_runtime) = runtime_for_thread(&runtime.thread_id)
@@ -823,6 +1022,8 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
           | "remove_task_dependency"
           | "block_task"
           | "unblock_task"
+          | "release_task_leases"
+          | "force_release_lease"
           | "cleanup_team"
           | "wait"
           | "close_agent"
@@ -832,6 +1033,29 @@ impl ToolRuntime<ToolCall, ToolOutput> for RegistryToolRuntime {
         "team plan approval required before mutating work; submit a plan and wait for approval"
           .to_string(),
       ));
+    }
+
+    if let Some(runtime) = &invocation.runtime {
+      enforce_ownership_lock_gate(
+        self.registry.as_ref(),
+        self.spec.as_ref(),
+        req,
+        &ctx.turn.cwd,
+        &runtime.thread_id,
+      )
+      .await
+      .map_err(ToolError::Execution)?;
+    }
+
+    if is_exec_tool {
+      return run_shell_tool_call(
+        req,
+        self.approval_policy.clone(),
+        attempt,
+        ctx,
+        self.exec_config,
+      )
+      .await;
     }
 
     // 1:1 codex: use dispatch_async to support async handlers (e.g. shell).

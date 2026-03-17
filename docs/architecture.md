@@ -140,11 +140,18 @@ Main Agent (Orchestrator)
 
 ### Agent Tools
 
-- `spawn_agent` - Create a sub-agent
-- `send_input` - Send messages to agents
-- `wait` - Wait for agent completion
-- `close_agent` - Terminate agent
+- `spawn_agent` - Create a persistent teammate thread
+- `send_input` - Queue follow-up work for a teammate
+- `wait` - Wait for teammates to settle their scheduled work batch
+- `close_agent` - Terminate a teammate thread
 - `resume_agent` - Resume paused agent
+
+### Team Runtime Model
+
+- Teammates have a runtime lifecycle (`PendingInit`, `Ready`, `Busy`, `Error`, `Shutdown`, `NotFound`) that is separate from the outcome of their last turn.
+- Shared work is coordinated through a common task graph, durable mailbox, and ownership leases instead of ad hoc text-only coordination.
+- Task assignment is strong by default: an assigned task must be explicitly reassigned or overridden before another teammate claims it.
+- Mailbox traffic and task handoffs can wake an idle teammate automatically; the orchestrator should not need to send a second manual nudge just to resume scheduled work.
 
 ## Tool System
 
